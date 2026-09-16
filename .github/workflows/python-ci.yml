@@ -5,6 +5,11 @@ on:
     branches: [ main, develop ]
   pull_request:
     branches: [ main ]
+  schedule:
+    # Run weekly on Mondays at 06:00 UTC so staleness that develops while a
+    # branch is idle is still caught (a PR-only check would miss it).
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
 
 jobs:
   lint:
@@ -147,3 +152,27 @@ jobs:
         if [ -s all_requirements.txt ]; then
           safety check --file=all_requirements.txt --output=text || echo "Vulnerabilities found"
         fi
+
+  pricing-staleness:
+    name: Check pricing.json staleness
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    # Non-blocking by default (mode=warn) per the AI review's suggestion.
+    # To make this a hard failure, set STALENESS_MODE=fail below or in the
+    # repository's Actions variables. The threshold is configurable via
+    # STALENESS_THRESHOLD_MONTHS without editing the script's logic.
+    - name: Check pricing.json as_of freshness
+      env:
+        STALENESS_THRESHOLD_MONTHS: '6'
+        STALENESS_MODE: 'warn'
+      run: |
+        python projects/05-llm-cost-comparison/scripts/check_pricing_staleness.py
