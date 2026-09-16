@@ -1125,6 +1125,20 @@ def test_run_non_interactive_resolves_relative_pricing_file_against_config_dir(
 # --------------------------------------------------------------------------
 
 
+def test_main_version_flag_prints_version_and_exits_zero(capsys):
+    # argparse's "version" action prints to stdout and raises SystemExit(0).
+    # The program name comes from argparse's %(prog)s, which is derived from
+    # sys.argv[0] (e.g. "__main__.py" under pytest), so assert the structure
+    # rather than a hard-coded filename.
+    with pytest.raises(SystemExit) as exc_info:
+        m.main(["--version"])
+    assert exc_info.value.code == 0
+    out = capsys.readouterr().out
+    assert out.endswith(f" {m.VERSION}\n")
+    prog_name = out.rsplit(" ", 1)[0]
+    assert prog_name  # non-empty program name
+
+
 def test_main_non_interactive_export_without_path_defaults(
     tmp_path: Path, monkeypatch, capsys
 ):
