@@ -156,7 +156,13 @@ requests/day and token counts behind each one.
     alike — is displayed and exported in GBP** whenever you choose GBP, not
     just the local electricity figure.
   - The non-interactive config still takes a single `power_watts` — pick
-    whichever basis applies to your situation.
+    whichever basis applies to your situation. Unlike the interactive flow,
+    it models **only one** power basis per run: it can't show "machine
+    already on for other reasons" (extra draw) and "machine only powered on
+    to run this" (whole-system draw) side by side. If you want both bases
+    compared in one table, run the script twice with two separate configs —
+    one with `power_watts` set to the extra-draw figure and one with it set
+    to the whole-system figure — and compare the two exports.
 - **When local can't keep up**: if the workload needs more compute-hours per
   month than actually exist in a month (a slow local setup can't keep up
   with a high-volume workload in real time), the *whole scenario* — local
