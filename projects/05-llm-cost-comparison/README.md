@@ -96,11 +96,11 @@ How much the two differ depends on where the endpoint lives:
 
 The current code only reports wall-clock time. To get generation-only timing
 for a hosted model, you'd need to instrument the server response — for
-example, OpenAI's API surfaces a `time_per_output_token` value in its
-response headers, which this script does not currently read or display. If
-you need that figure, capture it yourself from the raw response (or the
-provider's usage dashboard) rather than relying on the benchmark's
-wall-clock number.
+example, some OpenAI-compatible servers expose timing metadata (for example,
+in response headers or in the final streaming chunk), which this script does
+not currently read or display. If you need that figure, capture it yourself
+from the raw response (or the provider's usage dashboard) rather than
+relying on the benchmark's wall-clock number.
 
 ## Traffic scenarios (workload presets)
 
