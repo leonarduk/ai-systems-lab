@@ -287,6 +287,66 @@ def test_build_hosted_rows_raises_config_error_on_malformed_pricing():
         m.build_hosted_rows(w, pricing)
 
 
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        None,  # missing
+        0,  # zero
+        -1.0,  # negative
+        "1.0",  # non-numeric
+        float("nan"),  # NaN
+        float("inf"),  # inf
+        True,  # bool (int subclass)
+    ],
+)
+def test_build_hosted_rows_direct_call_rejects_invalid_price(bad_value):
+    # build_hosted_rows is called directly here with a hand-constructed
+    # pricing dict that bypassed load_pricing. The guard must still raise
+    # ConfigError with the established message rather than silently
+    # computing a cost from an invalid price.
+    pricing = {
+        "providers": {
+            "claude": {
+                "models": {
+                    "opus-5": {
+                        "display_name": "Claude Opus 5",
+                        "input_per_million": bad_value,
+                        "output_per_million": 25.0,
+                    }
+                }
+            }
+        }
+    }
+    w = m.Workload(1000, 500, 300)
+    with pytest.raises(
+        m.ConfigError,
+        match=r"pricing model 'claude/opus-5' is missing a numeric input_per_million",
+    ):
+        m.build_hosted_rows(w, pricing)
+
+
+def test_build_hosted_rows_direct_call_rejects_invalid_output_price():
+    pricing = {
+        "providers": {
+            "claude": {
+                "models": {
+                    "opus-5": {
+                        "display_name": "Claude Opus 5",
+                        "input_per_million": 5.0,
+                        "output_per_million": 0,
+                    }
+                }
+            }
+        }
+    }
+    w = m.Workload(1000, 500, 300)
+    with pytest.raises(
+        m.ConfigError,
+        match=r"pricing model 'claude/opus-5' is missing a numeric output_per_million",
+    ):
+        m.build_hosted_rows(w, pricing)
+
+
 # --------------------------------------------------------------------------
 # Real pricing.json shipped alongside the script
 # --------------------------------------------------------------------------
