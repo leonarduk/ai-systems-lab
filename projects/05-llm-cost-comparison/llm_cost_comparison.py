@@ -1693,7 +1693,9 @@ def interactive_local_setup() -> tuple:
         )
         power_watts_extra = prompt_float(
             "Extra power draw while generating — GPU/CPU load above idle (W), "
-            "for when the machine is already on for other reasons",
+            "for when the machine is already on for other reasons "
+            "(the additional watts the GPU/CPU pull when active, on top of "
+            "the idle system draw)",
             default=extra_default,
             minimum=0,
         )
@@ -1716,7 +1718,9 @@ def interactive_local_setup() -> tuple:
         )
         power_watts_total = prompt_float(
             "Total system power draw while running — GPU plus the rest of the PC "
-            "(W), for when it's only powered on to run this",
+            "(W), for when it's only powered on to run this "
+            "(the entire system's power consumption while the GPU is under load, "
+            "including the extra draw above)",
             default=power_watts_extra + rest_of_system_w,
             minimum=0,
         )
