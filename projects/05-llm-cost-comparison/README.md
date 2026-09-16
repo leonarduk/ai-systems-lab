@@ -187,9 +187,16 @@ requests/day and token counts behind each one.
 
 Hosted pricing changes over time. Edit `pricing.json` directly, or run
 `python llm_cost_comparison.py --update-pricing` when you explicitly want the
-script to refresh the shipped cache from best-effort live sources. Normal
-interactive and non-interactive comparisons only read the file; they do not
-overwrite manual edits. Its shape is:
+script to refresh the shipped cache from best-effort live sources. This
+refreshes DeepSeek (from the official API docs), AWS Bedrock (from the AWS
+Price List API), and Anthropic Claude (scraped from
+`https://www.anthropic.com/pricing` — the public `/v1/models` API requires an
+API key, which this script deliberately avoids needing, so the page is
+scraped with the same best-effort regex approach as DeepSeek; if the page
+structure changes, the fetch returns `False` and the shipped values are left
+in place rather than being clobbered). Normal interactive and non-interactive
+comparisons only read the file; they do not overwrite manual edits. Its
+shape is:
 
 ```json
 {
@@ -211,10 +218,11 @@ overwrite manual edits. Its shape is:
 ```
 
 `selected_models` (in a non-interactive config, or the interactive provider
-picker) refers to models by `<provider_key>/<model_key>`. **DeepSeek's rates
-in particular are approximate public figures and haven't been verified
-against a live pricing page** — check the provider's pricing page before
-relying on these numbers for a real decision.
+picker) refers to models by `<provider_key>/<model_key>`. The Anthropic
+provider key is `anthropic` (e.g. `anthropic/opus-5`). **DeepSeek's rates in
+particular are approximate public figures and haven't been verified against
+a live pricing page** — check the provider's pricing page before relying on
+these numbers for a real decision.
 
 ## Tests
 

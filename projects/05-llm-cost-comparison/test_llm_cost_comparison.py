@@ -259,6 +259,8 @@ def test_build_hosted_rows_all_and_filtered(tmp_path):
     assert names == {"Claude Opus 5", "Claude Haiku 4.5", "DeepSeek-V3"}
 
     filtered = m.build_hosted_rows(w, pricing, selected={"claude/haiku-4.5"})
+    # (provider key in this fixture is "claude"; the shipped file uses
+    # "anthropic" — see test_load_shipped_pricing_file_is_well_formed.)
     assert len(filtered) == 1
     assert filtered[0].name == "Claude Haiku 4.5"
 
@@ -295,7 +297,7 @@ def test_build_hosted_rows_raises_config_error_on_malformed_pricing():
 def test_load_shipped_pricing_file_is_well_formed():
     pricing = m.load_pricing()
     assert "providers" in pricing
-    assert "claude" in pricing["providers"]
+    assert "anthropic" in pricing["providers"]
     assert "deepseek" in pricing["providers"]
     models = list(m.iter_models(pricing))
     assert len(models) > 0
@@ -314,6 +316,92 @@ def test_load_pricing_raises_config_error_on_invalid_json(tmp_path: Path):
 def test_load_pricing_raises_config_error_on_missing_file(tmp_path: Path):
     with pytest.raises(m.ConfigError, match="pricing file not found"):
         m.load_pricing(tmp_path / "missing-pricing.json")
+
+
+# --------------------------------------------------------------------------
+# Anthropic pricing fetch (mocked urllib — no real network needed)
+# --------------------------------------------------------------------------
+
+
+def test_fetch_anthropic_pricing_parses_page_and_updates_file(
+    tmp_path: Path, monkeypatch
+):
+    html = (
+        "<html><body>"
+        "<h2>Claude Sonnet 5</h2>"
+        "<p>Input $2.00 / MTok</p><p>Output $10.00 / MTok</p>"
+        "<h2>Claude Haiku 4.5</h2>"
+        "<p>Input $1.00 per million tokens</p>"
+        "<p>Output $5.00 per million tokens</p>"
+        "</body></html>"
+    )
+
+    def fake_urlopen(req, timeout=None):
+        return _FakeHTTPResponse(html.encode("utf-8"))
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
+
+    pricing_path = tmp_path / "pricing.json"
+    pricing_path.write_text(
+        json.dumps({"providers": {"deepseek": {"models": {}}}}), encoding="utf-8"
+    )
+
+    assert m.fetch_anthropic_pricing(pricing_path) is True
+    pricing = json.loads(pricing_path.read_text(encoding="utf-8"))
+    anthropic = pricing["providers"]["anthropic"]
+    assert anthropic["display_name"] == "Anthropic Claude"
+    models = anthropic["models"]
+    assert any(
+        v["input_per_million"] == 2.0 and v["output_per_million"] == 10.0
+        for v in models.values()
+    )
+    # Other providers preserved.
+    assert "deepseek" in pricing["providers"]
+    assert pricing["source_anthropic"] == m.ANTHROPIC_PRICING_URL
+
+
+def test_fetch_anthropic_pricing_returns_false_on_network_failure(
+    tmp_path: Path, monkeypatch
+):
+    def fake_urlopen(req, timeout=None):
+        raise OSError("network down")
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
+    pricing_path = tmp_path / "pricing.json"
+    assert m.fetch_anthropic_pricing(pricing_path) is False
+    assert not pricing_path.exists()
+
+
+def test_fetch_anthropic_pricing_returns_false_when_no_prices_parsed(
+    tmp_path: Path, monkeypatch
+):
+    def fake_urlopen(req, timeout=None):
+        return _FakeHTTPResponse(b"<html><body>no prices here</body></html>")
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
+    pricing_path = tmp_path / "pricing.json"
+    assert m.fetch_anthropic_pricing(pricing_path) is False
+    assert not pricing_path.exists()
+
+
+def test_fetch_anthropic_pricing_accepts_url_override(tmp_path: Path, monkeypatch):
+    seen = {}
+
+    def fake_urlopen(req, timeout=None):
+        seen["url"] = req.full_url if hasattr(req, "full_url") else req
+        return _FakeHTTPResponse(
+            b"<p>Claude Opus 5 Input $5.00 / MTok Output $25.00 / MTok</p>"
+        )
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
+    pricing_path = tmp_path / "pricing.json"
+    assert (
+        m.fetch_anthropic_pricing(pricing_path, url="https://example.com/pricing")
+        is True
+    )
+    assert seen["url"] == "https://example.com/pricing"
+    pricing = json.loads(pricing_path.read_text(encoding="utf-8"))
+    assert pricing["source_anthropic"] == "https://example.com/pricing"
 
 
 # --------------------------------------------------------------------------

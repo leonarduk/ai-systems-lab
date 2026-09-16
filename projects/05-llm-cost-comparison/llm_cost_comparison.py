@@ -75,6 +75,7 @@ def load_pricing(
     if try_refresh and path == DEFAULT_PRICING_PATH:
         fetch_deepseek_pricing(path)
         fetch_bedrock_pricing(path)
+        fetch_anthropic_pricing(path)
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -280,6 +281,92 @@ def fetch_bedrock_pricing(
 
     pricing["as_of"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     pricing["source_bedrock"] = BEDROCK_PRICING_URL
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(pricing, f, indent=2)
+    return True
+
+
+ANTHROPIC_PRICING_URL = "https://www.anthropic.com/pricing"
+
+
+def fetch_anthropic_pricing(
+    path: Path = DEFAULT_PRICING_PATH,
+    timeout: float = 10.0,
+    url: str = ANTHROPIC_PRICING_URL,
+) -> bool:
+    """Fetch Claude/Anthropic pricing from the official pricing page.
+
+    Returns ``True`` if ``path`` was updated, ``False`` on any failure
+    (network, page structure change, no prices parsed). Only the
+    ``"anthropic"`` provider section is touched; other providers are
+    preserved as-is.
+
+    The Anthropic pricing page is HTML with no stable machine-readable
+    endpoint (the public ``/v1/models`` API requires an API key, which this
+    script deliberately avoids needing), so this uses the same best-effort
+    regex-scraping approach as ``fetch_deepseek_pricing``. If the page
+    structure changes, this returns ``False`` and the shipped
+    ``pricing.json`` values are left in place rather than being clobbered
+    with garbage.
+    """
+    import re
+
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            text = resp.read().decode("utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 - best-effort, any failure just falls back
+        return False
+
+    # The page lists each model with its input and output per-million-token
+    # prices. Match a model name (e.g. "Claude Sonnet 5") followed by two
+    # dollar amounts, in either "$X / MTok" or "$X per million tokens" form.
+    # This is intentionally loose: the exact surrounding markup changes
+    # often, but the "name ... $in ... $out" shape has been stable.
+    pattern = re.compile(
+        r"(Claude\s+[A-Za-z0-9.\- ]+?)\s*"
+        r"\$([\d.]+)\s*(?:/|per)\s*(?:MTok|million\s+tokens?)"
+        r".*?\$([\d.]+)\s*(?:/|per)\s*(?:MTok|million\s+tokens?)",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    models = {}
+    for match in pattern.finditer(text):
+        display_name = " ".join(match.group(1).split())
+        try:
+            input_price = float(match.group(2))
+            output_price = float(match.group(3))
+        except ValueError:
+            continue
+        if input_price <= 0 or output_price <= 0:
+            continue
+        key = display_name.lower().replace(" ", "-").replace(".", "")
+        models[key] = {
+            "display_name": display_name,
+            "input_per_million": input_price,
+            "output_per_million": output_price,
+        }
+
+    if not models:
+        return False
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            pricing = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pricing = {}
+
+    pricing.setdefault("providers", {})["anthropic"] = {
+        "display_name": "Anthropic Claude",
+        "models": models,
+    }
+    pricing["as_of"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    pricing["source_anthropic"] = url
 
     with open(path, "w", encoding="utf-8") as f:
         json.dump(pricing, f, indent=2)
@@ -2416,7 +2503,8 @@ def main(argv: Optional[list] = None) -> int:
     if args.update_pricing:
         ok_ds = fetch_deepseek_pricing()
         ok_bd = fetch_bedrock_pricing()
-        if ok_ds or ok_bd:
+        ok_an = fetch_anthropic_pricing()
+        if ok_ds or ok_bd or ok_an:
             print(f"Updated {DEFAULT_PRICING_PATH}")
             return 0
         print(
