@@ -1433,6 +1433,109 @@ def test_render_table_omits_multiple_line_for_single_row():
 
 
 # --------------------------------------------------------------------------
+# interactive_provider_selection input validation
+# --------------------------------------------------------------------------
+
+
+def _sample_pricing() -> dict:
+    return {
+        "providers": {
+            "claude": {
+                "models": {
+                    "opus-5": {
+                        "display_name": "Claude Opus 5",
+                        "input_per_million": 5.0,
+                        "output_per_million": 25.0,
+                    },
+                    "haiku-4.5": {
+                        "display_name": "Claude Haiku 4.5",
+                        "input_per_million": 1.0,
+                        "output_per_million": 5.0,
+                    },
+                }
+            },
+            "deepseek": {
+                "models": {
+                    "deepseek-v3": {
+                        "display_name": "DeepSeek-V3",
+                        "input_per_million": 0.27,
+                        "output_per_million": 1.10,
+                    }
+                }
+            },
+        }
+    }
+
+
+def test_interactive_provider_selection_all_returns_none(monkeypatch):
+    # Answering "yes" to "compare against all" short-circuits to None.
+    monkeypatch.setattr("builtins.input", lambda _: "y")
+    assert m.interactive_provider_selection(_sample_pricing()) is None
+
+
+def test_interactive_provider_selection_accepts_valid_keys(monkeypatch):
+    # "no" to all, then a valid comma-separated list.
+    answers = iter(["n", "claude/opus-5, deepseek/deepseek-v3"])
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    selected = m.interactive_provider_selection(_sample_pricing())
+    assert selected == {"claude/opus-5", "deepseek/deepseek-v3"}
+
+
+def test_interactive_provider_selection_is_case_insensitive(monkeypatch):
+    answers = iter(["n", "Claude/Opus-5"])
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    selected = m.interactive_provider_selection(_sample_pricing())
+    # Canonical (lowercase) key is returned, not the user's casing.
+    assert selected == {"claude/opus-5"}
+
+
+def test_interactive_provider_selection_blank_returns_empty_set(monkeypatch):
+    answers = iter(["n", ""])
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    assert m.interactive_provider_selection(_sample_pricing()) == set()
+
+
+def test_interactive_provider_selection_warns_and_reprompts_on_unknown_key(
+    monkeypatch, capsys
+):
+    # First attempt has a typo; user chooses to re-enter, then gives a valid key.
+    answers = iter(["n", "claude/opus-6", "y", "claude/opus-5"])
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    selected = m.interactive_provider_selection(_sample_pricing())
+    assert selected == {"claude/opus-5"}
+    out = capsys.readouterr().out
+    assert "Unrecognized key" in out
+    assert "claude/opus-6" in out
+    # Valid keys are listed so the user can correct the typo.
+    assert "claude/opus-5" in out
+
+
+def test_interactive_provider_selection_keeps_recognized_keys_on_decline(
+    monkeypatch, capsys
+):
+    # Mixed valid + invalid; user declines to re-enter, so only the valid key
+    # is kept (and the invalid one is reported).
+    answers = iter(["n", "claude/opus-5, not-a-real-key", "n"])
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    selected = m.interactive_provider_selection(_sample_pricing())
+    assert selected == {"claude/opus-5"}
+    out = capsys.readouterr().out
+    assert "not-a-real-key" in out
+    assert "Unrecognized key" in out
+
+
+def test_interactive_provider_selection_all_unknown_declines_returns_empty(
+    monkeypatch, capsys
+):
+    answers = iter(["n", "bogus/one, bogus/two", "n"])
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    selected = m.interactive_provider_selection(_sample_pricing())
+    assert selected == set()
+    out = capsys.readouterr().out
+    assert "bogus/one" in out and "bogus/two" in out
+
+
+# --------------------------------------------------------------------------
 # "Already own the hardware" cost mode (electricity only, no amortization)
 # --------------------------------------------------------------------------
 
