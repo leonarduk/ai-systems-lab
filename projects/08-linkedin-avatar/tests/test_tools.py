@@ -297,6 +297,14 @@ class TestLookupProject:
         result = tools.lookup_project(name="issue-worm")
         assert result["found"] is False
 
+    def test_malformed_snapshot_file_does_not_raise(self, tmp_path, monkeypatch):
+        path = tmp_path / "github.json"
+        path.write_text("{invalid json", encoding="utf-8")
+        monkeypatch.setattr(tools, "GITHUB_SNAPSHOT_PATH", path)
+        result = tools.lookup_project(name="issue-worm")
+        assert result["found"] is False
+        assert "message" in result
+
 
 class TestDispatch:
     def test_dispatches_known_tool(self):
