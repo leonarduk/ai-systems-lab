@@ -136,6 +136,35 @@ class TestSendMessageHappyPath:
         )
         assert "error" in json.loads(tool_message["content"])
 
+    def test_dispatch_exception_does_not_crash(self, monkeypatch):
+        """A tool implementation raising an exception must be caught and
+        converted into a structured error result, not propagated to the UI."""
+
+        def boom(name, arguments):
+            raise RuntimeError("kaboom from tool internals")
+
+        monkeypatch.setattr(llm.tools, "dispatch", boom)
+
+        tool_call = make_tool_call("call_boom", "lookup_project", {"name": "x"})
+        client = FakeClient(
+            [
+                make_response(tool_calls=[tool_call]),
+                make_response(content="recovered"),
+            ]
+        )
+
+        reply, usage = llm.send_message(
+            [{"role": "user", "content": "hi"}], "system", client=client
+        )
+
+        assert reply == "recovered"
+        tool_message = next(
+            m for m in client.calls[1]["messages"] if m["role"] == "tool"
+        )
+        payload = json.loads(tool_message["content"])
+        assert "error" in payload
+        assert "lookup_project" in payload["error"]
+
 
 class TestUsageAccounting:
     def test_usage_accumulated_across_rounds(self):
