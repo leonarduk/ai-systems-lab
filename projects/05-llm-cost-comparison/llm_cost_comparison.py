@@ -1068,7 +1068,12 @@ def fetch_octopus_agile_rate(
     entry — this is a convenience lookup, not a requirement.
     """
     try:
-        with urllib.request.urlopen(OCTOPUS_PRODUCTS_URL, timeout=timeout) as resp:
+        products_req = urllib.request.Request(
+            OCTOPUS_PRODUCTS_URL,
+            headers={"User-Agent": "llm-cost-comparison/1.0"},
+            method="GET",
+        )
+        with urllib.request.urlopen(products_req, timeout=timeout) as resp:
             products = json.loads(resp.read()).get("results", [])
         agile_codes = [
             p["code"] for p in products if "AGILE" in p.get("code", "").upper()
@@ -1081,7 +1086,12 @@ def fetch_octopus_agile_rate(
             f"https://api.octopus.energy/v1/products/{product_code}/"
             f"electricity-tariffs/{tariff_code}/standard-unit-rates/"
         )
-        with urllib.request.urlopen(rates_url, timeout=timeout) as resp:
+        rates_req = urllib.request.Request(
+            rates_url,
+            headers={"User-Agent": "llm-cost-comparison/1.0"},
+            method="GET",
+        )
+        with urllib.request.urlopen(rates_req, timeout=timeout) as resp:
             rates = json.loads(resp.read()).get("results", [])
         now = datetime.now(timezone.utc)
         for rate in rates:
