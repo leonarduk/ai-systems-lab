@@ -198,6 +198,54 @@ class TestNotifyFanOut:
 
         assert result["status"] == "failed"
 
+    def test_partial_failure_one_channel_sends_other_fails(self, monkeypatch):
+        # Both channels configured; Pushover succeeds, Telegram fails.
+        # This is the most likely real-world scenario and must not be
+        # reported as a full success.
+        monkeypatch.setenv("PUSHOVER_USER", "u")
+        monkeypatch.setenv("PUSHOVER_TOKEN", "t")
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "cid")
+
+        def fake_post(url, data, timeout):
+            if url == tools.PUSHOVER_URL:
+                return FakeResponse(200)
+            return FakeResponse(500)
+
+        monkeypatch.setattr(tools.requests, "post", fake_post)
+
+        result = tools._notify("title", "message")
+
+        assert result["status"] == "failed"
+        assert result["channels"]["pushover"]["status"] == "sent"
+        assert result["channels"]["telegram"]["status"] == "failed"
+        # Error details for the failed channel are preserved.
+        assert result["channels"]["telegram"].get("error")
+
+    def test_partial_failure_one_channel_sends_other_connection_error(
+        self, monkeypatch
+    ):
+        # Same as above but the failing channel raises instead of returning
+        # an HTTP error status.
+        monkeypatch.setenv("PUSHOVER_USER", "u")
+        monkeypatch.setenv("PUSHOVER_TOKEN", "t")
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "cid")
+
+        def fake_post(url, data, timeout):
+            if url == tools.PUSHOVER_URL:
+                return FakeResponse(200)
+            raise tools.requests.ConnectionError("no network")
+
+        monkeypatch.setattr(tools.requests, "post", fake_post)
+
+        result = tools._notify("title", "message")
+
+        assert result["status"] == "failed"
+        assert result["channels"]["pushover"]["status"] == "sent"
+        assert result["channels"]["telegram"]["status"] == "failed"
+        assert result["channels"]["telegram"].get("error")
+
 
 class TestRecordContact:
     def test_happy_path_logs_without_credentials(self):
