@@ -984,6 +984,74 @@ def test_prompt_float_accepts_default_without_minimum_check(monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# prompt_choice case-insensitive matching
+# --------------------------------------------------------------------------
+
+
+def test_prompt_choice_lowercase_input_lowercase_choices(monkeypatch):
+    # Baseline: existing callers passing lowercase choices and lowercase
+    # input must keep working unchanged.
+    monkeypatch.setattr("builtins.input", lambda _: "ollama")
+    assert m.prompt_choice("Pick", ["ollama", "other"]) == "ollama"
+
+
+def test_prompt_choice_uppercase_input_lowercase_choices(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _: "OLLAMA")
+    assert m.prompt_choice("Pick", ["ollama", "other"]) == "ollama"
+
+
+def test_prompt_choice_mixed_case_input_lowercase_choices(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _: "Ollama")
+    assert m.prompt_choice("Pick", ["ollama", "other"]) == "ollama"
+
+
+def test_prompt_choice_mixed_case_choice_matched_case_insensitively(monkeypatch):
+    # The original-cased choice must be returned, not the casefolded input.
+    monkeypatch.setattr("builtins.input", lambda _: "newprovider")
+    assert m.prompt_choice("Pick", ["NewProvider", "other"]) == "NewProvider"
+
+
+def test_prompt_choice_mixed_case_choice_exact_case_input(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _: "NewProvider")
+    assert m.prompt_choice("Pick", ["NewProvider", "other"]) == "NewProvider"
+
+
+def test_prompt_choice_prompt_preserves_original_casing(monkeypatch):
+    # Display casing is a separate concern from matching: the prompt shown to
+    # the user must list the original-cased choices, not the casefolded ones.
+    captured = {}
+
+    def fake_input(prompt):
+        captured["prompt"] = prompt
+        return "newprovider"
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    m.prompt_choice("Pick", ["NewProvider", "other"])
+    assert "NewProvider" in captured["prompt"]
+    assert "newprovider" not in captured["prompt"]
+
+
+def test_prompt_choice_reprompts_on_invalid_input(monkeypatch, capsys):
+    # prompt_choice loops until it gets a valid answer; it does NOT fall back
+    # to the default on invalid (non-empty) input. Feed one invalid value
+    # followed by a valid one, and assert the error message lists the
+    # original-cased choices.
+    inputs = iter(["not-a-choice", "newprovider"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+    result = m.prompt_choice("Pick", ["NewProvider", "other"])
+    assert result == "NewProvider"
+    out = capsys.readouterr().out
+    assert "NewProvider" in out
+    assert "newprovider" not in out
+
+
+def test_prompt_choice_empty_input_returns_default(monkeypatch):
+    # The default is only used when the user submits an empty answer.
+    monkeypatch.setattr("builtins.input", lambda _: "")
+    assert m.prompt_choice("Pick", ["NewProvider", "other"], default="other") == "other"
+
+
+# --------------------------------------------------------------------------
 # Non-interactive config validation
 # --------------------------------------------------------------------------
 
