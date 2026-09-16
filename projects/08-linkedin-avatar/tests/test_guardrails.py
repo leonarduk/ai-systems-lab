@@ -65,6 +65,44 @@ class TestSlidingWindowRateLimits:
 
         assert state.check_request("s1", "1.1.1.1", "hi")[0] is True
 
+    def test_rate_limit_releases_at_exact_window_boundary(self):
+        # Boundary test: the sliding window uses `cutoff = now - window_seconds`
+        # and evicts events with `timestamp <= cutoff`. At exactly
+        # `window_seconds` elapsed, the original event must be evicted and a
+        # new request allowed. This catches off-by-one regressions (e.g. using
+        # `<` instead of `<=`, or `>` instead of `>=`).
+        clock = FakeClock()
+        limiter = guardrails._SlidingWindowLimiter(
+            max_events=1, window_seconds=3600, clock=clock
+        )
+
+        # Fill the window.
+        assert limiter.allow() is True
+        # Immediately after, the limit is enforced.
+        assert limiter.allow() is False
+
+        # Advance to exactly window_seconds - 1: still within the window.
+        clock.advance(3599)
+        assert limiter.allow() is False
+
+        # Advance one more second to land exactly on window_seconds elapsed.
+        clock.advance(1)
+        assert limiter.allow() is True
+
+    def test_rate_limit_enforced_just_before_window_boundary(self):
+        # Inverse boundary test: at `window_seconds - 1` elapsed, the original
+        # event is still inside the window and the limit must remain enforced.
+        clock = FakeClock()
+        limiter = guardrails._SlidingWindowLimiter(
+            max_events=1, window_seconds=3600, clock=clock
+        )
+
+        assert limiter.allow() is True
+        assert limiter.allow() is False
+
+        clock.advance(3599)
+        assert limiter.allow() is False
+
     def test_ip_limit_is_independent_of_session_limit(self):
         state, clock = make_state(session_rate_limit="1000/hour", ip_rate_limit="1/day")
         assert state.check_request("session-a", "9.9.9.9", "hi")[0] is True
