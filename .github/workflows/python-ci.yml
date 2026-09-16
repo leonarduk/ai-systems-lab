@@ -28,6 +28,29 @@ jobs:
     - name: Verify shared repository automation
       run: cicaid --help
 
+    - name: Verify mcp version pin
+      run: |
+        # Ensure every server's requirements.txt explicitly constrains
+        # the `mcp` package to <2.0.0. PR #28 pinned this to fix a
+        # breaking change in mcp>=2.0.0; this check prevents future
+        # changes from silently removing the pin.
+        failed=0
+        shopt -s nullglob
+        files=(projects/01-mcp-server-suite/servers/*/requirements.txt)
+        if [ ${#files[@]} -eq 0 ]; then
+          echo "::error::No requirements.txt files found under projects/01-mcp-server-suite/servers/"
+          exit 1
+        fi
+        for f in "${files[@]}"; do
+          if ! grep -q 'mcp<2\.0\.0' "$f"; then
+            echo "::error::FAIL: $f does not pin mcp<2.0.0"
+            failed=1
+          else
+            echo "OK: $f pins mcp<2.0.0"
+          fi
+        done
+        exit $failed
+
     - name: Run flake8
       run: |
         # Stop the build if there are Python syntax errors or undefined names
