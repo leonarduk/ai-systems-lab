@@ -983,6 +983,52 @@ def test_prompt_float_accepts_default_without_minimum_check(monkeypatch):
     assert m.prompt_float("x", default=5.0, minimum=1.0) == 5.0
 
 
+def test_prompt_float_propagates_eof(monkeypatch):
+    # Exhausted stdin must surface as EOFError, not silently return the
+    # default — otherwise an enclosing `while True` loop can spin forever.
+    def raise_eof(_):
+        raise EOFError()
+
+    monkeypatch.setattr("builtins.input", raise_eof)
+    with pytest.raises(EOFError):
+        m.prompt_float("x", default=5.0)
+
+
+def test_prompt_yes_no_propagates_eof(monkeypatch):
+    def raise_eof(_):
+        raise EOFError()
+
+    monkeypatch.setattr("builtins.input", raise_eof)
+    with pytest.raises(EOFError):
+        m.prompt_yes_no("Continue?", default=True)
+
+
+def test_prompt_choice_propagates_eof(monkeypatch):
+    def raise_eof(_):
+        raise EOFError()
+
+    monkeypatch.setattr("builtins.input", raise_eof)
+    with pytest.raises(EOFError):
+        m.prompt_choice("Pick", ["a", "b"], default="a")
+
+
+def test_run_interactive_terminates_cleanly_on_exhausted_stdin(monkeypatch, capsys):
+    # Regression test for the unbounded `while True` confirmation loops:
+    # when stdin is exhausted mid-setup, run_interactive must return
+    # non-zero with a clear message rather than hang or raise.
+    def raise_eof(_):
+        raise EOFError()
+
+    monkeypatch.setattr("builtins.input", raise_eof)
+    # No saved last-run file, so the flow goes straight to interactive setup.
+    monkeypatch.setattr(m, "load_last_run", lambda path=None: None)
+
+    exit_code = m.run_interactive()
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "stdin closed" in err
+
+
 # --------------------------------------------------------------------------
 # Non-interactive config validation
 # --------------------------------------------------------------------------
