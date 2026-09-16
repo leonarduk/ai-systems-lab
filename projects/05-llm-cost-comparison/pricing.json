@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-07-28",
+  "as_of": "2025-03-25",
   "source_deepseek": "https://api-docs.deepseek.com/quick_start/pricing/",
   "source_bedrock": "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonBedrock/current/region_index.json",
   "note": "DeepSeek direct and Bedrock-hosted pricing both verified against live sources. Bedrock adds a ~4x platform markup on DeepSeek vs direct API. Claude pricing is identical direct vs Bedrock (zero markup).",
