@@ -121,6 +121,27 @@ class TestBuildSystemPrompt:
         message = str(exc_info.value)
         assert "5" in message
 
+    def test_prompt_fits_exactly_at_max_tokens(self, knowledge_dir):
+        # First, build the prompt with a generous budget to learn its exact
+        # token count. The prompt is deterministic, so this count is stable.
+        prompt = context.build_system_prompt(max_tokens=40000, knowledge_dir=knowledge_dir)
+        exact_tokens = context.estimate_tokens(prompt)
+
+        # Sanity check: the estimate must be consistent across calls.
+        assert context.estimate_tokens(prompt) == exact_tokens
+
+        # An exact fit must not raise: the budget check uses `>` not `>=`.
+        result = context.build_system_prompt(
+            max_tokens=exact_tokens, knowledge_dir=knowledge_dir
+        )
+        assert context.estimate_tokens(result) == exact_tokens
+
+        # One token less must raise, proving we are truly at the boundary.
+        with pytest.raises(context.PromptTooLargeError):
+            context.build_system_prompt(
+                max_tokens=exact_tokens - 1, knowledge_dir=knowledge_dir
+            )
+
 
 class TestGithubSectionTrimming:
     def test_200_repo_snapshot_trims_oldest_first(self, tmp_path):
