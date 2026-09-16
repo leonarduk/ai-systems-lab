@@ -5,7 +5,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fakes import FakeLLMProvider, FakeMCPToolClient
 
-from orchestrator import check_duplicate, process_candidate, run_once
+from orchestrator import (
+    _EXTRACTION_SCHEMA,
+    _NULLABLE_EXTRACTION_KEYS,
+    check_duplicate,
+    process_candidate,
+    run_once,
+)
 
 CRITERIA = {
     "prize_types": ["cash"],
@@ -17,6 +23,26 @@ CRITERIA = {
 
 def make_candidate(draw_id="draw-1", url="https://example.com/draw-1"):
     return {"draw_id": draw_id, "url": url, "title": "Win cash!"}
+
+
+class TestExtractionSchemaNullability:
+    def test_nullable_keys_are_nullable_in_schema(self):
+        for key in _NULLABLE_EXTRACTION_KEYS:
+            prop = _EXTRACTION_SCHEMA["properties"][key]
+            assert "null" in prop["type"], (
+                f"{key} must be nullable in _EXTRACTION_SCHEMA to match "
+                f"_NULLABLE_EXTRACTION_KEYS"
+            )
+
+    def test_nullable_keys_remain_required(self):
+        for key in _NULLABLE_EXTRACTION_KEYS:
+            assert key in _EXTRACTION_SCHEMA["required"]
+
+    def test_non_nullable_fields_keep_single_string_type(self):
+        for key, prop in _EXTRACTION_SCHEMA["properties"].items():
+            if key in _NULLABLE_EXTRACTION_KEYS:
+                continue
+            assert prop["type"] != ["string", "null"]
 
 
 class TestCheckDuplicate:
