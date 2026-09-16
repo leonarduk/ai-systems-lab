@@ -1434,10 +1434,18 @@ def prompt_float(
     values that would blow up downstream math (e.g. a tokens/sec or
     lifetime-years of 0 raises ``ValueError`` deep in the cost calculation,
     discarding every answer the user already gave).
+
+    Raises ``EOFError`` if stdin is exhausted (piped input running out,
+    closed terminal, etc.) rather than silently returning the default —
+    callers must decide how to terminate cleanly, since a default here
+    would let an enclosing ``while True`` loop spin forever.
     """
     suffix = f" [{default}]" if default is not None else ""
     while True:
-        raw = input(f"{prompt}{suffix}: ").strip()
+        try:
+            raw = input(f"{prompt}{suffix}: ").strip()
+        except EOFError:
+            raise
         if not raw and default is not None:
             return default
         try:
@@ -1452,6 +1460,10 @@ def prompt_float(
 
 
 def prompt_choice(prompt: str, choices: list, default: Optional[str] = None) -> str:
+    """Prompt for one of ``choices``, re-asking on unrecognized input.
+
+    Raises ``EOFError`` if stdin is exhausted — see ``prompt_float``.
+    """
     choice_str = "/".join(choices)
     suffix = f" [{default}]" if default else ""
     # Normalize choices for case-insensitive comparison while preserving the
@@ -1459,7 +1471,10 @@ def prompt_choice(prompt: str, choices: list, default: Optional[str] = None) -> 
     # would otherwise be silently rejected when the user types "claude".
     normalized_choices = {c.casefold(): c for c in choices}
     while True:
-        raw = input(f"{prompt} ({choice_str}){suffix}: ").strip().casefold()
+        try:
+            raw = input(f"{prompt} ({choice_str}){suffix}: ").strip().casefold()
+        except EOFError:
+            raise
         if not raw and default:
             return default
         if raw in normalized_choices:
@@ -1468,8 +1483,15 @@ def prompt_choice(prompt: str, choices: list, default: Optional[str] = None) -> 
 
 
 def prompt_yes_no(prompt: str, default: bool = True) -> bool:
+    """Prompt for a yes/no answer.
+
+    Raises ``EOFError`` if stdin is exhausted — see ``prompt_float``.
+    """
     suffix = " [Y/n]" if default else " [y/N]"
-    raw = input(f"{prompt}{suffix}: ").strip().lower()
+    try:
+        raw = input(f"{prompt}{suffix}: ").strip().lower()
+    except EOFError:
+        raise
     if not raw:
         return default
     return raw.startswith("y")
@@ -1898,7 +1920,17 @@ def run_interactive(use_defaults: bool = False) -> int:
             defaults = saved
         else:
             print(f"Saved settings from last run found ({saved_at}).")
-            if prompt_yes_no("Use them as defaults?", default=True):
+            try:
+                use_saved = prompt_yes_no("Use them as defaults?", default=True)
+            except EOFError:
+                # stdin exhausted — fall back to the saved settings rather
+                # than hanging or crashing, and say so plainly.
+                print(
+                    "  stdin closed before an answer was given — using saved "
+                    "settings as defaults."
+                )
+                use_saved = True
+            if use_saved:
                 defaults = saved
         print()
 
@@ -2014,11 +2046,20 @@ def run_interactive(use_defaults: bool = False) -> int:
             print("  Providers: none (local only)")
         print()
     else:
-        scenarios = interactive_workload()
-        local_row_builder, display_currency, usd_per_gbp, tokens_per_sec, settings = (
-            interactive_local_setup()
-        )
-        selected = interactive_provider_selection(pricing)
+        try:
+            scenarios = interactive_workload()
+            local_row_builder, display_currency, usd_per_gbp, tokens_per_sec, settings = (
+                interactive_local_setup()
+            )
+            selected = interactive_provider_selection(pricing)
+        except EOFError:
+            print(
+                "stdin closed before setup finished — cannot continue "
+                "interactively. Re-run with --non-interactive --config, or "
+                "provide input on stdin.",
+                file=sys.stderr,
+            )
+            return 1
         settings["selected_models"] = sorted(selected) if selected is not None else None
         if len(scenarios) == len(WORKLOAD_PRESETS) and [k for k, _, _ in scenarios] == [
             p.key for p in WORKLOAD_PRESETS
@@ -2067,34 +2108,51 @@ def run_interactive(use_defaults: bool = False) -> int:
         print(f"\n== {label} ==")
         print(render_table(rows, currency=display_currency))
 
-    if prompt_yes_no("\nExport results to a file?", default=False):
-        fmt = prompt_choice("Format", ["csv", "json"], default="csv")
-        default_name = f"cost_comparison.{fmt}"
-        out_path = Path(
-            input(f"Output path [{default_name}]: ").strip() or default_name
-        )
-        if multiple:
-            if fmt == "csv":
-                export_combined_csv(
-                    scenario_labels_rows, out_path, currency=display_currency
-                )
+    try:
+        want_export = prompt_yes_no("\nExport results to a file?", default=False)
+    except EOFError:
+        print("\nstdin closed — skipping export prompt.")
+        want_export = False
+    if want_export:
+        try:
+            fmt = prompt_choice("Format", ["csv", "json"], default="csv")
+            default_name = f"cost_comparison.{fmt}"
+            out_path = Path(
+                input(f"Output path [{default_name}]: ").strip() or default_name
+            )
+        except EOFError:
+            print("stdin closed — skipping export.")
+            fmt = None
+            out_path = None
+        if fmt is not None and out_path is not None:
+            if multiple:
+                if fmt == "csv":
+                    export_combined_csv(
+                        scenario_labels_rows, out_path, currency=display_currency
+                    )
+                else:
+                    export_combined_json(
+                        scenario_labels_rows, out_path, currency=display_currency
+                    )
             else:
-                export_combined_json(
-                    scenario_labels_rows, out_path, currency=display_currency
-                )
-        else:
-            _label, rows = scenario_labels_rows[0]
-            if fmt == "csv":
-                export_csv(rows, out_path, currency=display_currency)
-            else:
-                export_json(rows, out_path, currency=display_currency)
-        print(f"Wrote {out_path}")
+                _label, rows = scenario_labels_rows[0]
+                if fmt == "csv":
+                    export_csv(rows, out_path, currency=display_currency)
+                else:
+                    export_json(rows, out_path, currency=display_currency)
+            print(f"Wrote {out_path}")
 
-    if defaults is None and prompt_yes_no(
-        "\nSave these settings as defaults for the next run?", default=False
-    ):
-        save_last_run(settings)
-        print(f"Saved {DEFAULT_LAST_RUN_PATH}")
+    if defaults is None:
+        try:
+            want_save = prompt_yes_no(
+                "\nSave these settings as defaults for the next run?", default=False
+            )
+        except EOFError:
+            print("\nstdin closed — skipping save prompt.")
+            want_save = False
+        if want_save:
+            save_last_run(settings)
+            print(f"Saved {DEFAULT_LAST_RUN_PATH}")
 
     return 0
 
