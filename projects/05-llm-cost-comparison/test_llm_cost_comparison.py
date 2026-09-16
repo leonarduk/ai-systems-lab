@@ -1559,6 +1559,53 @@ def test_lookup_gpu_defaults_case_insensitive():
     assert m.lookup_gpu_defaults("nvidia geforce rtx 4090") is not None
 
 
+def test_load_gpu_defaults_reads_shipped_json_file():
+    defaults = m.load_gpu_defaults()
+    assert len(defaults) > 0
+    labels = [label for label, _cost, _power in defaults]
+    assert "RTX 4090" in labels
+    for label, cost, power in defaults:
+        assert isinstance(label, str) and label
+        assert cost > 0
+        assert power > 0
+
+
+def test_load_gpu_defaults_falls_back_when_file_missing(tmp_path: Path):
+    defaults = m.load_gpu_defaults(tmp_path / "does_not_exist.json")
+    assert defaults == m._FALLBACK_GPU_COST_POWER_DEFAULTS
+
+
+def test_load_gpu_defaults_falls_back_on_invalid_json(tmp_path: Path):
+    bad_path = tmp_path / "gpu_power_defaults.json"
+    bad_path.write_text("{not valid json", encoding="utf-8")
+    assert m.load_gpu_defaults(bad_path) == m._FALLBACK_GPU_COST_POWER_DEFAULTS
+
+
+def test_load_gpu_defaults_reads_custom_file(tmp_path: Path):
+    custom_path = tmp_path / "gpu_power_defaults.json"
+    custom_path.write_text(
+        json.dumps(
+            {
+                "as_of": "2026-07-28",
+                "note": "custom",
+                "gpus": [
+                    {"label": "MY CUSTOM GPU", "cost_usd": 123.0, "power_watts": 45.0}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    defaults = m.load_gpu_defaults(custom_path)
+    assert defaults == (("MY CUSTOM GPU", 123.0, 45.0),)
+    assert m.lookup_gpu_defaults("my custom gpu", defaults=defaults) == (123.0, 45.0)
+
+
+def test_lookup_gpu_defaults_accepts_explicit_defaults_tuple():
+    custom = (("FAKE CARD", 999.0, 111.0),)
+    assert m.lookup_gpu_defaults("Fake Card 9000", defaults=custom) == (999.0, 111.0)
+    assert m.lookup_gpu_defaults("Something Else", defaults=custom) is None
+
+
 # --------------------------------------------------------------------------
 # Rest-of-system power allowance (laptop vs desktop)
 # --------------------------------------------------------------------------

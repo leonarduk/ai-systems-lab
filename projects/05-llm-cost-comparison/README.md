@@ -150,6 +150,29 @@ requests/day and token counts behind each one.
   (input + output combined) so local and hosted costs are directly
   comparable regardless of your workload's input/output mix.
 
+## Customising GPU assumptions
+
+The GPU price/power defaults used to prefill the "buying new hardware" and
+"already-on PC" prompts live in `gpu_power_defaults.json`, next to the
+script. Its shape is:
+
+```json
+{
+  "as_of": "2026-07-28",
+  "note": "free-text caveat shown to the user",
+  "gpus": [
+    {"label": "RTX 4090", "cost_usd": 1600.0, "power_watts": 450.0}
+  ]
+}
+```
+
+`label` is matched as a case-insensitive substring against the detected
+GPU's name (via `nvidia-smi`), so list more specific labels before more
+general ones. Edit this file to add your own card, adjust prices for your
+region, or correct a power figure — no Python changes needed. If the file
+is missing or malformed, the script falls back to a built-in copy of the
+shipped defaults so it still works out of the box.
+
 ## Updating pricing
 
 Hosted pricing changes over time. Edit `pricing.json` directly, or run

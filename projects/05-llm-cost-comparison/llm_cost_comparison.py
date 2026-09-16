@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 DEFAULT_PRICING_PATH = Path(__file__).parent / "pricing.json"
+DEFAULT_GPU_DEFAULTS_PATH = Path(__file__).parent / "gpu_power_defaults.json"
 DEFAULT_LAST_RUN_PATH = Path(__file__).parent / ".last_run.json"
 DAYS_PER_MONTH = 30
 HOURS_PER_MONTH = DAYS_PER_MONTH * 24
@@ -1154,12 +1155,10 @@ def fetch_fx_rate(
         return None
 
 
-# Rough street price (USD) and typical power draw under load (W) for common
-# GPUs, matched by substring against a detected card's name. These are
-# ballpark figures meant to prefill a realistic starting point instead of a
-# one-size-fits-all guess — the interactive prompt still lets the user
-# override either value if theirs differs.
-GPU_COST_POWER_DEFAULTS: tuple = (
+# Fallback used only if ``gpu_power_defaults.json`` is missing or malformed,
+# so the script still works out of the box. The shipped JSON file is the
+# source of truth users are expected to edit; this mirrors its contents.
+_FALLBACK_GPU_COST_POWER_DEFAULTS: tuple = (
     ("RTX 4090", 1600.0, 450.0),
     ("RTX 4080 SUPER", 1000.0, 320.0),
     ("RTX 4080", 1000.0, 320.0),
@@ -1175,17 +1174,48 @@ GPU_COST_POWER_DEFAULTS: tuple = (
 )
 
 
-def lookup_gpu_defaults(gpu_name: str) -> Optional[tuple]:
+def load_gpu_defaults(path: Path = DEFAULT_GPU_DEFAULTS_PATH) -> tuple:
+    """Load GPU price/power defaults from a JSON config file.
+
+    Mirrors ``load_pricing``'s pattern: reads a JSON file next to the script
+    and returns a tuple of ``(label, cost_usd, power_watts)`` entries, in
+    the same order as the file lists them (so more specific labels can be
+    listed before more general ones and still match first). Falls back to
+    ``_FALLBACK_GPU_COST_POWER_DEFAULTS`` if the file is missing or
+    malformed, so a user who has never touched the file sees no difference
+    in behavior.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return _FALLBACK_GPU_COST_POWER_DEFAULTS
+    entries = []
+    for item in data.get("gpus", []):
+        try:
+            entries.append(
+                (str(item["label"]), float(item["cost_usd"]), float(item["power_watts"]))
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return tuple(entries) if entries else _FALLBACK_GPU_COST_POWER_DEFAULTS
+
+
+def lookup_gpu_defaults(
+    gpu_name: str, defaults: Optional[tuple] = None
+) -> Optional[tuple]:
     """Best-effort ``(cost_usd, power_watts)`` defaults for a detected GPU.
 
-    Matches by substring against ``GPU_COST_POWER_DEFAULTS`` so a detected
-    card pre-fills a realistic price/power pair instead of a generic
-    default unrelated to the actual hardware. Returns None on no match —
-    callers fall back to a generic default and the prompt still lets the
-    user override.
+    Matches by substring against the loaded GPU defaults (see
+    ``load_gpu_defaults``) so a detected card pre-fills a realistic
+    price/power pair instead of a generic default unrelated to the actual
+    hardware. Returns None on no match — callers fall back to a generic
+    default and the prompt still lets the user override.
     """
+    if defaults is None:
+        defaults = load_gpu_defaults()
     name = gpu_name.upper()
-    for label, cost, power in GPU_COST_POWER_DEFAULTS:
+    for label, cost, power in defaults:
         if label in name:
             return cost, power
     return None
