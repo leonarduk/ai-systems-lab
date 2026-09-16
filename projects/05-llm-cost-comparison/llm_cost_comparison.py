@@ -1762,17 +1762,33 @@ def interactive_local_setup() -> tuple:
                 print(f"  Current GBP→USD exchange rate: {live_usd_per_gbp:.4f}")
             else:
                 print("  Could not fetch a live exchange rate — enter manually.")
-            usd_per_gbp = prompt_float(
-                "GBP→USD exchange rate (used internally to keep local and hosted "
-                "costs comparable; the table itself is shown in GBP)",
-                default=live_usd_per_gbp if live_usd_per_gbp is not None else 1.27,
-                minimum=0.001,
-            )
-            electricity_rate = gbp_rate * usd_per_gbp
+            while True:
+                usd_per_gbp = prompt_float(
+                    "GBP→USD exchange rate (used internally to keep local and hosted "
+                    "costs comparable; the table itself is shown in GBP)",
+                    default=live_usd_per_gbp if live_usd_per_gbp is not None else 1.27,
+                    minimum=0.001,
+                )
+                electricity_rate = gbp_rate * usd_per_gbp
+                print("\n  You entered:")
+                print(f"    Electricity rate: £{gbp_rate:.4f}/kWh")
+                print(f"    Exchange rate: 1 GBP = {usd_per_gbp:.4f} USD")
+                if prompt_yes_no("  Is this correct?", default=True):
+                    break
+                print("  Re-entering both values.\n")
+                gbp_rate = prompt_float(
+                    "Electricity rate (GBP/kWh)", default=gbp_rate, minimum=0
+                )
         else:
-            electricity_rate = prompt_float(
-                "Electricity rate (USD/kWh)", default=0.15, minimum=0
-            )
+            while True:
+                electricity_rate = prompt_float(
+                    "Electricity rate (USD/kWh)", default=0.15, minimum=0
+                )
+                print("\n  You entered:")
+                print(f"    Electricity rate: ${electricity_rate:.4f}/kWh")
+                if prompt_yes_no("  Is this correct?", default=True):
+                    break
+                print("  Re-entering the value.\n")
 
         def build_existing_rows(workload: Workload) -> list:
             return [

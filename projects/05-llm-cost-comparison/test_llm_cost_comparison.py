@@ -984,6 +984,24 @@ def test_prompt_float_accepts_default_without_minimum_check(monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# Confirmation of manually-entered electricity / exchange rates
+# --------------------------------------------------------------------------
+
+
+def test_prompt_yes_no_accepts_yes_and_no(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _: "y")
+    assert m.prompt_yes_no("ok?") is True
+    monkeypatch.setattr("builtins.input", lambda _: "n")
+    assert m.prompt_yes_no("ok?") is False
+
+
+def test_prompt_yes_no_empty_uses_default(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _: "")
+    assert m.prompt_yes_no("ok?", default=True) is True
+    assert m.prompt_yes_no("ok?", default=False) is False
+
+
+# --------------------------------------------------------------------------
 # Non-interactive config validation
 # --------------------------------------------------------------------------
 
