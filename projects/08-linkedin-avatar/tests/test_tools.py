@@ -306,6 +306,50 @@ class TestLookupProject:
         assert result["found"] is False
         assert "message" in result
 
+    def test_record_missing_name_is_skipped(self, tmp_path, monkeypatch):
+        records = [
+            {"description": "no name here", "url": "https://example.com/broken"},
+            {
+                "name": "issue-worm",
+                "description": "Multi-agent coder",
+                "url": "https://github.com/leonarduk/issue-worm",
+            },
+        ]
+        path = tmp_path / "github.json"
+        path.write_text(json.dumps(records), encoding="utf-8")
+        monkeypatch.setattr(tools, "GITHUB_SNAPSHOT_PATH", path)
+
+        result = tools.lookup_project(name="issue-worm")
+
+        assert result["found"] is True
+        assert result["project"]["name"] == "issue-worm"
+
+    def test_all_records_malformed_does_not_raise(self, tmp_path, monkeypatch):
+        records = [
+            {"description": "no name"},
+            "not-a-dict",
+            {"name": ""},
+            {"name": None},
+        ]
+        path = tmp_path / "github.json"
+        path.write_text(json.dumps(records), encoding="utf-8")
+        monkeypatch.setattr(tools, "GITHUB_SNAPSHOT_PATH", path)
+
+        result = tools.lookup_project(name="issue-worm")
+
+        assert result["found"] is False
+        assert "message" in result
+
+    def test_snapshot_not_a_list_does_not_raise(self, tmp_path, monkeypatch):
+        path = tmp_path / "github.json"
+        path.write_text(json.dumps({"not": "a list"}), encoding="utf-8")
+        monkeypatch.setattr(tools, "GITHUB_SNAPSHOT_PATH", path)
+
+        result = tools.lookup_project(name="issue-worm")
+
+        assert result["found"] is False
+        assert "message" in result
+
 
 class TestDispatch:
     def test_dispatches_known_tool(self):

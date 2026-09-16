@@ -130,6 +130,31 @@ def record_unknown_question(question):
     return {"recorded": result["status"] in ("sent", "logged"), **result}
 
 
+def _validated_records(records):
+    """Return only well-formed github.json records.
+
+    A record is well-formed if it is a dict with a non-empty string "name".
+    Malformed records are skipped with a warning rather than raising, so a
+    single bad entry (from the separate snapshot generator) can't take down
+    the lookup. Extra fields are preserved untouched.
+    """
+    valid = []
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            logger.warning(
+                "Skipping malformed github.json record at index %d: not an object", index
+            )
+            continue
+        name = record.get("name")
+        if not isinstance(name, str) or not name.strip():
+            logger.warning(
+                "Skipping malformed github.json record at index %d: missing 'name'", index
+            )
+            continue
+        valid.append(record)
+    return valid
+
+
 def lookup_project(name):
     """Fetch the full github.json record for one repo, fuzzy-matching the name."""
     try:
@@ -142,7 +167,16 @@ def lookup_project(name):
             "message": "the GitHub project index is unavailable right now",
         }
 
-    by_name = {record["name"].lower(): record for record in records}
+    if not isinstance(records, list):
+        logger.error(
+            "GitHub snapshot at %s is not a list of records", GITHUB_SNAPSHOT_PATH
+        )
+        return {
+            "found": False,
+            "message": "the GitHub project index is unavailable right now",
+        }
+
+    by_name = {record["name"].lower(): record for record in _validated_records(records)}
     query = name.strip().lower()
 
     if query in by_name:
