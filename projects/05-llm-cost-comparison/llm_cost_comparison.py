@@ -1483,7 +1483,21 @@ def prompt_choice(prompt: str, choices: list, default: Optional[str] = None) -> 
     # Normalize choices for case-insensitive comparison while preserving the
     # original casing for display. A future mixed-case entry (e.g. "Claude")
     # would otherwise be silently rejected when the user types "claude".
-    normalized_choices = {c.casefold(): c for c in choices}
+    #
+    # Build the lookup explicitly rather than via a dict comprehension so a
+    # casefold collision (e.g. ["Claude", "claude"]) fails loudly instead of
+    # silently dropping one entry — the dropped choice would otherwise be
+    # unreachable even though it was explicitly offered. This is a no-op for
+    # the current all-lowercase-ASCII callers, where casefold is identity.
+    normalized_choices = {}
+    for c in choices:
+        key = c.casefold()
+        if key in normalized_choices:
+            raise ValueError(
+                f"choices contain casefold-collision: "
+                f"{normalized_choices[key]!r} and {c!r} both normalize to {key!r}"
+            )
+        normalized_choices[key] = c
     while True:
         raw = input(f"{prompt} ({choice_str}){suffix}: ").strip().casefold()
         if not raw and default:
