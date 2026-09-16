@@ -69,6 +69,39 @@ See `example_config.json` (workload presets, hardware you already own) and
 `example_config_buying_hardware.json` (explicit workload, buying new
 hardware) for the config shapes.
 
+### Timing notes
+
+The optional local-endpoint benchmark reports a single **wall-clock** timing
+value. It's worth being clear about what that number does and doesn't
+include, because it's easy to read it as pure model speed when it isn't.
+
+- **Wall-clock time** is everything between sending the request and receiving
+  the full response: request submission, network round-trip, server-side
+  queuing, tokenization, generation, and response download. It's the number
+  the benchmark actually measures.
+- **Generation-only time** — the actual model inference — is a *subset* of
+  wall-clock time. It's what you'd want if you're comparing raw model
+  throughput across endpoints, but it's not what's reported here.
+
+How much the two differ depends on where the endpoint lives:
+
+- For a **local endpoint** (Ollama, LM Studio, or any OpenAI-compatible
+  server on `localhost`), the overhead is small — there's no real network
+  hop, so wall-clock time is a reasonable proxy for generation time.
+- For a **hosted API**, network latency and server load can make wall-clock
+  time significantly longer than generation time, and the gap varies with
+  your connection and the provider's current load. Comparing a local
+  wall-clock number against a hosted wall-clock number therefore mixes
+  model speed with network conditions.
+
+The current code only reports wall-clock time. To get generation-only timing
+for a hosted model, you'd need to instrument the server response — for
+example, OpenAI's API surfaces a `time_per_output_token` value in its
+response headers, which this script does not currently read or display. If
+you need that figure, capture it yourself from the raw response (or the
+provider's usage dashboard) rather than relying on the benchmark's
+wall-clock number.
+
 ## Traffic scenarios (workload presets)
 
 Guessing "requests per day" and "average input tokens per request" cold is a
