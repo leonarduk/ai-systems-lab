@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+import threading
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,15 @@ DEFAULT_MAX_CONTEXT_TOKENS = 40000
 # overestimates, so the budget check errs toward trimming rather than
 # quietly shipping an oversized prompt.
 CHARS_PER_TOKEN_ESTIMATE = 3.0
+
+# Bounded memoization for estimate_tokens when called with a file path.
+# Keyed by resolved path; each entry stores (mtime_ns, size, token_count)
+# so a modified file invalidates its own entry on the next call. Bounded
+# to avoid unbounded growth; thread-safe via a plain lock (the critical
+# section is tiny and the cache is only touched on file-path calls).
+_TOKEN_CACHE_MAXSIZE = 128
+_token_cache = {}
+_token_cache_lock = threading.Lock()
 
 ROLE_BLOCK = (
     "You are Steve Leonard's AI twin. A recruiter, hiring manager or fellow "
@@ -65,8 +75,60 @@ class PromptTooLargeError(Exception):
     demoting every repo record to an index line."""
 
 
-def estimate_tokens(text):
+def _count_tokens(text):
     return math.ceil(len(text) / CHARS_PER_TOKEN_ESTIMATE)
+
+
+def _estimate_tokens_for_path(path):
+    """Return the token estimate for a file path, memoized by (mtime, size).
+
+    The cache is bounded and thread-safe. A file whose mtime or size has
+    changed since it was last read is re-read and re-counted, so the
+    returned value is always consistent with the file's current contents.
+    """
+    try:
+        stat = os.stat(path)
+    except OSError:
+        # Not a readable file — fall back to treating the argument as text.
+        return None
+
+    key = str(path)
+    signature = (stat.st_mtime_ns, stat.st_size)
+
+    with _token_cache_lock:
+        cached = _token_cache.get(key)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    count = _count_tokens(text)
+
+    with _token_cache_lock:
+        # Simple bounded eviction: drop an arbitrary entry when full. The
+        # cache is small and the workload is a handful of files, so a
+        # precise LRU is not worth the complexity.
+        if key not in _token_cache and len(_token_cache) >= _TOKEN_CACHE_MAXSIZE:
+            _token_cache.pop(next(iter(_token_cache)))
+        _token_cache[key] = (signature, count)
+
+    return count
+
+
+def estimate_tokens(text):
+    """Estimate the token count for a string, or for the contents of a file
+    path. File-path calls are memoized by (mtime, size) so repeated calls
+    with the same unchanged file avoid re-reading and re-counting it."""
+    if isinstance(text, (str, os.PathLike)):
+        path = os.fspath(text)
+        if os.path.isfile(path):
+            cached = _estimate_tokens_for_path(path)
+            if cached is not None:
+                return cached
+    return _count_tokens(text)
 
 
 def _read_text_file(path):

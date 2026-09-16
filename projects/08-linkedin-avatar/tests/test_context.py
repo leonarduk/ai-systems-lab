@@ -175,6 +175,50 @@ class TestEstimateTokens:
     def test_scales_with_text_length(self):
         assert context.estimate_tokens("a" * 600) > context.estimate_tokens("a" * 300)
 
+    def test_repeated_calls_with_same_file_do_not_reread(self, tmp_path, monkeypatch):
+        path = tmp_path / "big.txt"
+        path.write_text("x" * 3000, encoding="utf-8")
+
+        real_read_text = Path.read_text
+        calls = {"n": 0}
+
+        def counting_read_text(self, *args, **kwargs):
+            calls["n"] += 1
+            return real_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", counting_read_text)
+
+        first = context.estimate_tokens(str(path))
+        second = context.estimate_tokens(str(path))
+
+        assert first == second
+        assert calls["n"] == 1
+
+    def test_file_modification_invalidates_cache(self, tmp_path):
+        path = tmp_path / "changing.txt"
+        path.write_text("a" * 300, encoding="utf-8")
+        first = context.estimate_tokens(str(path))
+
+        import os as _os
+        import time as _time
+
+        _time.sleep(0.01)
+        path.write_text("a" * 900, encoding="utf-8")
+        _os.utime(path, None)
+
+        second = context.estimate_tokens(str(path))
+        assert second > first
+
+    def test_cache_is_bounded(self, tmp_path):
+        for i in range(context._TOKEN_CACHE_MAXSIZE + 20):
+            p = tmp_path / f"f{i}.txt"
+            p.write_text("y" * (10 + i), encoding="utf-8")
+            context.estimate_tokens(str(p))
+        assert len(context._token_cache) <= context._TOKEN_CACHE_MAXSIZE
+
+    def test_non_path_input_still_works(self):
+        assert context.estimate_tokens("a" * 300) == 100
+
 
 class TestFormatIndexLine:
     def test_handles_missing_description(self):
