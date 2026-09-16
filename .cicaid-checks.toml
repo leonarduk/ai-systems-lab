@@ -1,0 +1,30 @@
+# Local check list for cicaid-devtools' `cicaid` CLI (see requirements-dev.txt).
+#
+# Without this file, cicaid falls back to its DEFAULT_CHECKS, which are
+# allotmint's own checks (a `python scripts/check_contract_version_sync.py`
+# script, mypy over a `backend/` package, etc.) — none of which exist in this
+# repo. That fallback was causing every issue-worm-pro run against this repo
+# to fail on an unrelated, nonexistent script before ever reaching real
+# verification. These checks mirror .github/workflows/python-ci.yml instead.
+#
+# .github/scripts' own pytest suite is deliberately left out here: several of
+# its tests shell out to a hardcoded `python3`, which isn't on PATH on
+# Windows, so it isn't safe to run as a local/CI-mirroring check on every
+# platform. See the "test" job in python-ci.yml (which runs on ubuntu-latest)
+# for that coverage instead.
+
+[[checks]]
+name = "lint"
+description = "Flake8 syntax/lint check (black formatting is advisory in CI, not blocking)"
+workflow = ".github/workflows/python-ci.yml (lint)"
+commands = [
+    "flake8 projects/ --count --select=E9,F63,F7,F82 --show-source --statistics",
+]
+
+[[checks]]
+name = "security"
+description = "Bandit static security scan (advisory in CI, not blocking — mirrored the same way here)"
+workflow = ".github/workflows/python-ci.yml (security)"
+commands = [
+    "bandit -r projects/ -ll || echo Security issues found",
+]
