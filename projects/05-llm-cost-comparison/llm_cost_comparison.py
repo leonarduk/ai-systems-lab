@@ -1235,7 +1235,7 @@ def format_gpu_summary(gpu_info: dict) -> str:
 
 def list_ollama_models(base_url: str) -> list:
     """List every model pulled into the local Ollama install (``GET /api/tags``)."""
-    _validate_http_url(base_url)
+    base_url = _validate_http_url(base_url)
     req = urllib.request.Request(f"{base_url.rstrip('/')}/api/tags", method="GET")
     with urllib.request.urlopen(req, timeout=10) as resp:
         data = json.loads(resp.read().decode("utf-8"))
@@ -1249,7 +1249,7 @@ def list_running_ollama_models(base_url: str) -> list:
     benchmark request will hit — a better default than the full installed
     list from ``list_ollama_models`` when both are available.
     """
-    _validate_http_url(base_url)
+    base_url = _validate_http_url(base_url)
     req = urllib.request.Request(f"{base_url.rstrip('/')}/api/ps", method="GET")
     with urllib.request.urlopen(req, timeout=10) as resp:
         data = json.loads(resp.read().decode("utf-8"))
@@ -1258,7 +1258,7 @@ def list_running_ollama_models(base_url: str) -> list:
 
 def list_openai_compatible_models(base_url: str, api_key: Optional[str] = None) -> list:
     """List models an OpenAI-compatible server reports as available (``GET /v1/models``)."""
-    _validate_http_url(base_url)
+    base_url = _validate_http_url(base_url)
     headers = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -1298,18 +1298,30 @@ BENCHMARK_PROMPT = (
 )
 
 
-def _validate_http_url(base_url: str) -> None:
-    """Reject non-http(s) base URLs before building a request from them.
+def _validate_http_url(base_url: str) -> str:
+    """Normalize and validate a base URL before building a request from it.
 
-    ``base_url`` comes straight from free-form user input; without this, a
-    ``file://`` or other custom scheme would be passed through to
-    ``urllib.request`` unchecked.
+    ``base_url`` comes straight from free-form user input. Users commonly
+    type a bare ``host[:port]`` (e.g. ``localhost:11434``) without a scheme,
+    so a missing scheme is silently filled in with ``http://`` — the tool
+    only ever makes HTTP requests to local endpoints, so that's the right
+    default. Any other scheme (``file://``, ``ftp://``, etc.) is still
+    rejected, since passing those through to ``urllib.request`` unchecked
+    would be unsafe.
+
+    Returns the normalized URL so callers can use the scheme-prefixed form.
     """
-    scheme = base_url.split("://", 1)[0].lower() if "://" in base_url else ""
+    import re
+
+    url = base_url.strip()
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", url):
+        url = "http://" + url
+    scheme = url.split("://", 1)[0].lower()
     if scheme not in ("http", "https"):
         raise ValueError(
             f"base_url must start with http:// or https:// (got {base_url!r})"
         )
+    return url
 
 
 def benchmark_ollama(base_url: str, model: str, num_predict: int = 200) -> float:
@@ -1321,7 +1333,7 @@ def benchmark_ollama(base_url: str, model: str, num_predict: int = 200) -> float
     ``benchmark_openai_compatible``'s wall-clock measurement (see its
     docstring).
     """
-    _validate_http_url(base_url)
+    base_url = _validate_http_url(base_url)
     payload = json.dumps(
         {
             "model": model,
@@ -1356,7 +1368,7 @@ def benchmark_openai_compatible(
     Both make this systematically lower and not directly comparable to
     ``benchmark_ollama``'s generation-only ``eval_duration`` measurement.
     """
-    _validate_http_url(base_url)
+    base_url = _validate_http_url(base_url)
     payload = json.dumps(
         {
             "model": model,
