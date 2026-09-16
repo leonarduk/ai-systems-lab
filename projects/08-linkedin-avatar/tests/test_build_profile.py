@@ -213,3 +213,66 @@ class TestCli:
 
         assert exit_code == 0
         assert (tmp_path / "profile.md").exists()
+
+
+class TestDryRun:
+    def test_dry_run_clean_file_writes_nothing(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setattr(build_profile, "PdfReader", FakePdfReader)
+        monkeypatch.setattr(build_profile, "KNOWLEDGE_DIR", tmp_path)
+        out_path = tmp_path / "profile.md"
+
+        exit_code = build_profile.main(
+            ["--pdf", "fake.pdf", "--out", str(out_path), "--dry-run"]
+        )
+
+        assert exit_code == 0
+        assert not out_path.exists()
+        captured = capsys.readouterr()
+        assert "0 redaction(s)" in captured.out
+        assert "not written" in captured.out
+
+    def test_dry_run_dirty_file_reports_redactions(self, monkeypatch, tmp_path, capsys):
+        class DirtyPage:
+            def extract_text(self):
+                return "Contact jane.doe@example.com or +44 7911 123456"
+
+        class DirtyReader:
+            def __init__(self, path):
+                self.pages = [DirtyPage()]
+
+        monkeypatch.setattr(build_profile, "PdfReader", DirtyReader)
+        monkeypatch.setattr(build_profile, "KNOWLEDGE_DIR", tmp_path)
+        out_path = tmp_path / "profile.md"
+
+        exit_code = build_profile.main(
+            ["--pdf", "fake.pdf", "--out", str(out_path), "--dry-run"]
+        )
+
+        assert exit_code == 0
+        assert not out_path.exists()
+        captured = capsys.readouterr()
+        assert "email" in captured.out
+        assert "phone number" in captured.out
+        assert "jane.doe@example.com" in captured.out
+
+    def test_dry_run_with_check_exits_nonzero_on_leak(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        class LeakyPage:
+            def extract_text(self):
+                return "Contact jane.doe@example.com"
+
+        class LeakyReader:
+            def __init__(self, path):
+                self.pages = [LeakyPage()]
+
+        monkeypatch.setattr(build_profile, "PdfReader", LeakyReader)
+        monkeypatch.setattr(build_profile, "KNOWLEDGE_DIR", tmp_path)
+        out_path = tmp_path / "profile.md"
+
+        exit_code = build_profile.main(
+            ["--pdf", "fake.pdf", "--out", str(out_path), "--dry-run", "--check"]
+        )
+
+        assert exit_code == 1
+        assert not out_path.exists()
