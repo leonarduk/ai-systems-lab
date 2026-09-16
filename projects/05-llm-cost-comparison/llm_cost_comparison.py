@@ -1532,8 +1532,18 @@ def interactive_local_setup() -> tuple:
     ``save_last_run()`` so the next run can reuse them as defaults.
     """
     print("\n== Local setup ==")
+    # A single combined prompt replaces the previous two separate yes/no
+    # questions (GPU detection, then throughput benchmark). Answering "y"
+    # skips both steps; "n" or Enter falls through to the original
+    # two-question flow so each can still be controlled independently.
+    skip_benchmark = prompt_yes_no(
+        "Skip benchmark (GPU detection + throughput)?", default=False
+    )
+    gpu_detection_enabled = not skip_benchmark
+    benchmark_enabled = not skip_benchmark
+
     gpu_info = None
-    if prompt_yes_no(
+    if gpu_detection_enabled and prompt_yes_no(
         "Attempt to auto-detect an NVIDIA GPU via nvidia-smi?", default=True
     ):
         gpu_info = detect_nvidia_gpu()
@@ -1552,7 +1562,7 @@ def interactive_local_setup() -> tuple:
 
     tokens_per_sec = None
     measured_load_power_w = None
-    if prompt_yes_no(
+    if benchmark_enabled and prompt_yes_no(
         "Attempt to benchmark a running local model endpoint (Ollama or OpenAI-compatible)?",
         default=True,
     ):
