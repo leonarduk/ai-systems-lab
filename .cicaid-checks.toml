@@ -18,6 +18,11 @@ name = "test"
 description = "Per-project pytest suite (mirrors the \"test\" job in python-ci.yml)"
 workflow = ".github/workflows/python-ci.yml (test)"
 commands = [
+    # Regression-tests the discovery logic itself first (#255's review
+    # found a real bug in it) -- a broken verifier script silently
+    # skipping projects is exactly the failure mode this check exists to
+    # close.
+    "pytest .github/scripts/test_run_project_tests.py -q",
     "python .github/scripts/run_project_tests.py",
 ]
 

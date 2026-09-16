@@ -10,6 +10,8 @@ Written in Python (not the workflow's bash loop) so it also works as a local
 """
 from __future__ import annotations
 
+import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -33,22 +35,55 @@ EXCLUDED = {
     PROJECTS_ROOT / "08-linkedin-avatar" / "tests" / "test_build_profile.py",
 }
 
+# GitHub Actions ::group::/::error:: annotations are only meaningful in a
+# workflow log; printed locally via cicaid they're just noise.
+_IN_CI = os.environ.get("GITHUB_ACTIONS") == "true"
 
-def find_project_dirs() -> list[Path]:
+
+def _group(title: str) -> None:
+    print(f"::group::{title}" if _IN_CI else f"=== {title} ===")
+
+
+def _end_group() -> None:
+    if _IN_CI:
+        print("::endgroup::")
+
+
+def _error(message: str) -> None:
+    print(f"::error::{message}" if _IN_CI else f"ERROR: {message}")
+
+
+def find_project_dirs(
+    projects_root: Path = PROJECTS_ROOT, excluded: set[Path] | None = None
+) -> list[Path]:
+    """Discover one pytest rootdir per project under ``projects_root``.
+
+    Mirrors python-ci.yml's own walk: starting from each test file's
+    directory, walk *upward toward and including* ``projects_root`` looking
+    for the nearest ``requirements.txt``; a project directory itself (with
+    no further ancestor to check) is still a valid stopping point. If no
+    ``requirements.txt`` is found anywhere in that ancestry, the project is
+    still tested from the test file's own directory, matching python-ci.yml
+    rather than being silently skipped.
+    """
+    if excluded is None:
+        excluded = EXCLUDED
     test_files = sorted(
         p
-        for p in PROJECTS_ROOT.rglob("*.py")
+        for p in projects_root.rglob("*.py")
         if (p.name.startswith("test_") or p.name.endswith("_test.py"))
         and ".venv" not in p.parts
-        and p not in EXCLUDED
+        and p not in excluded
     )
     seen: dict[Path, None] = {}
     for test_file in test_files:
         proj_dir = test_file.parent
         walk = test_file.parent
-        while walk != PROJECTS_ROOT and PROJECTS_ROOT in walk.parents:
+        while True:
             if (walk / "requirements.txt").exists():
                 proj_dir = walk
+                break
+            if walk == projects_root or projects_root not in walk.parents:
                 break
             walk = walk.parent
         seen.setdefault(proj_dir, None)
@@ -56,10 +91,18 @@ def find_project_dirs() -> list[Path]:
 
 
 def main() -> int:
+    if importlib.util.find_spec("pytest") is None:
+        _error(
+            "pytest is not installed in this environment "
+            f"({sys.executable}) -- install requirements-dev.txt first. "
+            "Treating this as an environment problem, not a test failure."
+        )
+        return 2
+
     overall_status = 0
     for proj_dir in find_project_dirs():
         rel = proj_dir.relative_to(REPO_ROOT)
-        print(f"::group::Testing {rel}")
+        _group(f"Testing {rel}")
         ignore_args = [
             f"--ignore={excluded}"
             for excluded in EXCLUDED
@@ -70,9 +113,9 @@ def main() -> int:
             cwd=REPO_ROOT,
         )
         if result.returncode != 0:
-            print(f"::error::Tests failed in {rel}")
+            _error(f"Tests failed in {rel}")
             overall_status = 1
-        print("::endgroup::")
+        _end_group()
     return overall_status
 
 
