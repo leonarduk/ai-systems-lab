@@ -317,6 +317,121 @@ def test_load_pricing_raises_config_error_on_missing_file(tmp_path: Path):
 
 
 # --------------------------------------------------------------------------
+# fetch_claude_pricing (mocked urllib — no real network needed)
+# --------------------------------------------------------------------------
+
+
+_CLAUDE_PRICING_HTML = """
+<html><body>
+<h2>Claude Opus 5</h2>
+<p>Input $5.00 per million tokens, Output $25.00 per million tokens</p>
+<h2>Claude Sonnet 5</h2>
+<p>Input $2.00 per million tokens, Output $10.00 per million tokens</p>
+<h2>Claude Haiku 4.5</h2>
+<p>Input $1.00 per million tokens, Output $5.00 per million tokens</p>
+</body></html>
+"""
+
+
+def test_fetch_claude_pricing_updates_file(monkeypatch, tmp_path: Path):
+    pricing_path = tmp_path / "pricing.json"
+    pricing_path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "deepseek": {
+                        "display_name": "DeepSeek (direct)",
+                        "models": {
+                            "deepseek-v4-flash-cache-miss": {
+                                "display_name": "DeepSeek Flash",
+                                "input_per_million": 0.14,
+                                "output_per_million": 0.28,
+                            }
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_urlopen(req, timeout=None):
+        return _FakeHTTPResponse(_CLAUDE_PRICING_HTML.encode("utf-8"))
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
+    assert m.fetch_claude_pricing(pricing_path) is True
+
+    updated = json.loads(pricing_path.read_text(encoding="utf-8"))
+    claude_models = updated["providers"]["claude"]["models"]
+    assert claude_models["opus-5"]["input_per_million"] == pytest.approx(5.0)
+    assert claude_models["opus-5"]["output_per_million"] == pytest.approx(25.0)
+    assert claude_models["sonnet-5"]["input_per_million"] == pytest.approx(2.0)
+    assert claude_models["sonnet-5"]["output_per_million"] == pytest.approx(10.0)
+    assert claude_models["haiku-4.5"]["input_per_million"] == pytest.approx(1.0)
+    assert claude_models["haiku-4.5"]["output_per_million"] == pytest.approx(5.0)
+    # Other providers preserved.
+    assert "deepseek" in updated["providers"]
+    assert updated["source_claude"] == m.CLAUDE_PRICING_URL
+
+
+def test_fetch_claude_pricing_returns_false_on_network_failure(
+    monkeypatch, tmp_path: Path
+):
+    pricing_path = tmp_path / "pricing.json"
+    original = {
+        "providers": {
+            "claude": {
+                "display_name": "Anthropic Claude",
+                "models": {
+                    "opus-5": {
+                        "display_name": "Claude Opus 5",
+                        "input_per_million": 5.0,
+                        "output_per_million": 25.0,
+                    }
+                },
+            }
+        }
+    }
+    pricing_path.write_text(json.dumps(original), encoding="utf-8")
+
+    def fake_urlopen(req, timeout=None):
+        raise OSError("network down")
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
+    assert m.fetch_claude_pricing(pricing_path) is False
+    # Existing entries left untouched.
+    assert json.loads(pricing_path.read_text(encoding="utf-8")) == original
+
+
+def test_fetch_claude_pricing_returns_false_on_unparseable_page(
+    monkeypatch, tmp_path: Path
+):
+    pricing_path = tmp_path / "pricing.json"
+    original = {
+        "providers": {
+            "claude": {
+                "display_name": "Anthropic Claude",
+                "models": {
+                    "opus-5": {
+                        "display_name": "Claude Opus 5",
+                        "input_per_million": 5.0,
+                        "output_per_million": 25.0,
+                    }
+                },
+            }
+        }
+    }
+    pricing_path.write_text(json.dumps(original), encoding="utf-8")
+
+    def fake_urlopen(req, timeout=None):
+        return _FakeHTTPResponse(b"<html><body>no prices here</body></html>")
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
+    assert m.fetch_claude_pricing(pricing_path) is False
+    assert json.loads(pricing_path.read_text(encoding="utf-8")) == original
+
+
+# --------------------------------------------------------------------------
 # Rendering / export
 # --------------------------------------------------------------------------
 
