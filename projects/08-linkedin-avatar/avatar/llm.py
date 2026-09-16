@@ -94,13 +94,21 @@ def _tool_call_message(message, tool_calls):
 
 
 def _dispatch_tool_call(call):
+    tool_name = call.function.name
     try:
         arguments = json.loads(call.function.arguments)
     except json.JSONDecodeError:
-        logger.exception("Bad JSON arguments for tool call %s", call.function.name)
+        logger.exception("Bad JSON arguments for tool call %s", tool_name)
         result = {"error": "invalid tool arguments"}
     else:
-        result = tools.dispatch(call.function.name, arguments)
+        try:
+            result = tools.dispatch(tool_name, arguments)
+        except Exception as exc:
+            logger.exception("Tool %s raised an exception during dispatch", tool_name)
+            result = {
+                "error": f"tool '{tool_name}' failed",
+                "detail": str(exc),
+            }
 
     return {
         "role": "tool",
