@@ -49,6 +49,22 @@ over the repo's own README excerpt wherever one exists — a repo with no headin
 to its README. Headings are matched case-sensitively against the repo name; keep them in the same
 order as the root README where practical, but order isn't semantically meaningful to the parser.
 
+## Smoke test
+
+`scripts/smoke_test.py` verifies a deployed instance end to end: required env vars are present,
+the root URL returns 200, the chat endpoint answers a real question, and the contact-capture flow
+works. Standard library only — no extra dependencies.
+
+```bash
+# From projects/08-linkedin-avatar/
+python scripts/smoke_test.py --base-url https://ai-systems-lab-s8gy.onrender.com --dry-run
+```
+
+`--dry-run` validates the contact-capture request without sending a real Pushover notification.
+Drop the flag (with `PUSHOVER_USER`/`PUSHOVER_TOKEN` set) to verify delivery end to end. Exits
+non-zero with a clear message on the first failed check. Also runs daily via
+`.github/workflows/smoke-test.yml`.
+
 ## Evals
 
 `evals/run_evals.py` runs `evals/cases.yaml`'s ~15 behavioural cases against the real DeepSeek API
