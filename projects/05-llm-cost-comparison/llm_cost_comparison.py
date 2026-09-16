@@ -1854,6 +1854,24 @@ def interactive_local_setup() -> tuple:
 
 
 def interactive_provider_selection(pricing: dict) -> Optional[set]:
+    """Prompt the user to choose which hosted models to compare against.
+
+    Returns ``None`` to mean "compare against every model in ``pricing``",
+    a (possibly empty) set of canonical keys to restrict the comparison to
+    those models, or an empty set for "local only".
+
+    ``all_keys`` is the set of canonical keys accepted by this prompt. It
+    contains full ``provider/model`` keys only (e.g. ``"claude/opus-5"``,
+    ``"deepseek/deepseek-v3"``) — provider-only input such as ``"claude"``
+    is *not* a member of ``all_keys`` and is therefore treated as unknown.
+
+    User input is matched case-insensitively via ``canonical_by_lower``
+    (a ``{lowercased_key: canonical_key}`` mapping), so ``"Claude/Opus-5"``
+    resolves to the canonical ``"claude/opus-5"``. Any input that does not
+    match a canonical key after case-folding is treated as unknown and
+    routed through the warning/re-prompt flow rather than being silently
+    dropped or accepted.
+    """
     print("\n== Hosted providers ==")
     print("Available models:")
     all_keys = []
