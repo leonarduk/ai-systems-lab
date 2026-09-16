@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import platform
 import subprocess
 import sys
 import threading
@@ -961,12 +962,96 @@ def _safe_float(value: str) -> Optional[float]:
         return None
 
 
+def detect_gpu_wmi() -> Optional[dict]:
+    """Detect any GPU on Windows via WMI (``Win32_VideoController``).
+
+    Works for AMD, Intel, and other vendors that ``nvidia-smi`` can't see.
+    Tries the ``wmi`` Python package first (if installed), then falls back
+    to the ``wmic`` command-line tool (deprecated but still present on most
+    Windows installs). Returns a dict with ``name``, ``vendor``, and
+    ``driver_version`` keys, or None if not on Windows or both methods fail.
+    """
+    if platform.system() != "Windows":
+        return None
+
+    # Preferred: the `wmi` package, if the user happens to have it installed.
+    try:
+        import wmi  # type: ignore
+
+        try:
+            conn = wmi.WMI()
+            for controller in conn.Win32_VideoController():
+                name = (controller.Name or "").strip()
+                if not name:
+                    continue
+                return {
+                    "name": name,
+                    "vendor": (controller.AdapterCompatibility or "").strip(),
+                    "driver_version": (controller.DriverVersion or "").strip(),
+                }
+        except Exception:  # noqa: BLE001 - best-effort, fall through to wmic
+            pass
+    except ImportError:
+        pass
+
+    # Fallback: `wmic` (deprecated but still shipped on most Windows boxes).
+    try:
+        result = subprocess.run(
+            [
+                "wmic",
+                "path",
+                "win32_VideoController",
+                "get",
+                "Name,AdapterCompatibility,DriverVersion",
+                "/format:csv",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
+    # CSV output: first non-empty line is the header, subsequent lines are data.
+    for line in lines[1:]:
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 4:
+            continue
+        # Columns are: Node, AdapterCompatibility, DriverVersion, Name
+        _node, vendor, driver_version, name = parts[:4]
+        if not name:
+            continue
+        return {
+            "name": name,
+            "vendor": vendor,
+            "driver_version": driver_version,
+        }
+    return None
+
+
+def detect_gpu(runner: Callable = subprocess.run) -> Optional[dict]:
+    """Detect a GPU, preferring ``nvidia-smi`` and falling back to WMI.
+
+    Returns the richer ``nvidia-smi`` dict when an NVIDIA card is present,
+    otherwise a WMI-derived dict (name/vendor/driver_version) for any other
+    vendor on Windows. Returns None only when both detection paths fail, so
+    callers can still fall back to manual input.
+    """
+    nvidia = detect_nvidia_gpu(runner)
+    if nvidia is not None:
+        return nvidia
+    return detect_gpu_wmi()
+
+
 def detect_nvidia_gpu(runner: Callable = subprocess.run) -> Optional[dict]:
     """Detect an NVIDIA GPU via ``nvidia-smi`` (works on Windows and Linux).
 
     Returns a dict with name/memory/power info, or None if ``nvidia-smi``
     isn't installed, isn't on PATH, or returns no usable data. Callers must
-    treat None as "detection unavailable" and fall back to manual input.
+    treat None as "detection unavailable" and fall back to manual input
+    (or to ``detect_gpu_wmi`` via ``detect_gpu``).
     """
     try:
         result = runner(

@@ -601,6 +601,110 @@ def test_detect_nvidia_gpu_returns_none_on_timeout():
     assert m.detect_nvidia_gpu(runner=fake_runner) is None
 
 
+# --------------------------------------------------------------------------
+# WMI-based GPU detection fallback (Windows, non-NVIDIA vendors)
+# --------------------------------------------------------------------------
+
+
+def test_detect_gpu_wmi_returns_none_on_non_windows(monkeypatch):
+    monkeypatch.setattr(m.platform, "system", lambda: "Linux")
+    assert m.detect_gpu_wmi() is None
+
+
+def test_detect_gpu_wmi_uses_wmi_package_when_available(monkeypatch):
+    monkeypatch.setattr(m.platform, "system", lambda: "Windows")
+
+    class _FakeController:
+        Name = "AMD Radeon RX 7900 XTX"
+        AdapterCompatibility = "Advanced Micro Devices, Inc."
+        DriverVersion = "31.0.24033.1003"
+
+    class _FakeWmiModule:
+        @staticmethod
+        def WMI():
+            class _Conn:
+                @staticmethod
+                def Win32_VideoController():
+                    return [_FakeController()]
+
+            return _Conn()
+
+    monkeypatch.setitem(__import__("sys").modules, "wmi", _FakeWmiModule)
+    info = m.detect_gpu_wmi()
+    assert info == {
+        "name": "AMD Radeon RX 7900 XTX",
+        "vendor": "Advanced Micro Devices, Inc.",
+        "driver_version": "31.0.24033.1003",
+    }
+
+
+def test_detect_gpu_wmi_falls_back_to_wmic_when_wmi_package_missing(monkeypatch):
+    monkeypatch.setattr(m.platform, "system", lambda: "Windows")
+    # Ensure the `wmi` package import fails so we exercise the wmic path.
+    monkeypatch.setitem(__import__("sys").modules, "wmi", None)
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+        assert "wmic" in cmd[0]
+        return _FakeCompletedProcess(
+            "Node,AdapterCompatibility,DriverVersion,Name\n"
+            "HOST,Intel Corporation,31.0.101.4502,Intel(R) UHD Graphics 770\n"
+        )
+
+    monkeypatch.setattr(m.subprocess, "run", fake_run)
+    info = m.detect_gpu_wmi()
+    assert info == {
+        "name": "Intel(R) UHD Graphics 770",
+        "vendor": "Intel Corporation",
+        "driver_version": "31.0.101.4502",
+    }
+
+
+def test_detect_gpu_wmi_returns_none_when_wmic_unavailable(monkeypatch):
+    monkeypatch.setattr(m.platform, "system", lambda: "Windows")
+    monkeypatch.setitem(__import__("sys").modules, "wmi", None)
+
+    def fake_run(*args, **kwargs):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(m.subprocess, "run", fake_run)
+    assert m.detect_gpu_wmi() is None
+
+
+def test_detect_gpu_prefers_nvidia_smi_when_available(monkeypatch):
+    def fake_runner(*args, **kwargs):
+        return _FakeCompletedProcess("NVIDIA GeForce RTX 4090, 24564, 210.5, 450\n")
+
+    # WMI must not be consulted when nvidia-smi succeeds.
+    monkeypatch.setattr(m, "detect_gpu_wmi", lambda: (_ for _ in ()).throw(AssertionError()))
+    info = m.detect_gpu(runner=fake_runner)
+    assert info["name"] == "NVIDIA GeForce RTX 4090"
+
+
+def test_detect_gpu_falls_back_to_wmi_when_nvidia_smi_fails(monkeypatch):
+    def fake_runner(*args, **kwargs):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(
+        m,
+        "detect_gpu_wmi",
+        lambda: {
+            "name": "AMD Radeon RX 7900 XTX",
+            "vendor": "Advanced Micro Devices, Inc.",
+            "driver_version": "31.0.24033.1003",
+        },
+    )
+    info = m.detect_gpu(runner=fake_runner)
+    assert info["name"] == "AMD Radeon RX 7900 XTX"
+
+
+def test_detect_gpu_returns_none_when_both_paths_fail(monkeypatch):
+    def fake_runner(*args, **kwargs):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(m, "detect_gpu_wmi", lambda: None)
+    assert m.detect_gpu(runner=fake_runner) is None
+
+
 def test_format_gpu_summary_with_all_fields():
     info = {
         "name": "NVIDIA GeForce RTX 4090",
