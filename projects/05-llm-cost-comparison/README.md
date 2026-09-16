@@ -58,6 +58,20 @@ Walks through:
    file with a `scenario` column either way, so a spreadsheet or script can
    filter or pivot across scenarios.
 
+### Reusing saved settings (`--use-defaults`)
+
+```bash
+python llm_cost_comparison.py --use-defaults
+```
+
+Skips the workload/hardware-mode/provider prompts and reuses the choices
+saved by a previous interactive run. **GPU detection and the
+tokens-per-second benchmark are still re-run** so the cost projections
+reflect current hardware rather than a stale measurement captured on
+whatever day the previous run happened to execute. If detection or the
+benchmark genuinely isn't available (no `nvidia-smi`, no local endpoint),
+the saved throughput value is used as a fallback and the script says so.
+
 ### Non-interactive (scripting / CI)
 
 ```bash

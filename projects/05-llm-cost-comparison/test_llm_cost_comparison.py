@@ -1723,6 +1723,113 @@ def test_resolve_workload_scenarios_unknown_preset_key_raises():
 # --------------------------------------------------------------------------
 
 
+# --------------------------------------------------------------------------
+# --use-defaults fast-path re-runs GPU detection / throughput benchmark
+# --------------------------------------------------------------------------
+
+
+def test_refresh_measurements_for_defaults_uses_fresh_benchmark(monkeypatch):
+    # The saved tokens_per_sec is stale; the fresh benchmark must win.
+    settings = {"tokens_per_sec": 5.0}
+    monkeypatch.setattr(
+        m,
+        "detect_nvidia_gpu",
+        lambda runner=None: {
+            "name": "NVIDIA GeForce RTX 4090",
+            "memory_total_mib": 24564.0,
+            "power_draw_w": 40.0,
+            "power_limit_w": 450.0,
+        },
+    )
+    monkeypatch.setattr(m, "average_gpu_power_w", lambda runner=None: 40.0)
+    monkeypatch.setattr(m, "discover_local_models", lambda backend, url: ["llama3"])
+    monkeypatch.setattr(
+        m, "benchmark_ollama", lambda base_url, model: 123.0
+    )
+    monkeypatch.setattr(
+        m,
+        "measure_gpu_power_during",
+        lambda func, runner=None, poll_interval=0.5: (func(), 380.0),
+    )
+    answers = iter(["ollama", "http://localhost:11434", "llama3"])
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+
+    tokens_per_sec, gpu_info, measured_load_power_w = (
+        m._refresh_measurements_for_defaults(settings)
+    )
+    assert tokens_per_sec == pytest.approx(123.0)
+    assert gpu_info is not None
+    assert measured_load_power_w == pytest.approx(380.0)
+
+
+def test_refresh_measurements_for_defaults_falls_back_to_saved_on_benchmark_failure(
+    monkeypatch, capsys
+):
+    # When the benchmark genuinely can't run, the saved value is used and
+    # the script says so rather than silently replaying it.
+    settings = {"tokens_per_sec": 7.5}
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: None)
+    monkeypatch.setattr(m, "discover_local_models", lambda backend, url: [])
+    monkeypatch.setattr(
+        m,
+        "benchmark_ollama",
+        lambda base_url, model: (_ for _ in ()).throw(OSError("connection refused")),
+    )
+    monkeypatch.setattr(
+        m,
+        "measure_gpu_power_during",
+        lambda func, runner=None, poll_interval=0.5: (func(), None),
+    )
+    answers = iter(["ollama", "http://localhost:11434", "llama3"])
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+
+    tokens_per_sec, gpu_info, measured_load_power_w = (
+        m._refresh_measurements_for_defaults(settings)
+    )
+    assert tokens_per_sec == pytest.approx(7.5)
+    assert gpu_info is None
+    assert measured_load_power_w is None
+    out = capsys.readouterr().out
+    assert "Using saved throughput" in out
+
+
+def test_run_interactive_use_defaults_reruns_benchmark(
+    tmp_path: Path, monkeypatch, capsys
+):
+    # End-to-end: --use-defaults must not simply replay the saved
+    # tokens_per_sec — it must re-run the benchmark and use the fresh value.
+    saved = {
+        "mode": "rent",
+        "tokens_per_sec": 5.0,
+        "hourly_rate": 2.5,
+        "workload_preset": "casual",
+        "selected_models": None,
+        "last_run_at": "2020-01-01T00:00:00+00:00",
+    }
+    last_run_path = tmp_path / ".last_run.json"
+    last_run_path.write_text(json.dumps(saved), encoding="utf-8")
+    monkeypatch.setattr(m, "DEFAULT_LAST_RUN_PATH", last_run_path)
+
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: None)
+    monkeypatch.setattr(m, "discover_local_models", lambda backend, url: ["llama3"])
+    monkeypatch.setattr(m, "benchmark_ollama", lambda base_url, model: 99.0)
+    monkeypatch.setattr(
+        m,
+        "measure_gpu_power_during",
+        lambda func, runner=None, poll_interval=0.5: (func(), None),
+    )
+    answers = iter(["ollama", "http://localhost:11434", "llama3"])
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    # Decline the export prompt at the end.
+    monkeypatch.setattr(m, "prompt_yes_no", lambda prompt, default=True: False)
+
+    exit_code = m.run_interactive(use_defaults=True)
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "Re-running GPU detection and throughput benchmark" in out
+    assert "Measured throughput: 99.0 tokens/sec" in out
+
+
 def test_run_non_interactive_multiple_presets_prints_one_combined_table_and_exports_one_file(
     tmp_path: Path, capsys
 ):

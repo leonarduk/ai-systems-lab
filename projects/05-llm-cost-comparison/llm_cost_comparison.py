@@ -1870,6 +1870,74 @@ def interactive_provider_selection(pricing: dict) -> Optional[set]:
     return selected
 
 
+def _refresh_measurements_for_defaults(
+    settings: dict,
+) -> tuple:
+    """Re-run GPU detection and the throughput benchmark for ``--use-defaults``.
+
+    The saved settings file stores a ``tokens_per_sec`` value captured on
+    whatever day the previous run happened to execute. Replaying that
+    number silently would produce stale cost projections — the whole point
+    of ``--use-defaults`` is a *quick* run, not a *stale* one. So the
+    fast-path re-runs the same best-effort detection/benchmark the full
+    interactive flow uses, and only falls back to the saved value when
+    detection/benchmark is genuinely unavailable (no ``nvidia-smi``, no
+    local endpoint, etc.).
+
+    Returns ``(tokens_per_sec, gpu_info, measured_load_power_w)``. The
+    returned ``tokens_per_sec`` is the fresh measurement when one was
+    obtained, otherwise the saved value from ``settings``.
+    """
+    print("Re-running GPU detection and throughput benchmark (fresh measurements)...")
+
+    gpu_info = detect_nvidia_gpu()
+    if gpu_info:
+        idle_avg = average_gpu_power_w()
+        if idle_avg is not None:
+            gpu_info["power_draw_w"] = idle_avg
+        print(f"  Detected: {format_gpu_summary(gpu_info)}")
+    else:
+        print(
+            "  No GPU detected (nvidia-smi not found or returned no data) — "
+            "using saved settings for hardware details."
+        )
+
+    tokens_per_sec = None
+    measured_load_power_w = None
+    backend = prompt_choice("Backend", ["ollama", "openai"], default="ollama")
+    base_url = (
+        input("Base URL [http://localhost:11434]: ").strip()
+        or "http://localhost:11434"
+    )
+    detected_models = discover_local_models(backend, base_url)
+    default_model = detected_models[0] if detected_models else None
+    if detected_models:
+        print(f"  Detected models: {', '.join(detected_models)}")
+    prompt_label = "Model name as served locally"
+    if default_model:
+        model = input(f"{prompt_label} [{default_model}]: ").strip() or default_model
+    else:
+        model = input(f"{prompt_label}: ").strip()
+    try:
+        if backend == "ollama":
+            tokens_per_sec, measured_load_power_w = measure_gpu_power_during(
+                lambda: benchmark_ollama(base_url, model)
+            )
+        else:
+            tokens_per_sec, measured_load_power_w = measure_gpu_power_during(
+                lambda: benchmark_openai_compatible(base_url, model)
+            )
+        print(f"  Measured throughput: {tokens_per_sec:.1f} tokens/sec")
+    except Exception as exc:  # noqa: BLE001 - best-effort, any failure just falls back
+        print(f"  Benchmark failed ({exc}) — falling back to saved throughput.")
+
+    if tokens_per_sec is None:
+        tokens_per_sec = settings["tokens_per_sec"]
+        print(f"  Using saved throughput: {tokens_per_sec:.1f} tokens/sec")
+
+    return tokens_per_sec, gpu_info, measured_load_power_w
+
+
 def run_interactive(use_defaults: bool = False) -> int:
     """Compare local hardware vs hosted providers for user-selected workloads.
 
@@ -1878,9 +1946,13 @@ def run_interactive(use_defaults: bool = False) -> int:
     rendering the cost table.
 
     When ``use_defaults`` is True, saved settings from a previous run are
-    used without prompting (equivalent to passing ``--use-defaults`` on the
-    command line).  If no saved file exists the flag is a no-op and the
-    normal interactive flow runs instead.
+    used for the workload/hardware-mode/provider choices without prompting
+    (equivalent to passing ``--use-defaults`` on the command line). GPU
+    detection and the tokens-per-second benchmark are still re-run so the
+    cost projections reflect current hardware, not a stale measurement
+    captured on whatever day the previous run happened to execute. If no
+    saved file exists the flag is a no-op and the normal interactive flow
+    runs instead.
     """
     print("LLM Cost Comparison — local vs hosted APIs")
     print("=" * 60)
@@ -1903,9 +1975,17 @@ def run_interactive(use_defaults: bool = False) -> int:
         print()
 
     if defaults is not None:
-        # Fast path: replay saved settings — no prompts at all.
+        # Fast path: replay saved settings for workload/hardware-mode/provider
+        # choices, but re-run GPU detection and the throughput benchmark so
+        # the cost projections reflect current hardware rather than a stale
+        # measurement captured on whatever day the previous run happened to
+        # execute. Only fall back to the saved tokens_per_sec when a fresh
+        # measurement genuinely isn't available.
         settings = dict(defaults)
-        tokens_per_sec = settings["tokens_per_sec"]
+        tokens_per_sec, _gpu_info, _measured_load_power_w = (
+            _refresh_measurements_for_defaults(settings)
+        )
+        settings["tokens_per_sec"] = tokens_per_sec
         mode = settings["mode"]
         if any(
             k in settings for k in ("workload", "workload_preset", "workload_presets")
@@ -2404,7 +2484,11 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument(
         "--use-defaults",
         action="store_true",
-        help="Skip prompts and reuse settings saved by a previous interactive run.",
+        help=(
+            "Skip prompts and reuse settings saved by a previous interactive run. "
+            "GPU detection and the tokens-per-second benchmark are still re-run "
+            "so the cost projections use fresh measurements."
+        ),
     )
     parser.add_argument(
         "--update-pricing",
