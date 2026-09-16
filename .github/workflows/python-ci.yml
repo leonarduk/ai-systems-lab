@@ -142,8 +142,23 @@ jobs:
 
     - name: Check for known vulnerabilities
       run: |
-        # Create a temporary requirements file from all project requirements
-        find projects/ -name "requirements.txt" -exec cat {} \; > all_requirements.txt || echo "No requirements found"
+        # Build the safety input from every project requirements.txt plus the
+        # root requirements-dev.txt. The root file installs shared repository
+        # automation (cicaid-devtools) from a GitHub release URL, so it is part
+        # of the supply-chain surface and must be scanned alongside the
+        # per-project requirements.
+        #
+        # `safety check` reads a single requirements file, so we concatenate
+        # all of them into one temporary file. `find` is run with `-print0`
+        # and `xargs -0` to be safe against paths with spaces.
+        rm -f all_requirements.txt
+        find projects/ -name "requirements.txt" -print0 | xargs -0 -r cat >> all_requirements.txt
+        if [ -f requirements-dev.txt ]; then
+          cat requirements-dev.txt >> all_requirements.txt
+        fi
+
         if [ -s all_requirements.txt ]; then
           safety check --file=all_requirements.txt --output=text || echo "Vulnerabilities found"
+        else
+          echo "No requirements found to scan"
         fi
