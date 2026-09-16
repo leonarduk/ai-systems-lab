@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import subprocess
 import sys
 import threading
@@ -186,8 +187,6 @@ def fetch_deepseek_pricing(
 
 def _extract_price(text: str, pattern: str) -> Optional[float]:
     """Try a regex; return the first captured float or None."""
-    import re
-
     match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
     if match:
         try:
