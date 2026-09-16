@@ -9,6 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import avatar.tool_definitions as tool_definitions  # noqa: E402
 import avatar.tools as tools  # noqa: E402
 
 
@@ -313,8 +314,11 @@ class TestDispatch:
 
 
 class TestToolDefinitions:
+    def test_reexported_from_tools_module(self):
+        assert tools.TOOL_DEFINITIONS is tool_definitions.TOOL_DEFINITIONS
+
     def test_every_definition_is_strict_and_closed(self):
-        for tool in tools.TOOL_DEFINITIONS:
+        for tool in tool_definitions.TOOL_DEFINITIONS:
             function = tool["function"]
             assert function["strict"] is True
             params = function["parameters"]
