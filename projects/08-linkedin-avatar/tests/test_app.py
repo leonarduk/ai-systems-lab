@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import app  # noqa: E402
 import gradio as gr  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 
 
 def make_request(ip="1.2.3.4", session_hash="session-abc"):
@@ -91,3 +92,26 @@ class TestBuildDemo:
     def test_builds_without_error(self):
         demo = app.build_demo()
         assert isinstance(demo, gr.Blocks)
+
+
+class TestHealthEndpoint:
+    def test_health_returns_200_with_ok_json(self):
+        client = TestClient(app.build_health_app())
+        response = client.get("/health")
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
+
+    def test_health_has_no_side_effects(self, monkeypatch):
+        # Guard against the health endpoint accidentally calling into
+        # guardrails/llm/tools — it must be a pure liveness probe.
+        def boom(*a, **k):
+            raise AssertionError("health check must not call external code")
+
+        monkeypatch.setattr(app.guardrails, "check_request", boom)
+        monkeypatch.setattr(app.guardrails, "record_usage", boom)
+        monkeypatch.setattr(app.llm, "send_message", boom)
+
+        client = TestClient(app.build_health_app())
+        response = client.get("/health")
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}

@@ -19,7 +19,11 @@ Render's free web-service tier. One-time setup:
 3. **Build command**: `pip install -r requirements.txt`
 4. **Start command**: `python app.py`
 5. **Instance type**: Free
-6. **Environment variables** — set every one of these in Render's dashboard (Settings →
+6. **Health check path**: `/health` (Render dashboard → Settings → Health Checks). The app
+   exposes a lightweight `GET /health` endpoint that returns HTTP 200 with
+   `{"status": "ok"}`. It has no external dependencies and no side effects, so it's safe for
+   Render to poll frequently — see "Health check endpoint" below.
+7. **Environment variables** — set every one of these in Render's dashboard (Settings →
    Environment), never in the repo:
 
    | Variable | Value | Notes |
@@ -42,9 +46,27 @@ Render's free web-service tier. One-time setup:
    `ANTHROPIC_API_KEY` is only needed if `AVATAR_PROVIDER` is ever switched to `anthropic` (the
    documented fallback in design §7) — not part of the default setup.
 
-7. Deploy. Render builds and starts automatically; every push to `main` that touches
+8. Deploy. Render builds and starts automatically; every push to `main` that touches
    `projects/08-linkedin-avatar/` triggers a redeploy (this is Render's default behaviour for a
    connected GitHub repo — no extra configuration needed).
+
+### Health check endpoint
+
+The app exposes `GET /health` (implemented in `app.py`'s `build_health_app`, mounted onto the
+Gradio server via `app_kwargs={"app": ...}`). It returns:
+
+```
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"status": "ok"}
+```
+
+Configure Render's health check path to `/health` (Settings → Health Checks). Success criteria:
+HTTP 200 with the JSON body above. The endpoint is intentionally trivial — no logging, no
+external calls, no dependency on DeepSeek/Pushover/Telegram — so it can't be the cause of a
+false "unhealthy" flag during a cold start or a provider outage. If Render reports the service
+unhealthy, the problem is elsewhere (see "Checking logs" below), not the health check itself.
 
 ### Checking logs
 
@@ -119,16 +141,18 @@ redeploy:
 
 1. Open the Render app URL directly. It should load the chat UI (allow up to 60s if it was
    asleep).
-2. Ask it a real question — e.g. "Tell me about issue-worm." — and confirm it answers correctly,
+2. Hit `https://<app-url>/health` and confirm it returns HTTP 200 with `{"status": "ok"}`. This
+   is the same endpoint Render polls — if it fails, Render will mark the service unhealthy.
+3. Ask it a real question — e.g. "Tell me about issue-worm." — and confirm it answers correctly,
    grounded in the actual knowledge files, not a generic non-answer.
-3. Say something that should trigger `record_contact` (e.g. "I'd like to talk to him about a
+4. Say something that should trigger `record_contact` (e.g. "I'd like to talk to him about a
    role, here's my email: test@example.com") and confirm a notification actually arrives on
    whichever channel(s) are configured (Pushover, Telegram, or both — see `tools._notify` in
    `avatar/tools.py`), or check the Render logs for the "not configured; logging instead" line for
    any channel that isn't set up yet.
-4. Open the landing page URL, confirm it loads instantly, and click "Start chatting" through to a
+5. Open the landing page URL, confirm it loads instantly, and click "Start chatting" through to a
    warm app.
-5. Paste the landing page URL into a LinkedIn post's preview (or a tool like
+6. Paste the landing page URL into a LinkedIn post's preview (or a tool like
    [opengraph.xyz](https://www.opengraph.xyz/)) and confirm the title, description and image
    render as a proper card, not a bare link.
 
