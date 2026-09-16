@@ -7,11 +7,19 @@
 # to fail on an unrelated, nonexistent script before ever reaching real
 # verification. These checks mirror .github/workflows/python-ci.yml instead.
 #
-# .github/scripts' own pytest suite is deliberately left out here: several of
-# its tests shell out to a hardcoded `python3`, which isn't on PATH on
-# Windows, so it isn't safe to run as a local/CI-mirroring check on every
-# platform. See the "test" job in python-ci.yml (which runs on ubuntu-latest)
-# for that coverage instead.
+# .github/scripts/test_extract_verdict.py shells out to a hardcoded
+# `python3`, which isn't on PATH on Windows, so it's excluded (along with
+# the git-mcp-server integration test, for the same reason python-ci.yml
+# excludes it) by .github/scripts/run_project_tests.py below. Everything
+# under projects/ itself has no such issue and is safe to run locally.
+
+[[checks]]
+name = "test"
+description = "Per-project pytest suite (mirrors the \"test\" job in python-ci.yml)"
+workflow = ".github/workflows/python-ci.yml (test)"
+commands = [
+    "python .github/scripts/run_project_tests.py",
+]
 
 [[checks]]
 name = "lint"
