@@ -1323,7 +1323,13 @@ def test_run_non_interactive_rejects_bad_workload_field(tmp_path: Path, bad_valu
     }
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
-    with pytest.raises(m.ConfigError, match="requests_per_day"):
+    # Per-field wording (no "workload." prefix) — pins the exact message
+    # shape, including the offending value, so the format can't silently
+    # drift back to a prefixed or value-less variant.
+    with pytest.raises(
+        m.ConfigError,
+        match=rf"^requests_per_day must be a non-negative number, got {bad_value!r}$",
+    ):
         m.run_non_interactive(config_path, export_fmt=None, export_path=None)
 
 
