@@ -75,11 +75,14 @@ def load_pricing(
         fetch_bedrock_pricing(path)
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            try:
+                return json.load(f)
+            except json.JSONDecodeError as exc:
+                raise ConfigError(
+                    f"Invalid JSON in pricing file '{path}': {exc}"
+                ) from exc
     except FileNotFoundError as exc:
         raise ConfigError(f"pricing file not found: {path}") from exc
-    except json.JSONDecodeError as exc:
-        raise ConfigError(f"pricing file {path} is not valid JSON: {exc}") from exc
 
 
 def iter_models(pricing: dict):
