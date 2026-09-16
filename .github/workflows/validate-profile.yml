@@ -1,0 +1,41 @@
+name: Validate LinkedIn Profile
+
+# Advisory, warn-only validation of the LinkedIn profile document.
+# Runs on PRs that touch the profile or the validator itself, and can be
+# triggered manually. This workflow is intentionally non-blocking: it
+# reports mismatches between the Summary and Experience sections but does
+# not fail the build, since documentation edits may have legitimate edge
+# cases that require human judgement.
+
+on:
+  pull_request:
+    paths:
+      - "projects/08-linkedin-avatar/knowledge/profile.md"
+      - "scripts/validate_profile.py"
+      - ".github/workflows/validate-profile.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-profile:
+    name: Check Summary/Experience consistency
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run profile validator (advisory)
+        # `continue-on-error: true` keeps this job non-blocking. The
+        # validator's output is still visible in the job log so reviewers
+        # can act on any mismatches it reports.
+        continue-on-error: true
+        run: |
+          python3 scripts/validate_profile.py \
+            projects/08-linkedin-avatar/knowledge/profile.md
