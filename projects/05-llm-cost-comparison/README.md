@@ -152,9 +152,10 @@ requests/day and token counts behind each one.
     live lookup of the current UK Octopus Agile unit rate. All cost math is
     still done internally in USD (hosted pricing is USD-denominated), using
     a live exchange rate (Frankfurter, exchangerate.host, or Yahoo Finance as
-    fallbacks, in that order), but **the whole table — local and hosted rows
-    alike — is displayed and exported in GBP** whenever you choose GBP, not
-    just the local electricity figure.
+    fallbacks, in that order — see "Configuring FX rate providers" below to
+    change the order), but **the whole table — local and hosted rows alike —
+    is displayed and exported in GBP** whenever you choose GBP, not just the
+    local electricity figure.
   - The non-interactive config still takes a single `power_watts` — pick
     whichever basis applies to your situation.
 - **When local can't keep up**: if the workload needs more compute-hours per
@@ -182,6 +183,37 @@ requests/day and token counts behind each one.
 - All options are also expressed as a blended **$ per 1 million tokens**
   (input + output combined) so local and hosted costs are directly
   comparable regardless of your workload's input/output mix.
+
+## Configuring FX rate providers
+
+Live exchange rates are fetched from a chain of free providers, tried in
+order until one succeeds. The default order is:
+
+1. `frankfurter_dev` — `https://api.frankfurter.dev/v1/latest`
+2. `frankfurter_app` — `https://api.frankfurter.app/v1/latest`
+3. `exchangerate_host` — `https://api.exchangerate.host/latest`
+
+If every one of those fails, the script falls back to Yahoo Finance's
+unofficial chart endpoint as a last resort.
+
+If a provider is unreliable on your network (timeouts, blocked, non-200
+responses), you can promote a different one to the top of the chain without
+editing the script by setting the `FX_RATE_PROVIDER_ORDER` environment
+variable to a comma-separated list of provider keys:
+
+```bash
+# Linux/macOS
+FX_RATE_PROVIDER_ORDER=exchangerate_host,frankfurter_dev python llm_cost_comparison.py
+
+# Windows (PowerShell)
+$env:FX_RATE_PROVIDER_ORDER = "exchangerate_host,frankfurter_dev"
+python llm_cost_comparison.py
+```
+
+Unknown keys are ignored; if the override yields no known providers, the
+default order is used so a typo can't silently disable FX lookups. The
+Yahoo Finance last-resort fallback is always tried after the configured
+providers, regardless of the override.
 
 ## Updating pricing
 

@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -1103,15 +1104,50 @@ def fetch_octopus_agile_rate(
         return None
 
 
-# Tried in order; each is a free FX source. Frankfurter has moved domains
-# before (frankfurter.app -> frankfurter.dev), and any single provider can be
-# down or blocked on a given network, so falling through to the next one is
-# more robust than depending on exactly one host.
-FX_RATE_URL_TEMPLATES: tuple = (
-    "https://api.frankfurter.dev/v1/latest?from={from_currency}&to={to_currency}",
-    "https://api.frankfurter.app/v1/latest?from={from_currency}&to={to_currency}",
-    "https://api.exchangerate.host/latest?base={from_currency}&symbols={to_currency}",
+# Named FX rate providers, tried in the order given by FX_RATE_PROVIDER_ORDER
+# (see below). Each is a free FX source. Frankfurter has moved domains before
+# (frankfurter.app -> frankfurter.dev), and any single provider can be down or
+# blocked on a given network, so falling through to the next one is more
+# robust than depending on exactly one host.
+FX_RATE_PROVIDERS: dict = {
+    "frankfurter_dev": (
+        "https://api.frankfurter.dev/v1/latest?from={from_currency}&to={to_currency}"
+    ),
+    "frankfurter_app": (
+        "https://api.frankfurter.app/v1/latest?from={from_currency}&to={to_currency}"
+    ),
+    "exchangerate_host": (
+        "https://api.exchangerate.host/latest?base={from_currency}&symbols={to_currency}"
+    ),
+}
+
+# Default fallback order for the FX providers above. Override at runtime by
+# setting the FX_RATE_PROVIDER_ORDER environment variable to a comma-separated
+# list of provider keys (e.g. "exchangerate_host,frankfurter_dev"). Unknown
+# keys are ignored; if the override yields no known providers, the default
+# order is used so a typo can't disable FX lookups entirely.
+DEFAULT_FX_RATE_PROVIDER_ORDER: tuple = (
+    "frankfurter_dev",
+    "frankfurter_app",
+    "exchangerate_host",
 )
+
+
+def _resolve_fx_rate_provider_order() -> tuple:
+    """Return the ordered tuple of FX provider keys to try.
+
+    Reads ``FX_RATE_PROVIDER_ORDER`` from the environment if set (a
+    comma-separated list of keys from ``FX_RATE_PROVIDERS``), otherwise
+    falls back to ``DEFAULT_FX_RATE_PROVIDER_ORDER``. Unknown keys are
+    dropped; if nothing valid remains, the default order is returned so a
+    typo can't silently disable FX lookups.
+    """
+    raw = os.environ.get("FX_RATE_PROVIDER_ORDER", "").strip()
+    if not raw:
+        return DEFAULT_FX_RATE_PROVIDER_ORDER
+    requested = [key.strip() for key in raw.split(",") if key.strip()]
+    valid = tuple(key for key in requested if key in FX_RATE_PROVIDERS)
+    return valid or DEFAULT_FX_RATE_PROVIDER_ORDER
 
 
 def _fetch_yahoo_fx_rate(from_currency: str, to_currency: str, timeout: float) -> float:
@@ -1135,14 +1171,20 @@ def _fetch_yahoo_fx_rate(from_currency: str, to_currency: str, timeout: float) -
 def fetch_fx_rate(
     from_currency: str, to_currency: str, timeout: float = 5.0
 ) -> Optional[float]:
-    """Best-effort live exchange rate, trying each ``FX_RATE_URL_TEMPLATES``
-    provider and finally Yahoo Finance.
+    """Best-effort live exchange rate, trying each configured FX provider in
+    order and finally Yahoo Finance.
+
+    The provider order comes from ``_resolve_fx_rate_provider_order()``,
+    which honours the ``FX_RATE_PROVIDER_ORDER`` environment variable (a
+    comma-separated list of keys from ``FX_RATE_PROVIDERS``) and otherwise
+    uses ``DEFAULT_FX_RATE_PROVIDER_ORDER``.
 
     Returns None only if every provider fails (network, unknown currency,
     parsing) so callers fall back to manual entry rather than hardcoding a
     rate that goes stale.
     """
-    for template in FX_RATE_URL_TEMPLATES:
+    for provider_key in _resolve_fx_rate_provider_order():
+        template = FX_RATE_PROVIDERS[provider_key]
         url = template.format(from_currency=from_currency, to_currency=to_currency)
         try:
             with urllib.request.urlopen(url, timeout=timeout) as resp:
