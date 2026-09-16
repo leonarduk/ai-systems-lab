@@ -1,6 +1,6 @@
 # Shared repository automation. Keep this pinned to a published cicaid release so
 # local development and CI use the same issue/PR/review commands.
-cicaid-devtools @ https://github.com/leonarduk/cicaid/releases/download/v0.3.0/cicaid_devtools-0.3.0-py3-none-any.whl
+cicaid-devtools @ https://github.com/leonarduk/cicaid/releases/download/v0.3.0/cicaid_devtools-0.3.0-py3-none-any.whl#sha256=REPLACE_WITH_REAL_SHA256_OF_THE_WHEEL
 
 # Tools used by .github/workflows/python-ci.yml.
 bandit
