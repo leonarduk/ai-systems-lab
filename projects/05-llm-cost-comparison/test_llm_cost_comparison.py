@@ -1723,6 +1723,144 @@ def test_resolve_workload_scenarios_unknown_preset_key_raises():
 # --------------------------------------------------------------------------
 
 
+def test_run_non_interactive_currency_flag_converts_rows_and_export(
+    tmp_path: Path, monkeypatch, capsys
+):
+    # A non-USD --currency should fetch an FX rate and convert every row
+    # (local and hosted alike) before rendering/exporting, mirroring the
+    # interactive GBP path. The rate is mocked so the test doesn't depend
+    # on a live FX provider.
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    config = {
+        "workload": {
+            "requests_per_day": 1000,
+            "avg_input_tokens": 500,
+            "avg_output_tokens": 300,
+        },
+        "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+        "pricing_file": str(pricing_path),
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    monkeypatch.setattr(m, "fetch_fx_rate", lambda f, t, timeout=5.0: 0.8)
+
+    export_path = tmp_path / "out.json"
+    exit_code = m.run_non_interactive(
+        config_path,
+        export_fmt="json",
+        export_path=export_path,
+        currency="GBP",
+    )
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "£" in out
+
+    data = json.loads(export_path.read_text(encoding="utf-8"))
+    assert all("monthly_cost_gbp" in row for row in data)
+    assert all("monthly_cost_usd" not in row for row in data)
+
+
+def test_run_non_interactive_currency_flag_falls_back_to_usd_on_fx_failure(
+    tmp_path: Path, monkeypatch, capsys
+):
+    # If the FX lookup fails, the run should still succeed — just in USD —
+    # with a warning on stderr, rather than raising or producing nonsense.
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    config = {
+        "workload": {
+            "requests_per_day": 1000,
+            "avg_input_tokens": 500,
+            "avg_output_tokens": 300,
+        },
+        "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+        "pricing_file": str(pricing_path),
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    monkeypatch.setattr(m, "fetch_fx_rate", lambda f, t, timeout=5.0: None)
+
+    export_path = tmp_path / "out.json"
+    exit_code = m.run_non_interactive(
+        config_path,
+        export_fmt="json",
+        export_path=export_path,
+        currency="GBP",
+    )
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "falling back to USD" in captured.err
+    assert "$" in captured.out
+
+    data = json.loads(export_path.read_text(encoding="utf-8"))
+    assert all("monthly_cost_usd" in row for row in data)
+
+
+def test_run_non_interactive_default_currency_is_usd(
+    tmp_path: Path, monkeypatch, capsys
+):
+    # No --currency (or USD) must not trigger an FX lookup at all.
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    config = {
+        "workload": {
+            "requests_per_day": 1000,
+            "avg_input_tokens": 500,
+            "avg_output_tokens": 300,
+        },
+        "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+        "pricing_file": str(pricing_path),
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("fetch_fx_rate should not be called for USD")
+
+    monkeypatch.setattr(m, "fetch_fx_rate", fail_if_called)
+
+    exit_code = m.run_non_interactive(config_path, export_fmt=None, export_path=None)
+    assert exit_code == 0
+    assert "$" in capsys.readouterr().out
+
+
+def test_main_non_interactive_currency_flag_is_forwarded(
+    tmp_path: Path, monkeypatch, capsys
+):
+    # The CLI flag must actually reach run_non_interactive — a common
+    # regression when a new argument is added but not threaded through.
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    config = {
+        "workload": {
+            "requests_per_day": 1000,
+            "avg_input_tokens": 500,
+            "avg_output_tokens": 300,
+        },
+        "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+        "pricing_file": str(pricing_path),
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    monkeypatch.setattr(m, "fetch_fx_rate", lambda f, t, timeout=5.0: 0.8)
+
+    exit_code = m.main(
+        [
+            "--non-interactive",
+            "--config",
+            str(config_path),
+            "--currency",
+            "GBP",
+        ]
+    )
+    assert exit_code == 0
+    assert "£" in capsys.readouterr().out
+
+
 def test_run_non_interactive_multiple_presets_prints_one_combined_table_and_exports_one_file(
     tmp_path: Path, capsys
 ):
