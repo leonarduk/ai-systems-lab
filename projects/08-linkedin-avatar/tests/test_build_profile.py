@@ -168,9 +168,38 @@ class TestFindContactLeaks:
         leaks = build_profile.find_contact_leaks("## Contact\njane.doe@example.com\n")
         assert any(pattern == "email" for _, pattern, _ in leaks)
 
+    def test_finds_planted_phone(self):
+        leaks = build_profile.find_contact_leaks("## Contact\n+44 7911 123456\n")
+        assert any(pattern == "phone" for _, pattern, _ in leaks)
+
+    def test_finds_planted_postcode(self):
+        leaks = build_profile.find_contact_leaks("## Location\nSW1A 1AA\n")
+        assert any(pattern == "postcode" for _, pattern, _ in leaks)
+
+    def test_finds_planted_street_address(self):
+        leaks = build_profile.find_contact_leaks("## Address\n123 Example Street\n")
+        assert any(pattern == "street_address" for _, pattern, _ in leaks)
+
     def test_clean_file_has_no_leaks(self):
         text = "## Experience\nSenior Software Engineer\nAcme Corporation\n"
         assert build_profile.find_contact_leaks(text) == []
+
+
+class TestOutPathIsSafe:
+    def test_parent_of_knowledge_dir_is_rejected(self, tmp_path, monkeypatch):
+        knowledge = tmp_path / "knowledge"
+        knowledge.mkdir()
+        monkeypatch.setattr(build_profile, "KNOWLEDGE_DIR", knowledge)
+
+        # A parent of knowledge/ (e.g. the repo root) must not be considered safe.
+        assert build_profile._out_path_is_safe(tmp_path / "profile.md") is False
+
+    def test_path_inside_knowledge_dir_is_accepted(self, tmp_path, monkeypatch):
+        knowledge = tmp_path / "knowledge"
+        knowledge.mkdir()
+        monkeypatch.setattr(build_profile, "KNOWLEDGE_DIR", knowledge)
+
+        assert build_profile._out_path_is_safe(knowledge / "profile.md") is True
 
 
 class TestCli:
@@ -191,6 +220,36 @@ class TestCli:
         assert exit_code == 1
         captured = capsys.readouterr()
         assert "email" in captured.err
+
+    def test_check_exits_one_on_planted_phone(self, tmp_path, capsys):
+        dirty = tmp_path / "dirty.md"
+        dirty.write_text("## Contact\n+44 7911 123456\n", encoding="utf-8")
+
+        exit_code = build_profile.main(["--check", str(dirty)])
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "phone" in captured.err
+
+    def test_check_exits_one_on_planted_postcode(self, tmp_path, capsys):
+        dirty = tmp_path / "dirty.md"
+        dirty.write_text("## Location\nSW1A 1AA\n", encoding="utf-8")
+
+        exit_code = build_profile.main(["--check", str(dirty)])
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "postcode" in captured.err
+
+    def test_check_exits_one_on_planted_street_address(self, tmp_path, capsys):
+        dirty = tmp_path / "dirty.md"
+        dirty.write_text("## Address\n123 Example Street\n", encoding="utf-8")
+
+        exit_code = build_profile.main(["--check", str(dirty)])
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "street_address" in captured.err
 
     def test_pdf_required_without_check(self):
         with pytest.raises(SystemExit):
