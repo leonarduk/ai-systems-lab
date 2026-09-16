@@ -127,3 +127,33 @@ class TestBuildLLMProvider:
     def test_unknown_provider_raises(self):
         with pytest.raises(LLMProviderError, match="Unknown LLM_PROVIDER"):
             build_llm_provider(FakeConfig(llm_provider="bogus"))
+
+    def test_deepseek_missing_api_key_raises(self, monkeypatch):
+        """Selecting deepseek with no config key and no env var must raise a
+        clear LLMProviderError naming DEEPSEEK_API_KEY (not a KeyError)."""
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        with pytest.raises(LLMProviderError, match="DEEPSEEK_API_KEY"):
+            build_llm_provider(
+                FakeConfig(llm_provider="deepseek", deepseek_api_key="")
+            )
+
+    def test_claude_missing_api_key_raises(self, monkeypatch):
+        """Selecting claude with no config key and no env var must raise a
+        clear LLMProviderError naming ANTHROPIC_API_KEY (not a KeyError)."""
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        with pytest.raises(LLMProviderError, match="ANTHROPIC_API_KEY"):
+            build_llm_provider(
+                FakeConfig(llm_provider="claude", anthropic_api_key="")
+            )
+
+    def test_deepseek_falls_back_to_env_var(self, monkeypatch):
+        """When config has no key but DEEPSEEK_API_KEY is set, the env var is used."""
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "env-secret")
+        provider = build_llm_provider(
+            FakeConfig(llm_provider="deepseek", deepseek_api_key="")
+        )
+        assert isinstance(provider, DeepSeekProvider)
+        assert provider.api_key == "env-secret"
+
+    def test_claude_falls_back_to_env_var(self, monkeypatch):
+        """When config has no key but ANTHROPIC_API_KEY is set, the env var is used."""

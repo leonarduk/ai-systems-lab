@@ -15,6 +15,7 @@ that provider's hosted API. Both must be explicitly configured (see
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Protocol
 
 import requests
@@ -62,6 +63,17 @@ def _parse_json_object(raw_text: str, provider_name: str) -> dict[str, Any]:
             f"{provider_name} returned JSON that isn't an object: {raw_text[:200]!r}"
         )
     return parsed
+
+
+def _resolve_api_key(config_value: Any, env_var_name: str) -> str:
+    """Return the API key from config if set, otherwise fall back to the env var.
+
+    Returns an empty string if neither source provides a value. Callers are
+    responsible for raising a clear `LLMProviderError` when the result is empty.
+    """
+    if config_value:
+        return str(config_value)
+    return os.environ.get(env_var_name, "") or ""
 
 
 class OllamaProvider:
@@ -232,20 +244,38 @@ def build_llm_provider(config: Any) -> LLMProvider:
     """Construct the configured `LLMProvider` from a `Config` object.
 
     `config.llm_provider` selects the backend: 'ollama' (default), 'deepseek',
-    or 'claude'. Raises `LLMProviderError` for an unknown provider name or
-    missing required credentials.
+    or 'claude'. API keys are read from the config object first, then fall
+    back to the corresponding environment variable (`DEEPSEEK_API_KEY` /
+    `ANTHROPIC_API_KEY`). Raises `LLMProviderError` for an unknown provider
+    name or when a required API key is missing from both sources.
     """
     provider = (config.llm_provider or "ollama").strip().lower()
+
     if provider == "ollama":
         return OllamaProvider(host=config.ollama_host, model=config.ollama_model)
+
     if provider == "deepseek":
-        return DeepSeekProvider(
-            api_key=config.deepseek_api_key, model=config.deepseek_model
+        api_key = _resolve_api_key(
+            getattr(config, "deepseek_api_key", None), "DEEPSEEK_API_KEY"
         )
+        if not api_key:
+            raise LLMProviderError(
+                "DeepSeek provider selected but no API key found. "
+                "Set DEEPSEEK_API_KEY or config.deepseek_api_key."
+            )
+        return DeepSeekProvider(api_key=api_key, model=config.deepseek_model)
+
     if provider == "claude":
-        return ClaudeProvider(
-            api_key=config.anthropic_api_key, model=config.claude_model
+        api_key = _resolve_api_key(
+            getattr(config, "anthropic_api_key", None), "ANTHROPIC_API_KEY"
         )
+        if not api_key:
+            raise LLMProviderError(
+                "Claude provider selected but no API key found. "
+                "Set ANTHROPIC_API_KEY or config.anthropic_api_key."
+            )
+        return ClaudeProvider(api_key=api_key, model=config.claude_model)
+
     raise LLMProviderError(
         f"Unknown LLM_PROVIDER '{provider}'. Expected 'ollama', 'deepseek', or 'claude'."
     )
