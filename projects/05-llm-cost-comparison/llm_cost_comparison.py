@@ -2225,7 +2225,21 @@ def run_non_interactive(
     pricing_path = Path(config.get("pricing_file", DEFAULT_PRICING_PATH))
     if not pricing_path.is_absolute():
         pricing_path = config_path.parent / pricing_path
-    pricing = load_pricing(pricing_path)
+    try:
+        pricing = load_pricing(pricing_path)
+    except ConfigError as exc:
+        # load_pricing raises ConfigError for a missing file (wrapping
+        # FileNotFoundError) or invalid JSON. Surface a clear, user-facing
+        # message instead of a raw traceback, and exit non-zero.
+        if "not found" in str(exc):
+            print(
+                f"Error: pricing file not found: {pricing_path}. "
+                "Please ensure the file exists (or set 'pricing_file' in your config).",
+                file=sys.stderr,
+            )
+        else:
+            print(f"Error: {exc}", file=sys.stderr)
+        return 1
     selected = set(config["selected_models"]) if "selected_models" in config else None
 
     local_cfg = config["local"]
