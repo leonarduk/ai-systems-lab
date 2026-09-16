@@ -1454,12 +1454,16 @@ def prompt_float(
 def prompt_choice(prompt: str, choices: list, default: Optional[str] = None) -> str:
     choice_str = "/".join(choices)
     suffix = f" [{default}]" if default else ""
+    # Normalize choices for case-insensitive comparison while preserving the
+    # original casing for display. A future mixed-case entry (e.g. "Claude")
+    # would otherwise be silently rejected when the user types "claude".
+    normalized_choices = {c.casefold(): c for c in choices}
     while True:
-        raw = input(f"{prompt} ({choice_str}){suffix}: ").strip().lower()
+        raw = input(f"{prompt} ({choice_str}){suffix}: ").strip().casefold()
         if not raw and default:
             return default
-        if raw in choices:
-            return raw
+        if raw in normalized_choices:
+            return normalized_choices[raw]
         print(f"  Please enter one of: {choice_str}")
 
 
