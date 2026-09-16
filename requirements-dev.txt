@@ -2,7 +2,8 @@
 # local development and CI use the same issue/PR/review commands.
 cicaid-devtools @ https://github.com/leonarduk/cicaid/releases/download/v0.3.0/cicaid_devtools-0.3.0-py3-none-any.whl
 
-# Tools used by .github/workflows/python-ci.yml.
+# Tools used by .github/workflows/python-ci.yml and
+# .github/workflows/cicaid-checks.yml.
 bandit
 black
 flake8
