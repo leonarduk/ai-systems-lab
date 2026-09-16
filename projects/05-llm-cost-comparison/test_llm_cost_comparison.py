@@ -172,10 +172,11 @@ def test_build_local_row_owned():
 
 def test_build_local_row_flags_when_throughput_cannot_keep_up_in_real_time():
     # A huge workload against a slow tokens/sec needs more compute-hours than
-    # exist in a month (720). The cost is still real — it's what running
-    # flat-out, 24/7, all month would cost — but the notes must say plainly
-    # that this only covers part of the workload rather than implying the
-    # full requested volume was delivered for that price.
+    # exist in a month (720). The cost is real — it's what running a fleet of
+    # machines flat-out, 24/7, all month would cost — but the notes must say
+    # plainly that this only covers part of the workload on a single machine
+    # rather than implying the full requested volume was delivered for that
+    # price.
     w = m.Workload(requests_per_day=50000, avg_input_tokens=500, avg_output_tokens=300)
     row = m.build_local_row(
         w,
@@ -185,9 +186,60 @@ def test_build_local_row_flags_when_throughput_cannot_keep_up_in_real_time():
         electricity_rate_per_kwh=0.15,
     )
     assert "covers only ~" in row.notes
-    assert "x this throughput" in row.notes
+    assert "machines" in row.notes
     assert row.feasible is False
     assert row.monthly_cost > 0
+
+
+def test_build_local_row_scales_cost_by_machine_count_when_infeasible():
+    # A workload needing more than HOURS_PER_MONTH of compute on one machine
+    # must be costed as a fleet of ceil(hours_needed / HOURS_PER_MONTH)
+    # machines, each running up to HOURS_PER_MONTH hours — not as a single
+    # machine running for more hours than exist in a month (which would
+    # under-estimate the true cost of owning hardware for a multi-month
+    # workload).
+    #
+    # 500 req/day * 4800 tokens/req * 30 days = 72,000,000 tokens/month.
+    # At 10 tok/s, that needs 72e6/(10*3600) = 2000 hours — 720 exist in a
+    # month, so ceil(2000/720) = 3 machines are needed.
+    w = m.Workload(requests_per_day=500, avg_input_tokens=4000, avg_output_tokens=800)
+    row = m.build_local_row(
+        w,
+        tokens_per_sec=10,
+        mode="existing",
+        power_watts=1000,  # 1 kW for easy math
+        electricity_rate_per_kwh=0.10,
+    )
+    assert row.feasible is False
+    # Per-machine cost: 1 kW * $0.10/kWh * 720 hr = $72.00
+    # Fleet cost: 3 machines * $72.00 = $216.00
+    assert row.monthly_cost == pytest.approx(216.0)
+    # $/1M tokens is the same real per-token rate as a single machine would
+    # have: $216 / 72M tokens * 1M = $3.00/1M.
+    assert row.cost_per_million_tokens == pytest.approx(3.0)
+    assert "3 machines" in row.notes
+
+
+def test_build_local_row_owned_mode_scales_hardware_amortization_by_machine_count():
+    # The fixed hardware amortization component must also be multiplied by
+    # the machine count — otherwise a multi-month workload would look
+    # artificially cheap because only one card's amortization was charged.
+    #
+    # 500 req/day * 4800 tokens/req * 30 days = 72,000,000 tokens/month.
+    # At 10 tok/s, that needs 2000 hours -> ceil(2000/720) = 3 machines.
+    w = m.Workload(requests_per_day=500, avg_input_tokens=4000, avg_output_tokens=800)
+    row = m.build_local_row(
+        w,
+        tokens_per_sec=10,
+        mode="own",
+        hardware_cost=3600,  # $100/month amortized per machine
+        lifetime_years=3,
+        power_watts=0,  # isolate the fixed component
+        electricity_rate_per_kwh=0.0,
+    )
+    assert row.feasible is False
+    # 3 machines * $100/month fixed = $300/month
+    assert row.monthly_cost == pytest.approx(300.0)
 
 
 def test_build_local_row_no_warning_when_throughput_is_sufficient():
