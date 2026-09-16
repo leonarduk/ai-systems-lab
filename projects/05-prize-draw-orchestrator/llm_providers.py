@@ -50,10 +50,53 @@ class LLMProvider(Protocol):
         ...
 
 
+def _strip_code_fences_and_prose(raw_text: str) -> str:
+    """Normalize an LLM reply so it can be handed to the JSON parser.
+
+    Handles the two common ways a model wraps otherwise-valid JSON:
+
+    * A markdown code fence — either ```` ```json ... ``` ```` or a bare
+      ```` ``` ... ``` ````. The contents of the first fence are returned.
+    * Leading prose such as ``Here is the JSON:`` before the payload. The
+      substring from the first ``{`` to the last ``}`` is returned.
+
+    Bare JSON objects are returned unchanged (aside from surrounding
+    whitespace). If no JSON-looking substring is found, the trimmed input is
+    returned so the caller's parser can raise its usual error.
+    """
+    text = raw_text.strip()
+
+    fence_start = text.find("```")
+    if fence_start != -1:
+        after_fence = text[fence_start + 3 :]
+        # Drop an optional language tag (e.g. "json") on the opening fence line.
+        newline_index = after_fence.find("\n")
+        if newline_index != -1:
+            first_line = after_fence[:newline_index].strip().lower()
+            if first_line in ("", "json"):
+                after_fence = after_fence[newline_index + 1 :]
+        fence_end = after_fence.find("```")
+        if fence_end != -1:
+            text = after_fence[:fence_end].strip()
+
+    # Trim leading prose by slicing from the first `{` to the last `}`.
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        text = text[first_brace : last_brace + 1]
+
+    return text.strip()
+
+
 def _parse_json_object(raw_text: str, provider_name: str) -> dict[str, Any]:
-    """Parse `raw_text` as a JSON object, raising `LLMProviderError` if it isn't one."""
+    """Parse `raw_text` as a JSON object, raising `LLMProviderError` if it isn't one.
+
+    Strips markdown code fences and leading prose before parsing so that
+    otherwise-valid JSON wrapped by the model is still accepted.
+    """
+    cleaned = _strip_code_fences_and_prose(raw_text)
     try:
-        parsed = json.loads(raw_text.strip())
+        parsed = json.loads(cleaned)
     except json.JSONDecodeError as exc:
         raise LLMProviderError(
             f"{provider_name} did not return valid JSON: {raw_text[:200]!r}"
