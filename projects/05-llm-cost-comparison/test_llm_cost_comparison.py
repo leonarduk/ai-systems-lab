@@ -316,6 +316,38 @@ def test_load_pricing_raises_config_error_on_missing_file(tmp_path: Path):
         m.load_pricing(tmp_path / "missing-pricing.json")
 
 
+def test_load_pricing_tolerates_extra_top_level_keys(tmp_path: Path):
+    # Regression guard: load_pricing only requires `as_of` and `providers`.
+    # Real pricing files may carry extra metadata keys, and tightening
+    # validation to reject unknown keys would silently break them.
+    pricing_path = tmp_path / "pricing.json"
+    pricing_path.write_text(
+        json.dumps(
+            {
+                "as_of": "2026-01-01",
+                "providers": {
+                    "claude": {
+                        "models": {
+                            "opus-5": {
+                                "display_name": "Claude Opus 5",
+                                "input_per_million": 5.0,
+                                "output_per_million": 25.0,
+                            }
+                        }
+                    }
+                },
+                "extra": "value",
+                "notes": "some future metadata",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    pricing = m.load_pricing(pricing_path)
+    assert pricing["as_of"] == "2026-01-01"
+    assert "claude" in pricing["providers"]
+
+
 # --------------------------------------------------------------------------
 # Rendering / export
 # --------------------------------------------------------------------------
