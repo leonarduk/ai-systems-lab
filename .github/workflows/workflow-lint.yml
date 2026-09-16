@@ -32,3 +32,56 @@ jobs:
         run: |
           actionlint -color -shellcheck= .github/workflows/*.yml
         shell: bash
+
+  pr-description-files-affected:
+    # Non-blocking informational check: verifies that workflow files changed in
+    # a PR are listed in the PR description's "Files Affected" section.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Determine changed workflow files
+        id: changed
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --prune origin "${BASE_REF}"
+          base="origin/${BASE_REF}"
+          mapfile -t files < <(
+            git diff --name-only --diff-filter=ACMR "${base}...HEAD" \
+              | grep -E '^\.github/workflows/.*\.(ya?ml)$' || true
+          )
+          {
+            echo "files<<EOF"
+            for f in "${files[@]:-}"; do
+              [ -n "$f" ] && echo "$f"
+            done
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Changed workflow files:"
+          printf '  %s\n' "${files[@]:-<none>}"
+        shell: bash
+
+      - name: Validate PR description lists changed workflow files
+        if: steps.changed.outputs.files != ''
+        env:
+          PR_DESCRIPTION: ${{ github.event.pull_request.body }}
+          CHANGED_WORKFLOW_FILES: ${{ steps.changed.outputs.files }}
+        run: |
+          set -euo pipefail
+          python3 scripts/validate-pr-description.py
+        shell: bash
+
+      - name: Skip notice
+        if: steps.changed.outputs.files == ''
+        run: echo "No workflow files changed in this PR; skipping Files Affected validation."
+        shell: bash
