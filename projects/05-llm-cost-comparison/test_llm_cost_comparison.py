@@ -1150,6 +1150,32 @@ def test_main_non_interactive_export_without_path_defaults(
     assert (tmp_path / "cost_comparison.csv").exists()
 
 
+def test_version_attribute_is_a_nonempty_string():
+    assert isinstance(m.__version__, str)
+    assert m.__version__
+    # ``VERSION`` is kept as a backwards-compatible alias of ``__version__``.
+    assert m.VERSION == m.__version__
+
+
+def test_main_version_flag_prints_version_and_exits_zero(capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        m.main(["--version"])
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    assert m.__version__ in out
+
+
+def test_main_help_flag_still_works(capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        m.main(["--help"])
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    # Existing flags must still be advertised.
+    assert "--version" in out
+    assert "--non-interactive" in out
+    assert "--update-pricing" in out
+
+
 def test_main_non_interactive_config_error_reports_and_exits_nonzero(
     tmp_path: Path, capsys
 ):
