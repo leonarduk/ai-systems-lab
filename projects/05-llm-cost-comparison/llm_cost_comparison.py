@@ -1386,7 +1386,16 @@ def benchmark_openai_compatible(
         completion_tokens = max(1, len(text.split()))
     if elapsed <= 0:
         raise ValueError("Non-positive elapsed time measuring benchmark")
-    return completion_tokens / elapsed
+    tokens_per_sec = completion_tokens / elapsed
+    # Wall-clock timing includes the network round-trip to the endpoint, so
+    # this figure is not model inference speed alone. Say so explicitly so
+    # it isn't mistaken for a generation-only measurement (as
+    # benchmark_ollama's eval_duration-based figure is).
+    print(
+        "Note: Wall-clock time includes network latency from client to server "
+        "(end-to-end duration, not model inference speed alone)."
+    )
+    return tokens_per_sec
 
 
 # --------------------------------------------------------------------------

@@ -102,6 +102,13 @@ you need that figure, capture it yourself from the raw response (or the
 provider's usage dashboard) rather than relying on the benchmark's
 wall-clock number.
 
+**Note:** When benchmarking an OpenAI-compatible endpoint
+(`benchmark_openai_compatible`), the reported time includes network latency
+between the client and the remote endpoint. It is an end-to-end wall-clock
+duration, not a measure of model inference speed alone — so it is not
+directly comparable to a local model's generation-only timing.
+=======
+
 ## Traffic scenarios (workload presets)
 
 Guessing "requests per day" and "average input tokens per request" cold is a
