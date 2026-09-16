@@ -2251,18 +2251,20 @@ def run_non_interactive(
     local_cfg = config["local"]
     _require_keys(local_cfg, ["mode", "tokens_per_sec"], "local")
     tokens_per_sec = local_cfg["tokens_per_sec"]
-    # Mirror the interactive prompt's `minimum=0.001` guard: a zero or
-    # negative throughput would silently propagate into the cost math
-    # (hours_needed_for_workload raises ValueError deep inside, or worse,
-    # produces nonsensical figures), so reject it here with a clear,
-    # field-named config error instead.
+    # Mirror the interactive prompt's `minimum=0.001` guard exactly: a zero,
+    # negative, or vanishingly small throughput would silently propagate into
+    # the cost math (hours_needed_for_workload raises ValueError deep inside,
+    # or worse, produces nonsensical figures), so reject it here with a clear,
+    # field-named config error instead. The threshold is deliberately the same
+    # as the interactive prompt's so switching between modes doesn't change
+    # which values are accepted.
     if (
         not isinstance(tokens_per_sec, (int, float))
         or isinstance(tokens_per_sec, bool)
-        or tokens_per_sec <= 0
+        or tokens_per_sec < 0.001
     ):
         raise ConfigError(
-            f"local.tokens_per_sec must be a positive number, got {tokens_per_sec!r}"
+            f"local.tokens_per_sec must be a number >= 0.001, got {tokens_per_sec!r}"
         )
     mode = local_cfg["mode"]
     if mode == "own":
