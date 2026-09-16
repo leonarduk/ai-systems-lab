@@ -173,7 +173,7 @@ def process_candidate(
         parsed["reason"] = parsed.get("reason") or "Does not meet configured criteria."
         return "needs_review", parsed
 
-    entry_requirements = parsed.get("entry_requirements", "") or ""
+    entry_requirements = parsed["entry_requirements"]
     if _requires_personal_data(entry_requirements) and not confirm_personal_data:
         parsed["reason"] = (
             "Entry requires personal/financial data; set CONFIRM_PERSONAL_DATA=true "
