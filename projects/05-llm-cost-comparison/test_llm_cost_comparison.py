@@ -1172,6 +1172,30 @@ def test_main_non_interactive_config_error_reports_and_exits_nonzero(
     assert "hourly_rate" in capsys.readouterr().err
 
 
+def test_main_non_interactive_missing_pricing_file_reports_and_exits_nonzero(
+    tmp_path: Path, capsys
+):
+    """Issue #33 end-to-end: a missing pricing.json in --non-interactive mode
+    must print a clear, user-facing message (not a raw traceback) and exit
+    non-zero -- via main()'s existing ConfigError handler, since
+    run_non_interactive itself re-raises rather than swallowing it."""
+    config_path = tmp_path / "config.json"
+    config = {
+        "workload": {
+            "requests_per_day": 1000,
+            "avg_input_tokens": 500,
+            "avg_output_tokens": 300,
+        },
+        "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+        "pricing_file": "does_not_exist.json",
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    exit_code = m.main(["--non-interactive", "--config", str(config_path)])
+    assert exit_code == 1
+    assert "pricing file not found" in capsys.readouterr().err
+
+
 def test_run_non_interactive_missing_pricing_file_raises_config_error(tmp_path: Path):
     config_path = tmp_path / "config.json"
     config = {
