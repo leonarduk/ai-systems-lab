@@ -1754,3 +1754,129 @@ def test_run_non_interactive_multiple_presets_prints_one_combined_table_and_expo
     data = json.loads(export_path.read_text(encoding="utf-8"))
     scenarios_seen = {row["scenario"] for row in data}
     assert scenarios_seen == {"Casual personal use", "Autonomous coding agent"}
+
+
+# --------------------------------------------------------------------------
+# Full interactive end-to-end session (monkeypatched input())
+# --------------------------------------------------------------------------
+
+
+def test_run_interactive_end_to_end(monkeypatch, capsys, tmp_path):
+    # Drive a complete interactive session through run_interactive() with a
+    # scripted sequence of input() answers. This exercises the menu prompt
+    # order, GPU auto-detect confirmation, base URL entry, model selection,
+    # and the final table rendering in one pass — none of which the pure
+    # unit tests above cover.
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+
+    # 1) workload menu -> pick preset #1 ("casual")
+    # 2) GPU auto-detect? -> "n" (skip; no real nvidia-smi in CI)
+    # 3) GPU count -> "1"
+    # 4) GPU name -> "NVIDIA GeForce RTX 4090"
+    # 5) tokens/sec -> "40"
+    # 6) hardware mode -> "existing" (electricity only)
+    # 7) power_watts -> "450"
+    # 8) electricity rate -> "0.15"
+    # 9) pricing file -> path to our temp pricing.json
+    # 10) select hosted models -> "1" (only one model in the fixture)
+    answers = iter(
+        [
+            "1",  # workload preset #1
+            "n",  # skip GPU auto-detect
+            "1",  # GPU count
+            "NVIDIA GeForce RTX 4090",  # GPU name
+            "40",  # tokens/sec
+            "existing",  # local hardware mode
+            "450",  # power watts
+            "0.15",  # electricity rate
+            str(pricing_path),  # pricing file
+            "1",  # select hosted model #1
+        ]
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+
+    # run_interactive() may or may not accept a pricing_file kwarg; call it
+    # with no arguments so we exercise the same entry point main() uses.
+    exit_code = m.run_interactive()
+
+    out = capsys.readouterr().out
+    # The interactive flow must have produced a comparison table containing
+    # both the local option and the hosted model from our fixture.
+    assert exit_code == 0
+    assert "Local" in out
+    assert "Claude Opus 5" in out
+    # Sanity: the table header / cheapest line should be present.
+    assert "Cheapest:" in out or "no rows" in out
+
+
+def test_run_interactive_end_to_end_custom_workload(monkeypatch, capsys, tmp_path):
+    # Same as above but exercises the "custom workload" branch of the menu
+    # and the "own hardware" cost mode, so both interactive paths are
+    # covered end-to-end.
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+
+    num_presets = len(m.WORKLOAD_PRESETS)
+    custom_option = str(num_presets + 2)
+
+    answers = iter(
+        [
+            custom_option,  # choose "custom workload"
+            "1000",  # requests_per_day
+            "500",  # avg_input_tokens
+            "300",  # avg_output_tokens
+            "n",  # skip GPU auto-detect
+            "1",  # GPU count
+            "NVIDIA GeForce RTX 4090",  # GPU name
+            "40",  # tokens/sec
+            "own",  # local hardware mode
+            "1600",  # hardware cost
+            "3",  # lifetime years
+            "450",  # power watts
+            "0.15",  # electricity rate
+            str(pricing_path),  # pricing file
+            "1",  # select hosted model #1
+        ]
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+
+    exit_code = m.run_interactive()
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Local (buy hardware)" in out
+    assert "Claude Opus 5" in out
+
+
+def test_run_interactive_end_to_end_compare_all_presets(monkeypatch, capsys, tmp_path):
+    # Exercises the "compare all presets" branch, which produces a combined
+    # table with one column per scenario.
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+
+    num_presets = len(m.WORKLOAD_PRESETS)
+    all_option = str(num_presets + 1)
+
+    answers = iter(
+        [
+            all_option,  # compare all presets
+            "n",  # skip GPU auto-detect
+            "1",  # GPU count
+            "NVIDIA GeForce RTX 4090",  # GPU name
+            "40",  # tokens/sec
+            "existing",  # local hardware mode
+            "450",  # power watts
+            "0.15",  # electricity rate
+            str(pricing_path),  # pricing file
+            "1",  # select hosted model #1
+        ]
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+
+    exit_code = m.run_interactive()
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    # Every preset label should appear as a scenario column.
+    for preset in m.WORKLOAD_PRESETS:
+        assert preset.label in out
+    assert "Claude Opus 5" in out
