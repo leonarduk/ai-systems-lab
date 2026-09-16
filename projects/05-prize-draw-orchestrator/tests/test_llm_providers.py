@@ -12,6 +12,7 @@ from llm_providers import (
     DeepSeekProvider,
     LLMProviderError,
     OllamaProvider,
+    _parse_json_object,
     build_llm_provider,
 )
 
@@ -107,6 +108,52 @@ class TestClaudeProvider:
         assert headers["x-api-key"] == "secret"
 
 
+class TestParseJsonObject:
+    """Coverage for the shared `_parse_json_object` extraction helper."""
+
+    def test_plain_json_object(self):
+        assert _parse_json_object('{"a": 1}', "Test") == {"a": 1}
+
+    def test_fenced_json_with_language_tag(self):
+        raw = '```json\n{"a": 1}\n```'
+        assert _parse_json_object(raw, "Test") == {"a": 1}
+
+    def test_fenced_json_without_language_tag(self):
+        raw = '```\n{"a": 1}\n```'
+        assert _parse_json_object(raw, "Test") == {"a": 1}
+
+    def test_prose_wrapped_json(self):
+        raw = 'Here is the answer: {"a": 1} — hope that helps!'
+        assert _parse_json_object(raw, "Test") == {"a": 1}
+
+    def test_prose_wrapped_json_with_trailing_brace_in_prose(self):
+        """Motivating case: trailing prose contains a stray `}`.
+
+        The old `rfind("}")` heuristic would slice from the first `{` to the
+        stray `}` in the prose, producing a malformed slice. `raw_decode`
+        consumes exactly one JSON value and ignores the rest.
+        """
+        raw = '{"eligible": true} trailing text with a } brace'
+        assert _parse_json_object(raw, "Test") == {"eligible": True}
+
+    def test_multiple_json_objects_returns_first(self):
+        raw = '{"first": 1} {"second": 2}'
+        assert _parse_json_object(raw, "Test") == {"first": 1}
+
+    def test_empty_fenced_block_raises(self):
+        raw = "```json\n\n```"
+        with pytest.raises(LLMProviderError, match="did not return valid JSON"):
+            _parse_json_object(raw, "Test")
+
+    def test_invalid_input_raises(self):
+        with pytest.raises(LLMProviderError, match="did not return valid JSON"):
+            _parse_json_object("not json at all", "Test")
+
+    def test_non_object_json_raises(self):
+        with pytest.raises(LLMProviderError, match="isn't an object"):
+            _parse_json_object("[1, 2, 3]", "Test")
+
+
 class TestBuildLLMProvider:
     def test_defaults_to_ollama(self):
         provider = build_llm_provider(FakeConfig(llm_provider="ollama"))
@@ -157,3 +204,9 @@ class TestBuildLLMProvider:
 
     def test_claude_falls_back_to_env_var(self, monkeypatch):
         """When config has no key but ANTHROPIC_API_KEY is set, the env var is used."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "env-secret")
+        provider = build_llm_provider(
+            FakeConfig(llm_provider="claude", anthropic_api_key="")
+        )
+        assert isinstance(provider, ClaudeProvider)
+        assert provider.api_key == "env-secret"

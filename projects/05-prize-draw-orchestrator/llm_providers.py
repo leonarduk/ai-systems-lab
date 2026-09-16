@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any, Protocol
 
 import requests
@@ -50,10 +51,61 @@ class LLMProvider(Protocol):
         ...
 
 
+def _extract_json_candidate(raw_text: str) -> str | None:
+    """Best-effort extraction of a JSON-object candidate from `raw_text`.
+
+    Handles three shapes of LLM output, in order:
+
+    1. A fenced code block (```json ... ``` or ``` ... ```) — the fenced
+       content is returned verbatim.
+    2. Prose-wrapped JSON — the first `{` is located and a single JSON value
+       is consumed via `json.JSONDecoder().raw_decode`, so trailing prose
+       (including stray `}` characters) is ignored. The decoded object is
+       re-serialized and returned.
+    3. Plain JSON — the original text is returned unchanged so the caller's
+       direct `json.loads` can handle it.
+
+    Returns `None` when no candidate can be extracted; the caller is
+    responsible for raising `LLMProviderError`.
+    """
+    text = raw_text.strip()
+
+    # Step 1: fenced code block (with or without a language tag).
+    fence_match = re.search(
+        r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL | re.IGNORECASE
+    )
+    if fence_match:
+        fenced = fence_match.group(1).strip()
+        if fenced:
+            return fenced
+        # Empty fenced block: fall through to the failure path.
+        return None
+
+    # Step 2: prose-wrapped JSON — consume exactly one JSON value from the
+    # first `{` using raw_decode, ignoring anything that follows.
+    first_brace = text.find("{")
+    if first_brace != -1:
+        try:
+            decoded, _end = json.JSONDecoder().raw_decode(text[first_brace:])
+        except json.JSONDecodeError:
+            decoded = None
+        if isinstance(decoded, dict):
+            return json.dumps(decoded)
+
+    # Step 3: no fences and no decodable object — return the original text so
+    # the caller's direct `json.loads` can attempt (and likely fail) on it.
+    return text
+
+
 def _parse_json_object(raw_text: str, provider_name: str) -> dict[str, Any]:
     """Parse `raw_text` as a JSON object, raising `LLMProviderError` if it isn't one."""
+    candidate = _extract_json_candidate(raw_text)
+    if candidate is None:
+        raise LLMProviderError(
+            f"{provider_name} did not return valid JSON: {raw_text[:200]!r}"
+        )
     try:
-        parsed = json.loads(raw_text.strip())
+        parsed = json.loads(candidate)
     except json.JSONDecodeError as exc:
         raise LLMProviderError(
             f"{provider_name} did not return valid JSON: {raw_text[:200]!r}"
