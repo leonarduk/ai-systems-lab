@@ -1433,6 +1433,71 @@ def test_render_table_omits_multiple_line_for_single_row():
 
 
 # --------------------------------------------------------------------------
+# interactive_local_setup — "existing hardware" branch
+# --------------------------------------------------------------------------
+
+
+def _stub_gpu_info(name="NVIDIA GeForce RTX 3090"):
+    return {
+        "name": name,
+        "memory_total_mib": 24576.0,
+        "power_draw_w": 200.0,
+        "power_limit_w": 350.0,
+    }
+
+
+def test_interactive_local_setup_existing_hardware_branch(monkeypatch):
+    # Drive the "existing hardware" branch: user picks the existing-hardware
+    # option, accepts the detected GPU, and accepts the detected power draw.
+    # GPU detection and any benchmark are fully mocked so no real hardware
+    # or network is required.
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: _stub_gpu_info())
+
+    def _fail_benchmark(*args, **kwargs):
+        raise AssertionError("benchmark must not run in existing-hardware branch")
+
+    monkeypatch.setattr(m, "benchmark_ollama", _fail_benchmark)
+    monkeypatch.setattr(m, "benchmark_openai_compatible", _fail_benchmark)
+
+    # Answers: choose the "existing" mode, accept detected GPU, accept power,
+    # then provide tokens/sec and electricity rate.
+    answers = iter(["existing", "y", "y", "40", "0.15"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+
+    result = m.interactive_local_setup()
+    assert isinstance(result, tuple)
+    # The returned tuple must reflect the existing-hardware mode selection.
+    assert "existing" in result
+    # The detected GPU name should be surfaced somewhere in the returned data.
+    assert any(
+        isinstance(item, str) and "RTX 3090" in item for item in result
+    ) or any(
+        isinstance(item, dict) and item.get("name") == "NVIDIA GeForce RTX 3090"
+        for item in result
+    )
+
+
+def test_interactive_local_setup_existing_hardware_with_no_gpu_detected(monkeypatch):
+    # Edge case: no GPU detected. The existing-hardware branch must still
+    # complete without crashing and must not attempt a benchmark.
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: None)
+
+    def _fail_benchmark(*args, **kwargs):
+        raise AssertionError("benchmark must not run in existing-hardware branch")
+
+    monkeypatch.setattr(m, "benchmark_ollama", _fail_benchmark)
+    monkeypatch.setattr(m, "benchmark_openai_compatible", _fail_benchmark)
+
+    # Answers: choose existing mode, then provide tokens/sec and rate.
+    answers = iter(["existing", "40", "0.15"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+
+    result = m.interactive_local_setup()
+    assert isinstance(result, tuple)
+    assert "existing" in result
+
+
+# --------------------------------------------------------------------------
 # "Already own the hardware" cost mode (electricity only, no amortization)
 # --------------------------------------------------------------------------
 
