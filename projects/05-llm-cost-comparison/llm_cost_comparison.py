@@ -1538,6 +1538,16 @@ def interactive_local_setup() -> tuple:
     ``save_last_run()`` so the next run can reuse them as defaults.
     """
     print("\n== Local setup ==")
+    # Invariant: every caller of interactive_local_setup() must have already
+    # confirmed the user wants to configure local setup before reaching this
+    # point. Currently the only caller is run_interactive(), which invokes
+    # this function unconditionally as part of the main interactive flow
+    # (there is no "skip local setup entirely" gate upstream), so the
+    # combined prompt below is the first thing the user sees for local
+    # configuration — matching the pre-PR #222 behavior where the GPU
+    # detection prompt was also the first local-setup question. If a future
+    # caller adds an opt-in gate, this prompt must move below that gate.
+    #
     # A single combined prompt replaces the previous two separate yes/no
     # questions (GPU detection, then throughput benchmark). Answering "y"
     # skips both steps; "n" or Enter falls through to the original
