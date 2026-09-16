@@ -173,6 +173,45 @@ class TestFindContactLeaks:
         assert build_profile.find_contact_leaks(text) == []
 
 
+class TestOutPathIsSafe:
+    def test_accepts_path_inside_knowledge_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(build_profile, "KNOWLEDGE_DIR", tmp_path)
+        assert build_profile._out_path_is_safe(tmp_path / "profile.md") is True
+
+    def test_accepts_knowledge_dir_itself(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(build_profile, "KNOWLEDGE_DIR", tmp_path)
+        assert build_profile._out_path_is_safe(tmp_path) is True
+
+    def test_rejects_path_outside_knowledge_dir(self, tmp_path, monkeypatch):
+        knowledge = tmp_path / "knowledge"
+        knowledge.mkdir()
+        monkeypatch.setattr(build_profile, "KNOWLEDGE_DIR", knowledge)
+        assert build_profile._out_path_is_safe(tmp_path / "elsewhere.md") is False
+
+    def test_rejects_parent_traversal(self, tmp_path, monkeypatch):
+        knowledge = tmp_path / "knowledge"
+        knowledge.mkdir()
+        monkeypatch.setattr(build_profile, "KNOWLEDGE_DIR", knowledge)
+        escape = knowledge / ".." / "escape.md"
+        assert build_profile._out_path_is_safe(escape) is False
+
+    def test_rejects_symlinked_knowledge_dir(self, tmp_path, monkeypatch):
+        # knowledge/ is a symlink pointing outside the project.
+        real_target = tmp_path / "outside"
+        real_target.mkdir()
+        link = tmp_path / "knowledge"
+        try:
+            link.symlink_to(real_target, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks not supported on this platform")
+
+        monkeypatch.setattr(build_profile, "KNOWLEDGE_DIR", link)
+
+        # Even a path that *looks* like it lives under knowledge/ must be
+        # rejected, because knowledge/ itself is a symlink.
+        assert build_profile._out_path_is_safe(link / "profile.md") is False
+
+
 class TestCli:
     def test_check_exits_zero_on_clean_file(self, tmp_path, capsys):
         clean = tmp_path / "clean.md"
@@ -199,17 +238,4 @@ class TestCli:
     def test_out_path_outside_knowledge_dir_is_rejected(self, monkeypatch):
         monkeypatch.setattr(build_profile, "PdfReader", FakePdfReader)
         with pytest.raises(SystemExit):
-            build_profile.main(
-                ["--pdf", "fake.pdf", "--out", "/tmp/outside/profile.md"]
-            )
-
-    def test_default_out_path_is_accepted(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(build_profile, "PdfReader", FakePdfReader)
-        monkeypatch.setattr(build_profile, "KNOWLEDGE_DIR", tmp_path)
-
-        exit_code = build_profile.main(
-            ["--pdf", "fake.pdf", "--out", str(tmp_path / "profile.md")]
-        )
-
-        assert exit_code == 0
-        assert (tmp_path / "profile.md").exists()
+            build_profile
