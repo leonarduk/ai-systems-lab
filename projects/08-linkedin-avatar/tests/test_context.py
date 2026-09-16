@@ -247,3 +247,24 @@ class TestRulesBlock:
     ):
         prompt = context.build_system_prompt(knowledge_dir=knowledge_dir)
         assert prompt.rstrip().endswith(context.RULES_BLOCK.rstrip())
+
+    def test_rules_block_included_when_max_tokens_too_small(self, knowledge_dir):
+        # Budget smaller than the static sections plus the rules block: the
+        # GitHub section must be dropped entirely, but the rules block is
+        # appended unconditionally and the prompt must remain well-formed.
+        static_size = context.estimate_tokens(
+            context.ROLE_BLOCK + context.RULES_BLOCK
+        )
+        # Pick a budget that is clearly below the static floor but still
+        # positive, so we exercise the max(budget_for_github, 0) clamp.
+        tiny_budget = max(static_size - 1, 1)
+
+        prompt = context.build_system_prompt(
+            max_tokens=tiny_budget, knowledge_dir=knowledge_dir
+        )
+
+        # Rules block content survives even when the budget is exhausted.
+        assert context.RULES_BLOCK.rstrip() in prompt
+        # Prompt is non-empty and well-formed (no negative-budget artifacts).
+        assert prompt.strip()
+        assert "issue-worm" not in prompt
