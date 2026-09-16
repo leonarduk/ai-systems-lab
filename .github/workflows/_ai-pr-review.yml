@@ -87,15 +87,31 @@ jobs:
         with:
           python-version: '3.12'
 
+      # The review-specific modules this workflow imports
+      # (cicaid_devtools.lib.deepseek_review, gpt_review, review_diff,
+      # review_comment, review_discussion, verdict, followups,
+      # followup_issues, verified_symbols) do NOT ship in the public
+      # leonarduk/cicaid package at any version - that package is only the
+      # "free shell" of GitHub issue/PR plumbing. The LLM review/triage
+      # engine lives in the private sibling repo leonarduk/cicaid-pro, so
+      # the wheel has to be downloaded from there with an authenticated
+      # request (its release assets 404 on an unauthenticated curl).
       - name: Install cicaid-devtools
         env:
-          CICAID_WHEEL_URL: https://github.com/leonarduk/cicaid/releases/download/v0.3.0/cicaid_devtools-0.3.0-py3-none-any.whl
-          CICAID_WHEEL_SHA256: 5b113d70851a58a8d6a9bbd6c1160b9569aadac486262140afedc75ecf7f179c
+          CICAID_PRO_TOKEN: ${{ secrets.cicaid_pro_token }}
+          CICAID_WHEEL_URL: https://github.com/leonarduk/cicaid-pro/releases/download/v0.13.1/cicaid_devtools-0.13.1-py3-none-any.whl
+          CICAID_WHEEL_SHA256: ""
         run: |
           set -euo pipefail
+          if [ -z "$CICAID_PRO_TOKEN" ]; then
+            echo "ERROR: cicaid_pro_token secret is not set - cannot download the private cicaid-pro wheel." >&2
+            exit 1
+          fi
           wheel_file="/tmp/$(basename "$CICAID_WHEEL_URL")"
-          curl -fsSL "$CICAID_WHEEL_URL" -o "$wheel_file"
-          echo "$CICAID_WHEEL_SHA256  $wheel_file" | sha256sum -c -
+          curl -fsSL -H "Authorization: token $CICAID_PRO_TOKEN" "$CICAID_WHEEL_URL" -o "$wheel_file"
+          if [ -n "$CICAID_WHEEL_SHA256" ]; then
+            echo "$CICAID_WHEEL_SHA256  $wheel_file" | sha256sum -c -
+          fi
           python -m pip install "$wheel_file"
 
       # cicaid-devtools-pro (the LLM review/triage engine backing the
