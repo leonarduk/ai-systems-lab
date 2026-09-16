@@ -28,6 +28,15 @@ jobs:
     - name: Verify shared repository automation
       run: cicaid --help
 
+    - name: Exercise cicaid local-review subcommand
+      run: |
+        # Run a real cicaid subcommand (not just --help) so that a broken
+        # subcommand, missing optional dependency, or misconfigured entry
+        # point fails the build instead of only being caught manually.
+        # --check is a dry-run mode: it validates the review pipeline
+        # without mutating the repository.
+        cicaid local-review --check
+
     - name: Run flake8
       run: |
         # Stop the build if there are Python syntax errors or undefined names
