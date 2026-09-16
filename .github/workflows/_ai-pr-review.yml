@@ -231,10 +231,10 @@ jobs:
               *) echo "ERROR: review_script must be under .github/scripts/, got '$REVIEW_SCRIPT'" >&2; exit 1 ;;
             esac
           else
-            # Module-based providers (DeepSeek/GPT): only allow known
+            # Module-based providers (DeepSeek/GPT/Claude): only allow known
             # cicaid-devtools review modules.
             case "$REVIEW_MODULE" in
-              cicaid_devtools.lib.deepseek_review|cicaid_devtools.lib.gpt_review) ;;
+              cicaid_devtools.lib.deepseek_review|cicaid_devtools.lib.gpt_review|cicaid_devtools.lib.anthropic_review) ;;
               *) echo "ERROR: review_module '$REVIEW_MODULE' not in allowlist" >&2; exit 1 ;;
             esac
           fi
