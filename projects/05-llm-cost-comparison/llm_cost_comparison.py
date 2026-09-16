@@ -1021,7 +1021,7 @@ def average_gpu_power_w(
 
 
 def measure_gpu_power_during(
-    func: Callable, runner: Callable = subprocess.run, poll_interval: float = 0.5
+    func: Callable, runner: Callable = subprocess.run, poll_interval: float = 1.0
 ) -> tuple:
     """Run ``func()`` while polling GPU power draw; return ``(result, avg_watts)``.
 
