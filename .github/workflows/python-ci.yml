@@ -42,7 +42,7 @@ jobs:
           exit 1
         fi
         for f in "${files[@]}"; do
-          if ! grep -q 'mcp<2\.0\.0' "$f"; then
+          if ! grep -qE '^mcp.*<2\.0\.0' "$f"; then
             echo "::error::FAIL: $f does not pin mcp<2.0.0"
             failed=1
           else
