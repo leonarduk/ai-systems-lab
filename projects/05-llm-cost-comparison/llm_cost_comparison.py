@@ -39,6 +39,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
+VERSION = "0.1.0"
+
 DEFAULT_PRICING_PATH = Path(__file__).parent / "pricing.json"
 DEFAULT_LAST_RUN_PATH = Path(__file__).parent / ".last_run.json"
 DAYS_PER_MONTH = 30
@@ -2376,6 +2378,11 @@ def run_non_interactive(
 
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {VERSION}",
+    )
     parser.add_argument(
         "--non-interactive",
         action="store_true",
