@@ -5,6 +5,7 @@ on:
     branches: [ main, develop ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   lint:
@@ -27,6 +28,9 @@ jobs:
 
     - name: Verify shared repository automation
       run: cicaid --help
+
+    - name: Verify mcp<2.0.0 pin across MCP server requirements
+      run: bash .github/scripts/check_mcp_pin.sh
 
     - name: Run flake8
       run: |
@@ -147,3 +151,72 @@ jobs:
         if [ -s all_requirements.txt ]; then
           safety check --file=all_requirements.txt --output=text || echo "Vulnerabilities found"
         fi
+
+  mcp-pin-selftest:
+    name: Self-test mcp-pin check (workflow_dispatch only)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Verify check passes on the real repository
+      run: bash .github/scripts/check_mcp_pin.sh
+
+    - name: Verify check fails on a fixture missing the pin
+      run: |
+        set -euo pipefail
+
+        # Build a throwaway root that mimics the real layout but whose
+        # requirements.txt deliberately omits the mcp<2.0.0 pin.
+        fixture_root="$(mktemp -d)"
+        trap 'rm -rf "$fixture_root"' EXIT
+
+        mkdir -p "$fixture_root/projects/01-mcp-server-suite/servers/bad-server"
+        cat > "$fixture_root/projects/01-mcp-server-suite/servers/bad-server/requirements.txt" <<'EOF'
+        # intentionally missing the mcp<2.0.0 pin
+        requests>=2.31.0
+        EOF
+
+        set +e
+        output="$(bash .github/scripts/check_mcp_pin.sh "$fixture_root" 2>&1)"
+        status=$?
+        set -e
+
+        echo "$output"
+
+        if [ "$status" -eq 0 ]; then
+          echo "::error::Self-test FAILED: check_mcp_pin.sh exited 0 on a fixture missing the pin (silent no-op)"
+          exit 1
+        fi
+
+        if ! grep -q '::error::FAIL:' <<<"$output"; then
+          echo "::error::Self-test FAILED: check_mcp_pin.sh exited non-zero but did not emit the expected ::error::FAIL: message"
+          exit 1
+        fi
+
+        echo "Self-test OK: check_mcp_pin.sh correctly failed on a fixture missing the pin."
+
+    - name: Verify check fails when no requirements files are discovered
+      run: |
+        set -euo pipefail
+
+        # Empty fixture root: the glob matches nothing. The check must not
+        # pass vacuously.
+        fixture_root="$(mktemp -d)"
+        trap 'rm -rf "$fixture_root"' EXIT
+
+        set +e
+        output="$(bash .github/scripts/check_mcp_pin.sh "$fixture_root" 2>&1)"
+        status=$?
+        set -e
+
+        echo "$output"
+
+        if [ "$status" -eq 0 ]; then
+          echo "::error::Self-test FAILED: check_mcp_pin.sh exited 0 with zero requirements files (vacuous pass)"
+          exit 1
+        fi
+
+        echo "Self-test OK: check_mcp_pin.sh correctly failed when no requirements files were found."
