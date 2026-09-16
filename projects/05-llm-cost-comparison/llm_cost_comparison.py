@@ -39,7 +39,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-VERSION = "0.1.0"
+__version__ = "1.0.0"
+VERSION = __version__
 
 DEFAULT_PRICING_PATH = Path(__file__).parent / "pricing.json"
 DEFAULT_LAST_RUN_PATH = Path(__file__).parent / ".last_run.json"
@@ -2385,7 +2386,7 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"%(prog)s {VERSION}",
+        version=__version__,
     )
     parser.add_argument(
         "--non-interactive",
