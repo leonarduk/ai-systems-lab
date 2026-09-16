@@ -1196,6 +1196,23 @@ def lookup_gpu_defaults(gpu_name: str) -> Optional[tuple]:
 DESKTOP_REST_OF_SYSTEM_W = 100.0
 LAPTOP_REST_OF_SYSTEM_W = 30.0
 
+# User-facing prompt text for the two power-draw questions in
+# ``interactive_local_setup``. Hoisted to module scope so the wording lives
+# in one discoverable place (and can be localized later) instead of being
+# buried inline in the function body.
+EXTRA_POWER_DRAW_PROMPT = (
+    "Extra power draw while generating — GPU/CPU load above idle (W), "
+    "for when the machine is already on for other reasons "
+    "(the additional watts the GPU/CPU pull when active, on top of "
+    "the idle system draw)"
+)
+TOTAL_SYSTEM_DRAW_PROMPT = (
+    "Total system power draw while running — GPU plus the rest of the PC "
+    "(W), for when it's only powered on to run this "
+    "(the entire system's power consumption while the GPU is under load, "
+    "including the extra draw above)"
+)
+
 
 def rest_of_system_allowance_w(gpu_info: Optional[dict]) -> float:
     """Rough default allowance (W) for everything except the GPU itself —
@@ -1708,10 +1725,7 @@ def interactive_local_setup() -> tuple:
             "  machine is on — you don't have to pick one up front.\n"
         )
         power_watts_extra = prompt_float(
-            "Extra power draw while generating — GPU/CPU load above idle (W), "
-            "for when the machine is already on for other reasons "
-            "(the additional watts the GPU/CPU pull when active, on top of "
-            "the idle system draw)",
+            EXTRA_POWER_DRAW_PROMPT,
             default=extra_default,
             minimum=0,
         )
@@ -1733,10 +1747,7 @@ def interactive_local_setup() -> tuple:
             "for a desktop) — override below if yours differs."
         )
         power_watts_total = prompt_float(
-            "Total system power draw while running — GPU plus the rest of the PC "
-            "(W), for when it's only powered on to run this "
-            "(the entire system's power consumption while the GPU is under load, "
-            "including the extra draw above)",
+            TOTAL_SYSTEM_DRAW_PROMPT,
             default=power_watts_extra + rest_of_system_w,
             minimum=0,
         )
