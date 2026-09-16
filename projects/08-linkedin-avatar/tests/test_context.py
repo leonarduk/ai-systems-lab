@@ -201,7 +201,17 @@ class TestFormatFullRecord:
 
 
 class TestRulesBlock:
-    """One assertion per behaviour the issue requires a rule for."""
+    """One assertion per behaviour the issue requires a rule for.
+
+    The rules text now lives in avatar/rules.md and is loaded into
+    context.RULES_BLOCK at import time; these tests exercise the loaded
+    content, so they cover both the file and the loader.
+    """
+
+    def test_rules_block_is_loaded_from_rules_md(self):
+        rules_path = Path(context.__file__).resolve().parent / "rules.md"
+        assert rules_path.exists()
+        assert context.RULES_BLOCK == rules_path.read_text(encoding="utf-8").strip()
 
     def test_states_it_is_an_ai_twin_not_steve_himself(self):
         assert "AI twin" in context.RULES_BLOCK
