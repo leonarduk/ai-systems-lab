@@ -268,6 +268,55 @@ def test_build_hosted_rows_all_and_filtered(tmp_path):
     assert haiku_cost < opus_cost
 
 
+def test_build_hosted_rows_warns_on_unknown_selected_key(capsys):
+    pricing = {
+        "providers": {
+            "claude": {
+                "models": {
+                    "opus-5": {
+                        "display_name": "Claude Opus 5",
+                        "input_per_million": 5.0,
+                        "output_per_million": 25.0,
+                    }
+                }
+            }
+        }
+    }
+    w = m.Workload(1000, 500, 300)
+    rows = m.build_hosted_rows(
+        w, pricing, selected={"claude/opus-5", "claude/typo-model"}
+    )
+    # Valid key still processed exactly as before.
+    assert len(rows) == 1
+    assert rows[0].name == "Claude Opus 5"
+    # Unknown key reported to stderr, not stdout.
+    captured = capsys.readouterr()
+    assert "claude/typo-model" in captured.err
+    assert "Warning: unknown model key" in captured.err
+    assert "claude/typo-model" not in captured.out
+
+
+def test_build_hosted_rows_no_warning_when_all_selected_keys_known(capsys):
+    pricing = {
+        "providers": {
+            "claude": {
+                "models": {
+                    "opus-5": {
+                        "display_name": "Claude Opus 5",
+                        "input_per_million": 5.0,
+                        "output_per_million": 25.0,
+                    }
+                }
+            }
+        }
+    }
+    w = m.Workload(1000, 500, 300)
+    rows = m.build_hosted_rows(w, pricing, selected={"claude/opus-5"})
+    assert len(rows) == 1
+    captured = capsys.readouterr()
+    assert "Warning: unknown model key" not in captured.err
+
+
 def test_build_hosted_rows_raises_config_error_on_malformed_pricing():
     pricing = {
         "providers": {

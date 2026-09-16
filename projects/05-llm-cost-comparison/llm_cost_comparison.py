@@ -690,7 +690,22 @@ def build_hosted_rows(
 
     ``selected`` is an optional set of ``"provider/model"`` keys to restrict
     the comparison to; if None, every model in the pricing file is included.
+
+    Any key in ``selected`` that doesn't match a model in ``pricing`` is
+    reported to stderr as a warning and otherwise ignored — a typo'd or
+    stale model key would otherwise silently drop that model from the
+    comparison with no indication to the user.
     """
+    known_keys = {
+        f"{provider_key}/{model_key}"
+        for provider_key, model_key, _model_info in iter_models(pricing)
+    }
+    if selected is not None:
+        for unknown_key in sorted(selected - known_keys):
+            print(
+                f"Warning: unknown model key {unknown_key!r} – ignoring.",
+                file=sys.stderr,
+            )
     rows = []
     for provider_key, model_key, model_info in iter_models(pricing):
         full_key = f"{provider_key}/{model_key}"
