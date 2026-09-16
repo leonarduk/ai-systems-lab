@@ -5,7 +5,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fakes import FakeLLMProvider, FakeMCPToolClient
 
-from orchestrator import check_duplicate, process_candidate, run_once
+import pytest
+
+from orchestrator import (
+    _validate_extraction,
+    check_duplicate,
+    extract_and_classify,
+    process_candidate,
+    run_once,
+)
 
 CRITERIA = {
     "prize_types": ["cash"],
@@ -213,6 +221,103 @@ class TestProcessCandidate:
         )
         assert outcome == "entered"
         assert client.submitted[0]["confirm_personal_data"] is True
+
+
+class TestValidateExtraction:
+    def _valid_payload(self, **overrides):
+        payload = {
+            "prize": "GBP 100 cash",
+            "closing_date": "2026-08-15",
+            "entry_requirements": "Fill in the web form",
+            "entry_url": "https://example.com/enter",
+            "requires_purchase": False,
+            "has_complex_tie_breaker": False,
+            "tie_breaker_answer": None,
+            "eligible": True,
+            "reason": "Matches all criteria",
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_accepts_valid_payload(self):
+        payload = self._valid_payload()
+        assert _validate_extraction(payload) is payload
+
+    def test_accepts_null_for_nullable_keys(self):
+        payload = self._valid_payload(
+            closing_date=None, entry_url=None, tie_breaker_answer=None
+        )
+        assert _validate_extraction(payload) is payload
+
+    def test_rejects_non_object(self):
+        with pytest.raises(ValueError, match="must be a JSON object"):
+            _validate_extraction(["not", "an", "object"])
+
+    def test_rejects_missing_required_key(self):
+        payload = self._valid_payload()
+        del payload["entry_requirements"]
+        with pytest.raises(ValueError, match="missing required key 'entry_requirements'"):
+            _validate_extraction(payload)
+
+    def test_rejects_wrong_type_for_string_field(self):
+        payload = self._valid_payload(entry_requirements=123)
+        with pytest.raises(ValueError, match="key 'entry_requirements'.*expected str"):
+            _validate_extraction(payload)
+
+    def test_rejects_wrong_type_for_boolean_field(self):
+        payload = self._valid_payload(eligible="yes")
+        with pytest.raises(ValueError, match="key 'eligible'.*expected bool"):
+            _validate_extraction(payload)
+
+    def test_rejects_null_for_non_nullable_key(self):
+        payload = self._valid_payload(entry_requirements=None)
+        with pytest.raises(ValueError, match="key 'entry_requirements' must not be null"):
+            _validate_extraction(payload)
+
+    def test_rejects_bool_in_string_field(self):
+        # bool is a subclass of int; make sure we don't accidentally accept it.
+        payload = self._valid_payload(prize=True)
+        with pytest.raises(ValueError, match="key 'prize'.*expected str"):
+            _validate_extraction(payload)
+
+
+class TestExtractAndClassifyValidation:
+    def test_invalid_llm_response_raises_value_error(self):
+        llm = FakeLLMProvider(
+            fixed_response={
+                "prize": "Cash",
+                "eligible": True,
+                "requires_purchase": False,
+                "has_complex_tie_breaker": False,
+                "reason": "",
+                # entry_requirements and entry_url deliberately omitted
+            }
+        )
+        with pytest.raises(ValueError, match="missing required key"):
+            extract_and_classify(llm, CRITERIA, "some page content")
+
+    def test_invalid_llm_response_surfaces_as_error_in_run_once(self):
+        client = FakeMCPToolClient(
+            draws=[make_candidate("draw-1")],
+            pages={"draw-1": {"content": "x"}},
+        )
+        llm = FakeLLMProvider(
+            fixed_response={
+                "prize": "Cash",
+                "eligible": True,
+                "requires_purchase": False,
+                "has_complex_tie_breaker": False,
+                "reason": "",
+                # entry_requirements and entry_url deliberately omitted
+            }
+        )
+        summary = run_once(
+            client, llm, CRITERIA, dry_run=True, confirm_personal_data=False
+        )
+        assert len(summary.errors) == 1
+        assert summary.errors[0]["draw_id"] == "draw-1"
+        assert "missing required key" in summary.errors[0]["error"]
+        assert summary.entered == []
 
 
 class TestRunOnce:

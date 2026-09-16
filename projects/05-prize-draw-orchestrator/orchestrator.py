@@ -44,6 +44,7 @@ Competition page content:
 {content}
 """
 
+# JSON-schema description sent to the LLM provider (used for structured output).
 _EXTRACTION_SCHEMA = {
     "type": "object",
     "properties": {
@@ -59,12 +60,77 @@ _EXTRACTION_SCHEMA = {
     },
     "required": [
         "prize",
+        "entry_requirements",
+        "entry_url",
         "eligible",
         "requires_purchase",
         "has_complex_tie_breaker",
         "reason",
     ],
 }
+
+# Python-side validation contract for the parsed LLM response. Maps each
+# required key to the Python type we expect after JSON parsing. `None` is
+# accepted for the nullable keys (see `_NULLABLE_EXTRACTION_KEYS`).
+_EXTRACTION_FIELD_TYPES: dict[str, type] = {
+    "prize": str,
+    "closing_date": str,
+    "entry_requirements": str,
+    "entry_url": str,
+    "requires_purchase": bool,
+    "has_complex_tie_breaker": bool,
+    "tie_breaker_answer": str,
+    "eligible": bool,
+    "reason": str,
+}
+
+# Keys that may legitimately be `None` in the LLM response.
+_NULLABLE_EXTRACTION_KEYS = frozenset(
+    {"closing_date", "entry_url", "tie_breaker_answer"}
+)
+
+
+def _validate_extraction(parsed: Any) -> dict[str, Any]:
+    """Validate a parsed LLM extraction against `_EXTRACTION_FIELD_TYPES`.
+
+    Raises `ValueError` with a descriptive message if the response is not a
+    JSON object, is missing a required key, or has a key of the wrong type.
+    Returns the validated dict (unchanged) for convenient chaining.
+    """
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            f"LLM response must be a JSON object, got {type(parsed).__name__}"
+        )
+
+    for key, expected_type in _EXTRACTION_FIELD_TYPES.items():
+        if key not in parsed:
+            raise ValueError(
+                f"LLM response missing required key '{key}' "
+                f"(expected {expected_type.__name__})"
+            )
+        value = parsed[key]
+        if value is None:
+            if key in _NULLABLE_EXTRACTION_KEYS:
+                continue
+            raise ValueError(
+                f"LLM response key '{key}' must not be null "
+                f"(expected {expected_type.__name__})"
+            )
+        # `bool` is a subclass of `int`; guard against bools sneaking into
+        # string fields and vice versa.
+        if expected_type is bool:
+            if not isinstance(value, bool):
+                raise ValueError(
+                    f"LLM response key '{key}' has invalid type: "
+                    f"expected bool, got {type(value).__name__}"
+                )
+        elif not isinstance(value, expected_type):
+            raise ValueError(
+                f"LLM response key '{key}' has invalid type: "
+                f"expected {expected_type.__name__}, got {type(value).__name__}"
+            )
+
+    return parsed
 
 
 @dataclass
@@ -128,9 +194,15 @@ def check_duplicate(mcp_client: MCPToolClient, draw_id: str) -> bool:
 def extract_and_classify(
     llm: LLMProvider, criteria: dict[str, Any], page_content: str
 ) -> dict[str, Any]:
-    """Ask the configured LLM to normalize competition details and classify eligibility."""
+    """Ask the configured LLM to normalize competition details and classify eligibility.
+
+    The raw LLM response is validated against `_EXTRACTION_FIELD_TYPES` before
+    being returned, so callers can rely on every required key being present
+    with the expected type (or `None` for the nullable keys).
+    """
     prompt = _EXTRACTION_PROMPT_TEMPLATE.format(criteria=criteria, content=page_content)
-    return llm.generate_json(prompt, schema=_EXTRACTION_SCHEMA)
+    parsed = llm.generate_json(prompt, schema=_EXTRACTION_SCHEMA)
+    return _validate_extraction(parsed)
 
 
 def process_candidate(
@@ -173,7 +245,7 @@ def process_candidate(
         parsed["reason"] = parsed.get("reason") or "Does not meet configured criteria."
         return "needs_review", parsed
 
-    entry_requirements = parsed.get("entry_requirements", "") or ""
+    entry_requirements = parsed.get("entry_requirements") or ""
     if _requires_personal_data(entry_requirements) and not confirm_personal_data:
         parsed["reason"] = (
             "Entry requires personal/financial data; set CONFIRM_PERSONAL_DATA=true "
