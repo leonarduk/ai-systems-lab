@@ -23,8 +23,8 @@ commands = [
 
 [[checks]]
 name = "security"
-description = "Bandit static security scan (advisory in CI, not blocking — mirrored the same way here)"
+description = "Bandit static security scan (advisory on findings; execution errors still fail the check)"
 workflow = ".github/workflows/python-ci.yml (security)"
 commands = [
-    "bandit -r projects/ -ll || echo Security issues found",
+    "bandit -r projects/ -ll --exit-zero",
 ]
