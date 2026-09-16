@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import subprocess
 import sys
 import threading
@@ -59,6 +60,32 @@ class ConfigError(ValueError):
 # --------------------------------------------------------------------------
 
 
+def _validate_pricing(pricing: dict) -> None:
+    """Reject malformed per-model prices before any cost math runs.
+
+    A missing key, a non-numeric value (e.g. a quoted ``"5.0"``), a
+    non-finite value (``NaN``/``inf``), or a non-positive value (``0`` or
+    negative) would otherwise silently propagate into the cost calculations
+    and produce nonsensical figures (zero or negative monthly costs) with no
+    warning. Raising here, at load time, keeps the failure close to the
+    malformed data and gives a clear, field-named error instead of a
+    downstream ``TypeError`` or a silently wrong number.
+    """
+    for provider_key, model_key, model_info in iter_models(pricing):
+        full_key = f"{provider_key}/{model_key}"
+        for field in ("input_per_million", "output_per_million"):
+            value = model_info.get(field)
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise ConfigError(
+                    f"pricing model {full_key!r} is missing a numeric {field}"
+                )
+            if not math.isfinite(value) or value <= 0:
+                raise ConfigError(
+                    f"{field} for model {full_key!r} must be a positive number, "
+                    f"got {value!r}"
+                )
+
+
 def load_pricing(
     path: Path = DEFAULT_PRICING_PATH, *, try_refresh: bool = False
 ) -> dict:
@@ -69,17 +96,24 @@ def load_pricing(
     explicit ``--update-pricing`` command, and only for the shipped default
     pricing path so custom/user-edited config files are never overwritten
     implicitly.
+
+    Every model's ``input_per_million``/``output_per_million`` is validated
+    to be a finite, strictly positive number before the pricing dict is
+    returned (see ``_validate_pricing``), so downstream cost math never has
+    to defend against a zero, negative, or non-numeric rate.
     """
     if try_refresh and path == DEFAULT_PRICING_PATH:
         fetch_deepseek_pricing(path)
         fetch_bedrock_pricing(path)
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            pricing = json.load(f)
     except FileNotFoundError as exc:
         raise ConfigError(f"pricing file not found: {path}") from exc
     except json.JSONDecodeError as exc:
         raise ConfigError(f"pricing file {path} is not valid JSON: {exc}") from exc
+    _validate_pricing(pricing)
+    return pricing
 
 
 def iter_models(pricing: dict):
@@ -694,11 +728,6 @@ def build_hosted_rows(
         full_key = f"{provider_key}/{model_key}"
         if selected is not None and full_key not in selected:
             continue
-        for field in ("input_per_million", "output_per_million"):
-            if not isinstance(model_info.get(field), (int, float)):
-                raise ConfigError(
-                    f"pricing model {full_key!r} is missing a numeric {field}"
-                )
         monthly_cost = hosted_monthly_cost(
             workload, model_info["input_per_million"], model_info["output_per_million"]
         )

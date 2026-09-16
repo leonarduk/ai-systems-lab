@@ -316,6 +316,107 @@ def test_load_pricing_raises_config_error_on_missing_file(tmp_path: Path):
         m.load_pricing(tmp_path / "missing-pricing.json")
 
 
+@pytest.mark.parametrize("bad_value", [0, -5, 0.0, -0.01])
+def test_load_pricing_rejects_nonpositive_price(tmp_path: Path, bad_value):
+    bad_path = tmp_path / "pricing.json"
+    bad_path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "claude": {
+                        "models": {
+                            "opus-5": {
+                                "display_name": "Claude Opus 5",
+                                "input_per_million": bad_value,
+                                "output_per_million": 25.0,
+                            }
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(m.ConfigError, match="input_per_million"):
+        m.load_pricing(bad_path)
+
+
+def test_load_pricing_rejects_nonpositive_output_price(tmp_path: Path):
+    bad_path = tmp_path / "pricing.json"
+    bad_path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "claude": {
+                        "models": {
+                            "opus-5": {
+                                "display_name": "Claude Opus 5",
+                                "input_per_million": 5.0,
+                                "output_per_million": 0,
+                            }
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(m.ConfigError, match="output_per_million"):
+        m.load_pricing(bad_path)
+
+
+def test_load_pricing_rejects_non_numeric_price(tmp_path: Path):
+    bad_path = tmp_path / "pricing.json"
+    bad_path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "claude": {
+                        "models": {
+                            "opus-5": {
+                                "display_name": "Claude Opus 5",
+                                "input_per_million": "5.0",
+                                "output_per_million": 25.0,
+                            }
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(m.ConfigError, match="input_per_million"):
+        m.load_pricing(bad_path)
+
+
+def test_load_pricing_accepts_small_positive_price(tmp_path: Path):
+    # A tiny-but-positive rate (e.g. a cheap cached-input tier) must not be
+    # rejected — only zero, negative, or non-numeric values are invalid.
+    good_path = tmp_path / "pricing.json"
+    good_path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "deepseek": {
+                        "models": {
+                            "flash-cache-hit": {
+                                "display_name": "DeepSeek Flash (cached)",
+                                "input_per_million": 0.0001,
+                                "output_per_million": 0.28,
+                            }
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    pricing = m.load_pricing(good_path)
+    assert pricing["providers"]["deepseek"]["models"]["flash-cache-hit"][
+        "input_per_million"
+    ] == pytest.approx(0.0001)
+
+
 # --------------------------------------------------------------------------
 # Rendering / export
 # --------------------------------------------------------------------------
