@@ -296,6 +296,54 @@ class TestBuildSnapshot:
 
         assert records[0]["pushed_at"] == "2026-08-20"
 
+    def test_deterministic_output(self, monkeypatch, tmp_path):
+        """build_snapshot() must produce byte-identical output on repeated
+        runs with the same input. This exercises the full build_snapshot()
+        path against the raw HTTP layer (like TestPrivacyGuardrail) so that
+        a regression in sorting or dict ordering would actually be caught.
+
+        The mocked dataset deliberately uses repo names whose alphabetical
+        order differs from insertion order, and languages whose byte counts
+        tie, to expose any non-deterministic ordering."""
+        repos = [
+            make_repo("zeta-repo"),
+            make_repo("alpha-repo"),
+            make_repo("mid-repo"),
+            make_repo("beta-repo"),
+        ]
+        languages = {"Python": 100, "Shell": 500, "Dockerfile": 100}
+
+        def fake_get(url, headers, params=None, timeout=None):
+            if url.endswith("/repos") and params["page"] == 1:
+                return FakeResponse(200, json_data=repos)
+            if url.endswith("/repos"):
+                return FakeResponse(200, json_data=[])
+            if url.endswith("/languages"):
+                return FakeResponse(200, json_data=languages)
+            if url.endswith("/readme"):
+                return FakeResponse(200, text="# Title\n\nBody text.")
+            raise AssertionError(f"unexpected URL in test: {url}")
+
+        monkeypatch.setattr(snap.requests, "get", fake_get)
+
+        projects_md = tmp_path / "projects.md"
+        projects_md.write_text(
+            "## alpha-repo\n\nAlpha note.\n\n## zeta-repo\n\nZeta note.\n",
+            encoding="utf-8",
+        )
+
+        first = snap.build_snapshot("leonarduk", projects_md_path=projects_md)
+        second = snap.build_snapshot("leonarduk", projects_md_path=projects_md)
+
+        assert first == second
+
+        first_path = tmp_path / "first.json"
+        second_path = tmp_path / "second.json"
+        snap.write_snapshot(first, first_path)
+        snap.write_snapshot(second, second_path)
+
+        assert first_path.read_bytes() == second_path.read_bytes()
+
 
 class TestWriteSnapshot:
     def test_deterministic_across_two_runs(self, tmp_path):
