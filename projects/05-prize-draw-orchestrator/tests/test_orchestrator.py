@@ -1,3 +1,11 @@
+# NOTE: The requested change (adding FX rate provider fallback tests) cannot be
+# applied to this file. This file contains tests for the prize draw orchestrator
+# and does not contain `test_fetch_fx_rate_returns_none_when_yahoo_also_fails`,
+# `fake_urlopen`, `_FakeHTTPResponse`, or any FX rate code. The correct target
+# file (the FX rate test suite) was not provided for modification.
+#
+# No changes were made to avoid introducing unrelated/incorrect tests.
+
 import sys
 from pathlib import Path
 
