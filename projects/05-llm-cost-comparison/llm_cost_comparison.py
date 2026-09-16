@@ -2225,21 +2225,14 @@ def run_non_interactive(
     pricing_path = Path(config.get("pricing_file", DEFAULT_PRICING_PATH))
     if not pricing_path.is_absolute():
         pricing_path = config_path.parent / pricing_path
-    try:
-        pricing = load_pricing(pricing_path)
-    except ConfigError as exc:
-        # load_pricing raises ConfigError for a missing file (wrapping
-        # FileNotFoundError) or invalid JSON. Surface a clear, user-facing
-        # message instead of a raw traceback, and exit non-zero.
-        if "not found" in str(exc):
-            print(
-                f"Error: pricing file not found: {pricing_path}. "
-                "Please ensure the file exists (or set 'pricing_file' in your config).",
-                file=sys.stderr,
-            )
-        else:
-            print(f"Error: {exc}", file=sys.stderr)
-        return 1
+    # load_pricing raises ConfigError (wrapping FileNotFoundError for a
+    # missing file, or JSONDecodeError for invalid JSON) with a clear
+    # message. Let it propagate rather than swallowing it here: main()
+    # already catches ConfigError, prints "Config error: <message>" to
+    # stderr (no raw traceback), and exits non-zero, so callers that
+    # invoke run_non_interactive directly (e.g. tests, other tooling)
+    # still get the exception to handle as they see fit.
+    pricing = load_pricing(pricing_path)
     selected = set(config["selected_models"]) if "selected_models" in config else None
 
     local_cfg = config["local"]
