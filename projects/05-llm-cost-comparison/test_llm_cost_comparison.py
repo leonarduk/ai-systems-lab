@@ -1718,6 +1718,76 @@ def test_resolve_workload_scenarios_unknown_preset_key_raises():
         m._resolve_workload_scenarios({"workload_preset": "not_a_real_preset"})
 
 
+def test_resolve_workload_scenarios_always_returns_workload_objects():
+    # Contract relied on by run_non_interactive's validation loop: the third
+    # element of every scenario tuple must be a Workload instance (never a
+    # dict or other mapping), so attribute access is safe.
+    for config in (
+        {
+            "workload": {
+                "requests_per_day": 1000,
+                "avg_input_tokens": 500,
+                "avg_output_tokens": 300,
+            }
+        },
+        {"workload_preset": "casual"},
+        {"workload_presets": ["casual", "coding_agent"]},
+    ):
+        scenarios = m._resolve_workload_scenarios(config)
+        assert scenarios, f"expected at least one scenario for {config!r}"
+        for _key, _label, workload in scenarios:
+            assert isinstance(workload, m.Workload), (
+                f"scenario workload for {config!r} is "
+                f"{type(workload).__name__}, not Workload"
+            )
+            # The three fields the validation loop reads must be present.
+            assert hasattr(workload, "requests_per_day")
+            assert hasattr(workload, "avg_input_tokens")
+            assert hasattr(workload, "avg_output_tokens")
+
+
+def test_run_non_interactive_raises_config_error_for_mapping_shaped_workload(
+    tmp_path: Path, monkeypatch
+):
+    # Regression test: if _resolve_workload_scenarios ever returned a
+    # mapping-shaped workload (e.g. a dict) instead of a Workload object,
+    # the validation loop in run_non_interactive must raise ConfigError
+    # (a clear, user-facing error) rather than AttributeError (an opaque
+    # internal failure). Simulate that by monkeypatching the resolver.
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    config = {
+        "workload": {
+            "requests_per_day": 1000,
+            "avg_input_tokens": 500,
+            "avg_output_tokens": 300,
+        },
+        "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+        "pricing_file": str(pricing_path),
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    def fake_resolver(_config):
+        # Deliberately wrong shape: a dict instead of a Workload.
+        return [
+            (
+                "custom",
+                "Custom",
+                {
+                    "requests_per_day": 1000,
+                    "avg_input_tokens": 500,
+                    "avg_output_tokens": 300,
+                },
+            )
+        ]
+
+    monkeypatch.setattr(m, "_resolve_workload_scenarios", fake_resolver)
+
+    with pytest.raises(m.ConfigError, match="not a Workload"):
+        m.run_non_interactive(config_path, export_fmt=None, export_path=None)
+
+
 # --------------------------------------------------------------------------
 # run_non_interactive with multiple preset scenarios (per-scenario export)
 # --------------------------------------------------------------------------
