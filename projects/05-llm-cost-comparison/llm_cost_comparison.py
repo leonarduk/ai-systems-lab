@@ -77,11 +77,23 @@ def load_pricing(
         fetch_bedrock_pricing(path)
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
     except FileNotFoundError as exc:
         raise ConfigError(f"pricing file not found: {path}") from exc
     except json.JSONDecodeError as exc:
         raise ConfigError(f"pricing file {path} is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError(
+            f"pricing file {path} must contain a JSON object at the top level, "
+            f"got {type(data).__name__}"
+        )
+    missing = [k for k in ("as_of", "providers") if k not in data]
+    if missing:
+        raise ConfigError(
+            f"pricing file {path} is missing required top-level key(s): "
+            f"{', '.join(missing)}"
+        )
+    return data
 
 
 def iter_models(pricing: dict):

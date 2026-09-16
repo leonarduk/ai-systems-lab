@@ -316,6 +316,70 @@ def test_load_pricing_raises_config_error_on_missing_file(tmp_path: Path):
         m.load_pricing(tmp_path / "missing-pricing.json")
 
 
+def test_load_pricing_raises_config_error_when_as_of_missing(tmp_path: Path):
+    path = tmp_path / "pricing.json"
+    path.write_text(
+        json.dumps({"providers": {"claude": {"models": {}}}}), encoding="utf-8"
+    )
+    with pytest.raises(m.ConfigError, match="as_of"):
+        m.load_pricing(path)
+
+
+def test_load_pricing_raises_config_error_when_providers_missing(tmp_path: Path):
+    path = tmp_path / "pricing.json"
+    path.write_text(json.dumps({"as_of": "2026-01-01"}), encoding="utf-8")
+    with pytest.raises(m.ConfigError, match="providers"):
+        m.load_pricing(path)
+
+
+def test_load_pricing_raises_config_error_when_both_required_keys_missing(
+    tmp_path: Path,
+):
+    path = tmp_path / "pricing.json"
+    path.write_text(json.dumps({"note": "no required keys"}), encoding="utf-8")
+    with pytest.raises(m.ConfigError) as exc_info:
+        m.load_pricing(path)
+    message = str(exc_info.value)
+    assert "as_of" in message
+    assert "providers" in message
+    assert str(path) in message
+
+
+def test_load_pricing_raises_config_error_when_top_level_is_not_object(
+    tmp_path: Path,
+):
+    path = tmp_path / "pricing.json"
+    path.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+    with pytest.raises(m.ConfigError, match="JSON object"):
+        m.load_pricing(path)
+
+
+def test_load_pricing_accepts_file_with_required_keys(tmp_path: Path):
+    path = tmp_path / "pricing.json"
+    path.write_text(
+        json.dumps(
+            {
+                "as_of": "2026-01-01",
+                "providers": {
+                    "claude": {
+                        "models": {
+                            "opus-5": {
+                                "display_name": "Claude Opus 5",
+                                "input_per_million": 5.0,
+                                "output_per_million": 25.0,
+                            }
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    data = m.load_pricing(path)
+    assert data["as_of"] == "2026-01-01"
+    assert "claude" in data["providers"]
+
+
 # --------------------------------------------------------------------------
 # Rendering / export
 # --------------------------------------------------------------------------
