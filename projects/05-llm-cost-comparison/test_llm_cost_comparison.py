@@ -1227,7 +1227,7 @@ def test_run_non_interactive_own_mode_rejects_non_numeric_field(tmp_path: Path):
         m.run_non_interactive(config_path, export_fmt=None, export_path=None)
 
 
-@pytest.mark.parametrize("bad_value", [0, -5, "fast"])
+@pytest.mark.parametrize("bad_value", [0, -5, "fast", True])
 def test_run_non_interactive_rejects_nonpositive_tokens_per_sec(
     tmp_path: Path, bad_value
 ):
@@ -1241,6 +1241,45 @@ def test_run_non_interactive_rejects_nonpositive_tokens_per_sec(
             "avg_output_tokens": 300,
         },
         "local": {"mode": "rent", "tokens_per_sec": bad_value, "hourly_rate": 2.5},
+        "pricing_file": str(pricing_path),
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(m.ConfigError, match="tokens_per_sec"):
+        m.run_non_interactive(config_path, export_fmt=None, export_path=None)
+
+
+@pytest.mark.parametrize("mode", ["own", "existing", "rent"])
+def test_run_non_interactive_rejects_zero_tokens_per_sec_in_every_mode(
+    tmp_path: Path, mode
+):
+    # The interactive prompt enforces a minimum on tokens/sec regardless of
+    # which hardware mode was chosen; the non-interactive path must reject
+    # the same bad value in every mode, not just the one exercised above.
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    local_cfg = {"mode": mode, "tokens_per_sec": 0}
+    if mode == "own":
+        local_cfg.update(
+            {
+                "hardware_cost": 1600,
+                "lifetime_years": 3,
+                "power_watts": 450,
+                "electricity_rate_per_kwh": 0.15,
+            }
+        )
+    elif mode == "existing":
+        local_cfg.update({"power_watts": 450, "electricity_rate_per_kwh": 0.15})
+    else:  # rent
+        local_cfg.update({"hourly_rate": 2.5})
+    config = {
+        "workload": {
+            "requests_per_day": 1000,
+            "avg_input_tokens": 500,
+            "avg_output_tokens": 300,
+        },
+        "local": local_cfg,
         "pricing_file": str(pricing_path),
     }
     config_path.write_text(json.dumps(config), encoding="utf-8")
