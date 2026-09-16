@@ -1491,6 +1491,43 @@ def test_run_non_interactive_rejects_zero_total_workload_tokens(tmp_path: Path):
         m.run_non_interactive(config_path, export_fmt=None, export_path=None)
 
 
+@pytest.mark.parametrize(
+    "field, bad_value",
+    [
+        ("requests_per_day", 0),
+        ("requests_per_day", -1),
+        ("avg_input_tokens", 0),
+        ("avg_input_tokens", -5),
+        # avg_output_tokens == 0 is deliberately NOT included here — it's a
+        # legitimate value (classification-only workload), covered by
+        # test_run_non_interactive_allows_zero_output_tokens_for_input_only_workload
+        # below. Only a negative value is invalid.
+        ("avg_output_tokens", -3),
+    ],
+)
+def test_run_non_interactive_rejects_nonpositive_workload_field(
+    tmp_path: Path, field, bad_value
+):
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    workload = {
+        "requests_per_day": 1000,
+        "avg_input_tokens": 500,
+        "avg_output_tokens": 300,
+    }
+    workload[field] = bad_value
+    config = {
+        "workload": workload,
+        "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+        "pricing_file": str(pricing_path),
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(m.ConfigError, match=field):
+        m.run_non_interactive(config_path, export_fmt=None, export_path=None)
+
+
 @pytest.mark.parametrize("bad_value", [-1, "many"])
 def test_run_non_interactive_rejects_bad_workload_field(tmp_path: Path, bad_value):
     pricing_path = tmp_path / "pricing.json"

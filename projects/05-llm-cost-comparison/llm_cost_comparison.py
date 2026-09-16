@@ -2325,6 +2325,30 @@ def run_non_interactive(
     _require_keys(config, ["local"], "top-level")
     scenarios = _resolve_workload_scenarios(config)
 
+    for _key, _label, _workload in scenarios:
+        # requests_per_day and avg_input_tokens must be strictly positive —
+        # a workload with no requests or no input isn't meaningful. But
+        # avg_output_tokens == 0 alone is legitimate (a classification-only
+        # workload with no generated output), so it's only checked for being
+        # negative, not zero; monthly_total_tokens is checked separately to
+        # still catch input == output == 0.
+        for _field in ("requests_per_day", "avg_input_tokens"):
+            _value = getattr(_workload, _field)
+            if _value <= 0:
+                raise ConfigError(
+                    f"workload.{_field} must be a positive number, got {_value!r}"
+                )
+        if _workload.avg_output_tokens < 0:
+            raise ConfigError(
+                f"workload.avg_output_tokens must be a positive number, "
+                f"got {_workload.avg_output_tokens!r}"
+            )
+        if _workload.monthly_total_tokens <= 0:
+            raise ConfigError(
+                "workload produces zero total tokens/month — set requests_per_day and "
+                "at least one of avg_input_tokens/avg_output_tokens above zero"
+            )
+
     pricing_path = Path(config.get("pricing_file", DEFAULT_PRICING_PATH))
     if not pricing_path.is_absolute():
         pricing_path = config_path.parent / pricing_path
