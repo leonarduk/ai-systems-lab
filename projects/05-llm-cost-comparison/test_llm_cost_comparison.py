@@ -1723,6 +1723,83 @@ def test_resolve_workload_scenarios_unknown_preset_key_raises():
 # --------------------------------------------------------------------------
 
 
+def test_run_non_interactive_static_currency_converts_table_and_export(
+    tmp_path: Path, capsys
+):
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    config = {
+        "workload": {
+            "requests_per_day": 1000,
+            "avg_input_tokens": 500,
+            "avg_output_tokens": 300,
+        },
+        "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+        "pricing_file": str(pricing_path),
+        "currency": "GBP",
+        "static_fx_rate": 0.8,
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    export_path = tmp_path / "out.json"
+    exit_code = m.run_non_interactive(
+        config_path, export_fmt="json", export_path=export_path
+    )
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "£" in out
+    assert "$" not in out
+
+    data = json.loads(export_path.read_text(encoding="utf-8"))
+    assert all("monthly_cost_gbp" in row for row in data)
+    assert all("monthly_cost_usd" not in row for row in data)
+
+
+def test_run_non_interactive_currency_without_static_rate_raises_config_error(
+    tmp_path: Path,
+):
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    config = {
+        "workload": {
+            "requests_per_day": 1000,
+            "avg_input_tokens": 500,
+            "avg_output_tokens": 300,
+        },
+        "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+        "pricing_file": str(pricing_path),
+        "currency": "GBP",
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(m.ConfigError, match="static_fx_rate"):
+        m.run_non_interactive(config_path, export_fmt=None, export_path=None)
+
+
+def test_run_non_interactive_defaults_to_usd_without_static_rate(
+    tmp_path: Path, capsys
+):
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    config = {
+        "workload": {
+            "requests_per_day": 1000,
+            "avg_input_tokens": 500,
+            "avg_output_tokens": 300,
+        },
+        "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+        "pricing_file": str(pricing_path),
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    exit_code = m.run_non_interactive(config_path, export_fmt=None, export_path=None)
+    assert exit_code == 0
+    assert "$" in capsys.readouterr().out
+
+
 def test_run_non_interactive_multiple_presets_prints_one_combined_table_and_exports_one_file(
     tmp_path: Path, capsys
 ):

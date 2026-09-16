@@ -69,6 +69,27 @@ See `example_config.json` (workload presets, hardware you already own) and
 `example_config_buying_hardware.json` (explicit workload, buying new
 hardware) for the config shapes.
 
+#### Display currency (non-interactive)
+
+By default the table is shown in USD. To display it in another currency
+without any network access, add two optional top-level keys to the config:
+
+```json
+{
+  "currency": "GBP",
+  "static_fx_rate": 0.79
+}
+```
+
+- `currency` — display currency code (default `"USD"`). Any code in
+  `CURRENCY_SYMBOLS` (currently `"USD"`/`"GBP"`) is accepted.
+- `static_fx_rate` — the USD→`currency` rate used to convert the table for
+  display. Required when `currency != "USD"`; using a static rate avoids a
+  live FX API call (no network, no latency, no failure point). All cost math
+  stays in USD internally, and the whole table — local and hosted rows alike
+  — is displayed and exported in the chosen currency.
+=======
+
 ### Timing notes
 
 The optional local-endpoint benchmark reports a single **wall-clock** timing

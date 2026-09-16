@@ -7,5 +7,6 @@
     "tokens_per_sec": 40
   },
   "pricing_file": "pricing.json",
-  "selected_models": null
+  "selected_models": null,
+  "currency": "USD"
 }

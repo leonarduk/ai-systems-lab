@@ -2228,6 +2228,14 @@ def run_non_interactive(
     ``pricing_file``, if relative, is resolved against ``config_path``'s
     directory (not the process's working directory) so the example config
     works regardless of where the script is invoked from.
+
+    Optional top-level keys:
+      * ``"currency"`` — display currency code (default ``"USD"``). Any code
+        in ``CURRENCY_SYMBOLS`` (currently ``"USD"``/``"GBP"``) is accepted.
+      * ``"static_fx_rate"`` — USD→``currency`` rate used to convert the
+        table for display. Required when ``currency != "USD"``; using a
+        static rate avoids a live FX API call (no network, no latency, no
+        failure point). All cost math stays in USD internally.
     """
     try:
         with open(config_path, "r", encoding="utf-8") as f:
@@ -2247,6 +2255,24 @@ def run_non_interactive(
         pricing_path = config_path.parent / pricing_path
     pricing = load_pricing(pricing_path)
     selected = set(config["selected_models"]) if "selected_models" in config else None
+
+    display_currency = config.get("currency", "USD")
+    if not isinstance(display_currency, str) or not display_currency:
+        raise ConfigError(
+            f"currency must be a non-empty string, got {display_currency!r}"
+        )
+    display_currency = display_currency.upper()
+    static_fx_rate = config.get("static_fx_rate")
+    if display_currency != "USD":
+        if (
+            not isinstance(static_fx_rate, (int, float))
+            or isinstance(static_fx_rate, bool)
+            or static_fx_rate <= 0
+        ):
+            raise ConfigError(
+                "static_fx_rate must be a positive number when currency is not "
+                f"'USD' (got {static_fx_rate!r})"
+            )
 
     local_cfg = config["local"]
     _require_keys(local_cfg, ["mode", "tokens_per_sec"], "local")
@@ -2344,6 +2370,8 @@ def run_non_interactive(
         rows = [build_local(effective_workload)] + build_hosted_rows(
             effective_workload, pricing, selected
         )
+        if display_currency != "USD":
+            rows = convert_rows_currency(rows, static_fx_rate)
         scenario_labels_rows.append((label, rows))
 
     if scaled_scenarios:
@@ -2359,24 +2387,28 @@ def run_non_interactive(
     if export_fmt and export_path:
         if multiple:
             if export_fmt == "csv":
-                export_combined_csv(scenario_labels_rows, export_path)
+                export_combined_csv(
+                    scenario_labels_rows, export_path, currency=display_currency
+                )
             else:
-                export_combined_json(scenario_labels_rows, export_path)
+                export_combined_json(
+                    scenario_labels_rows, export_path, currency=display_currency
+                )
         else:
             _label, rows = scenario_labels_rows[0]
             if export_fmt == "csv":
-                export_csv(rows, export_path)
+                export_csv(rows, export_path, currency=display_currency)
             else:
-                export_json(rows, export_path)
+                export_json(rows, export_path, currency=display_currency)
         print(f"Wrote {export_path}")
 
     if multiple:
         print("\n== Results (all scenarios) ==")
-        print(render_combined_table(scenario_labels_rows))
+        print(render_combined_table(scenario_labels_rows, currency=display_currency))
     else:
         label, rows = scenario_labels_rows[0]
         print(f"\n== {label} ==")
-        print(render_table(rows))
+        print(render_table(rows, currency=display_currency))
     return 0
 
 
@@ -2395,7 +2427,12 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument(
         "--config",
         type=Path,
-        help="JSON config file for --non-interactive mode (see run_non_interactive docstring).",
+        help=(
+            "JSON config file for --non-interactive mode (see run_non_interactive "
+            "docstring). Optional top-level keys: 'currency' (default 'USD') and "
+            "'static_fx_rate' (USD->currency rate, required when currency != 'USD'; "
+            "avoids a live FX API call)."
+        ),
     )
     parser.add_argument(
         "--export", choices=["csv", "json"], help="Export results in this format."
