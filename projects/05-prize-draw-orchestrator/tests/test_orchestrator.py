@@ -188,6 +188,50 @@ class TestProcessCandidate:
         assert client.submitted == []
         assert "personal" in details["reason"].lower()
 
+    def test_null_entry_url_falls_back_to_candidate_url(self):
+        # Regression test: `entry_url` is nullable in `_NULLABLE_EXTRACTION_KEYS`,
+        # so a `null` value from the LLM is a valid, expected input. The
+        # `parsed.get("entry_url") or candidate.get("url")` fallback in
+        # `process_candidate` must populate `entry_url` from the candidate's
+        # `url` rather than letting `None` propagate downstream.
+        client = FakeMCPToolClient(
+            pages={"draw-1": {"content": "Win 100 pounds cash, no purchase necessary"}}
+        )
+        llm = FakeLLMProvider(
+            fixed_response={
+                "prize": "GBP 100 cash",
+                "closing_date": "2026-08-15",
+                "entry_requirements": "Fill in the web form",
+                "entry_url": None,
+                "requires_purchase": False,
+                "has_complex_tie_breaker": False,
+                "tie_breaker_answer": None,
+                "eligible": True,
+                "reason": "Matches all criteria",
+            }
+        )
+        outcome, details = process_candidate(
+            client,
+            llm,
+            CRITERIA,
+            make_candidate(url="https://example.com/draw-1"),
+            dry_run=True,
+            confirm_personal_data=False,
+        )
+        assert outcome == "entered"
+        assert details["entry_url"] == "https://example.com/draw-1"
+        assert client.submitted == [
+            {
+                "draw_id": "draw-1",
+                "fields": {
+                    "entry_url": "https://example.com/draw-1",
+                    "tie_breaker_answer": None,
+                },
+                "confirm_personal_data": False,
+                "dry_run": True,
+            }
+        ]
+
     def test_personal_data_requirement_allows_entry_with_explicit_confirmation(self):
         client = FakeMCPToolClient(
             pages={"draw-1": {"content": "Enter your bank details to claim"}}
