@@ -36,10 +36,19 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import Callable, Optional
 
-VERSION = "0.1.0"
+# Resolved from installed package metadata so pyproject.toml is the single
+# source of truth for the version. Falls back to an obviously-not-a-release
+# sentinel when running from a source checkout where the package isn't
+# installed (e.g. `python llm_cost_comparison.py --version`).
+try:
+    VERSION = _pkg_version("llm-cost-comparison")
+except PackageNotFoundError:
+    VERSION = "0.0.0+unknown"
 
 DEFAULT_PRICING_PATH = Path(__file__).parent / "pricing.json"
 DEFAULT_LAST_RUN_PATH = Path(__file__).parent / ".last_run.json"
