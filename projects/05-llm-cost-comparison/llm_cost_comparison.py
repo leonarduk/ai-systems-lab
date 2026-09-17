@@ -15,7 +15,11 @@ Design goals:
   * Best-effort Windows/NVIDIA GPU detection via ``nvidia-smi`` and an
     optional local-endpoint throughput benchmark (Ollama or an
     OpenAI-compatible ``/v1/chat/completions`` server). Both degrade
-    gracefully to manual input if unavailable.
+    gracefully to manual input if unavailable. The interactive flow asks a
+    single combined prompt first — ``Skip benchmark (GPU detection +
+    throughput)? [y/N]:`` (default ``False``) — where ``y`` skips both GPU
+    detection and benchmarking, while ``n`` or Enter falls through to the
+    original two prompts (GPU detection, then benchmark).
 
 Usage:
     python llm_cost_comparison.py                # interactive
@@ -1612,7 +1616,8 @@ def interactive_local_setup() -> tuple:
     # A single combined prompt replaces the previous two separate yes/no
     # questions (GPU detection, then throughput benchmark). Answering "y"
     # skips both steps; "n" or Enter falls through to the original
-    # two-question flow so each can still be controlled independently.
+    # two-question flow so each can still be controlled independently. The
+    # two original prompts below run only when ``skip_benchmark`` is False.
     skip_benchmark = prompt_yes_no(
         "Skip benchmark (GPU detection + throughput)?", default=False
     )
