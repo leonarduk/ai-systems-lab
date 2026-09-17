@@ -1,0 +1,56 @@
+name: cicaid-checks
+
+# Runs `cicaid run-ci-checks` against this repository so that the checks
+# declared in `.cicaid-checks.toml` are actually exercised on every PR and on
+# pushes to the default branch.
+#
+# Failure semantics:
+#   - The `cicaid run-ci-checks` invocation itself is treated as a hard
+#     failure. If the config cannot be parsed, a referenced path is missing,
+#     or `cicaid`/`flake8`/`bandit` cannot be executed, the job fails.
+#   - Individual checks declared in `.cicaid-checks.toml` remain advisory
+#     (e.g. `bandit ... || echo ...`), matching the behaviour of
+#     `.github/workflows/python-ci.yml`. We do not swallow the exit code of
+#     `cicaid run-ci-checks` itself.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  cicaid-checks:
+    name: cicaid run-ci-checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dev dependencies (flake8, bandit, cicaid)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Verify required tools are on PATH
+        run: |
+          python --version
+          flake8 --version
+          bandit --version
+          cicaid --help > /dev/null
+
+      - name: Run cicaid run-ci-checks
+        # Do NOT append `|| true` or otherwise swallow the exit code here.
+        # A non-zero exit from `cicaid run-ci-checks` (config parse failure,
+        # missing binary, missing path) must fail the job. Advisory behaviour
+        # for individual checks is encoded inside `.cicaid-checks.toml`.
+        run: cicaid run-ci-checks --all
