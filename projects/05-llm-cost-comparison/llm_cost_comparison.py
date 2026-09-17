@@ -692,6 +692,33 @@ def build_local_row(
     return ComparisonRow(name, monthly_cost, per_million, notes, feasible=feasible)
 
 
+def _validate_pricing_model(model_info: dict, full_key: str) -> None:
+    """Validate a single pricing model's per-million-token fields.
+
+    Shared by ``load_pricing`` (via ``_validate_pricing``) and
+    ``build_hosted_rows`` so both paths enforce identical semantics and
+    raise the same ``ConfigError`` message. A field must be a real number
+    (not a ``bool``, which is an ``int`` subclass), finite, and strictly
+    positive — a zero or negative price would silently produce a
+    nonsensical cost, and ``NaN``/``inf`` would poison every downstream
+    figure.
+    """
+    import math
+
+    for field in ("input_per_million", "output_per_million"):
+        value = model_info.get(field)
+        ok = (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and value > 0
+        )
+        if not ok:
+            raise ConfigError(
+                f"pricing model {full_key!r} is missing a numeric {field}"
+            )
+
+
 def build_hosted_rows(
     workload: Workload, pricing: dict, selected: Optional[set] = None
 ) -> list:
@@ -699,17 +726,21 @@ def build_hosted_rows(
 
     ``selected`` is an optional set of ``"provider/model"`` keys to restrict
     the comparison to; if None, every model in the pricing file is included.
+
+    Pricing values are validated here (via ``_validate_pricing_model``)
+    rather than assumed pre-validated, so a hand-constructed ``pricing``
+    dict that bypassed ``load_pricing`` still fails loudly with a
+    ``ConfigError`` instead of silently computing costs from a missing,
+    zero, negative, non-numeric, ``NaN``, or ``inf`` price. The check is
+    cheap (two field lookups per model) and reuses the same helper as
+    ``load_pricing``, so error messages and semantics stay identical.
     """
     rows = []
     for provider_key, model_key, model_info in iter_models(pricing):
         full_key = f"{provider_key}/{model_key}"
         if selected is not None and full_key not in selected:
             continue
-        for field in ("input_per_million", "output_per_million"):
-            if not isinstance(model_info.get(field), (int, float)):
-                raise ConfigError(
-                    f"pricing model {full_key!r} is missing a numeric {field}"
-                )
+        _validate_pricing_model(model_info, full_key)
         monthly_cost = hosted_monthly_cost(
             workload, model_info["input_per_million"], model_info["output_per_million"]
         )
