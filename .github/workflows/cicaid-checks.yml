@@ -53,4 +53,4 @@ jobs:
         # A non-zero exit from `cicaid run-ci-checks` (config parse failure,
         # missing binary, missing path) must fail the job. Advisory behaviour
         # for individual checks is encoded inside `.cicaid-checks.toml`.
-        run: cicaid run-ci-checks
+        run: cicaid run-ci-checks --all
