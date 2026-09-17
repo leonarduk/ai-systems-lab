@@ -2229,6 +2229,14 @@ def _resolve_workload_scenarios(config: dict) -> list:
     Returns a list of ``(key, label, Workload)`` tuples, mirroring
     ``interactive_workload``'s return shape so both paths share the same
     downstream printing/export logic.
+
+    Contract: the third element of every returned tuple is always a
+    ``Workload`` instance (never a ``dict`` or other mapping), so callers
+    may safely access ``requests_per_day`` / ``avg_input_tokens`` /
+    ``avg_output_tokens`` as attributes. Both branches below construct a
+    ``Workload`` explicitly (``Workload(**config["workload"])`` for the
+    explicit-workload shape, ``preset.to_workload()`` for presets), so this
+    holds for every code path.
     """
     provided = [
         k for k in ("workload", "workload_preset", "workload_presets") if k in config
@@ -2426,6 +2434,17 @@ def run_non_interactive(
     scenario_labels_rows = []
     scaled_scenarios = []
     for key, label, workload in scenarios:
+        # Defensive check: ``_resolve_workload_scenarios`` is documented to
+        # always return ``Workload`` objects, but if a future refactor ever
+        # returned a mapping (or anything else) here, the downstream
+        # attribute access would raise an opaque ``AttributeError`` instead
+        # of a clear, user-facing ``ConfigError``. Fail loudly and clearly
+        # rather than silently misbehaving.
+        if not isinstance(workload, Workload):
+            raise ConfigError(
+                f"internal error: workload scenario {key!r} is not a Workload "
+                f"object (got {type(workload).__name__})"
+            )
         effective_workload, feasible, coverage_pct = scale_workload_to_local_capacity(
             workload, tokens_per_sec
         )
