@@ -11,6 +11,8 @@ import os
 
 import gradio as gr
 from dotenv import load_dotenv
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
 from avatar import context, guardrails, llm, styles
 
@@ -64,10 +66,26 @@ def build_demo():
     return demo
 
 
+def build_health_app():
+    """Minimal FastAPI app exposing GET /health for Render's health check.
+
+    Deliberately side-effect free: no logging, no external calls, no
+    dependency on DeepSeek/Pushover/Telegram. Just proves the process is up.
+    """
+    health_app = FastAPI()
+
+    @health_app.get("/health")
+    def health():
+        return JSONResponse({"status": "ok"})
+
+    return health_app
+
+
 if __name__ == "__main__":
     port = os.environ.get("GRADIO_SERVER_PORT")
     build_demo().launch(
         server_name=os.environ.get("GRADIO_SERVER_NAME"),
         server_port=int(port) if port else None,
         css=styles.CSS,
+        app_kwargs={"app": build_health_app()},
     )
