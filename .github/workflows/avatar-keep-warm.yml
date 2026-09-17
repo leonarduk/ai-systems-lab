@@ -40,9 +40,14 @@ jobs:
 
           if attempt; then
             echo "Ping succeeded"
-          elif attempt; then
-            echo "Retry succeeded"
           else
-            echo "::warning::Both keep-warm pings failed — app may be down or slow to wake"
+            # Render cold starts can take 30-60s; give the app a moment to
+            # finish booting before retrying so the retry is meaningful.
+            sleep 5
+            if attempt; then
+              echo "Retry succeeded"
+            else
+              echo "::warning::Both keep-warm pings failed — app may be down or slow to wake"
+            fi
           fi
         shell: bash
