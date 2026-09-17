@@ -67,6 +67,9 @@ jobs:
       run: |
         black --check projects/ || echo "Code formatting issues found. Run 'black projects/' to fix."
 
+    - name: Check profile.md length
+      run: python scripts/check_profile_length.py
+
   test:
     name: Run Tests
     runs-on: ubuntu-latest

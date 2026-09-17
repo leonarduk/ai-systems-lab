@@ -1,3 +1,7 @@
+<!--
+Length limit: 4000 words / 25000 bytes (see [tool.profile-length] in pyproject.toml).
+Check locally with: python scripts/check_profile_length.py
+-->
 ## Contact
 [redacted]
 [redacted]
