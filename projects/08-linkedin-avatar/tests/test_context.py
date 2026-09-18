@@ -108,6 +108,34 @@ class TestBuildSystemPrompt:
         # Should not raise: the explicit argument wins over the env var.
         context.build_system_prompt(max_tokens=40000, knowledge_dir=knowledge_dir)
 
+    def test_non_integer_env_var_raises_clear_error(self, knowledge_dir, monkeypatch):
+        monkeypatch.setenv("AVATAR_MAX_CONTEXT_TOKENS", "abc")
+
+        with pytest.raises(ValueError) as exc_info:
+            context.build_system_prompt(knowledge_dir=knowledge_dir)
+
+        message = str(exc_info.value)
+        assert "AVATAR_MAX_CONTEXT_TOKENS" in message
+        assert "abc" in message
+        assert "positive integer" in message
+
+    def test_non_positive_env_var_raises_clear_error(self, knowledge_dir, monkeypatch):
+        monkeypatch.setenv("AVATAR_MAX_CONTEXT_TOKENS", "0")
+
+        with pytest.raises(ValueError) as exc_info:
+            context.build_system_prompt(knowledge_dir=knowledge_dir)
+
+        message = str(exc_info.value)
+        assert "AVATAR_MAX_CONTEXT_TOKENS" in message
+        assert "0" in message
+        assert "positive integer" in message
+
+    def test_valid_integer_env_var_still_works(self, knowledge_dir, monkeypatch):
+        monkeypatch.setenv("AVATAR_MAX_CONTEXT_TOKENS", "40000")
+
+        # Should not raise: a valid positive integer is accepted as before.
+        context.build_system_prompt(knowledge_dir=knowledge_dir)
+
     def test_no_volatile_timestamp_content(self, knowledge_dir):
         prompt = context.build_system_prompt(knowledge_dir=knowledge_dir)
         # A static pushed_at date (YYYY-MM-DD) is legitimate committed data;

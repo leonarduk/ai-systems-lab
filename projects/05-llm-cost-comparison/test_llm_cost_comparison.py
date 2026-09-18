@@ -287,6 +287,66 @@ def test_build_hosted_rows_raises_config_error_on_malformed_pricing():
         m.build_hosted_rows(w, pricing)
 
 
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        None,  # missing
+        0,  # zero
+        -1.0,  # negative
+        "1.0",  # non-numeric
+        float("nan"),  # NaN
+        float("inf"),  # inf
+        True,  # bool (int subclass)
+    ],
+)
+def test_build_hosted_rows_direct_call_rejects_invalid_price(bad_value):
+    # build_hosted_rows is called directly here with a hand-constructed
+    # pricing dict that bypassed load_pricing. The guard must still raise
+    # ConfigError with the established message rather than silently
+    # computing a cost from an invalid price.
+    pricing = {
+        "providers": {
+            "claude": {
+                "models": {
+                    "opus-5": {
+                        "display_name": "Claude Opus 5",
+                        "input_per_million": bad_value,
+                        "output_per_million": 25.0,
+                    }
+                }
+            }
+        }
+    }
+    w = m.Workload(1000, 500, 300)
+    with pytest.raises(
+        m.ConfigError,
+        match=r"pricing model 'claude/opus-5' is missing a numeric input_per_million",
+    ):
+        m.build_hosted_rows(w, pricing)
+
+
+def test_build_hosted_rows_direct_call_rejects_invalid_output_price():
+    pricing = {
+        "providers": {
+            "claude": {
+                "models": {
+                    "opus-5": {
+                        "display_name": "Claude Opus 5",
+                        "input_per_million": 5.0,
+                        "output_per_million": 0,
+                    }
+                }
+            }
+        }
+    }
+    w = m.Workload(1000, 500, 300)
+    with pytest.raises(
+        m.ConfigError,
+        match=r"pricing model 'claude/opus-5' is missing a numeric output_per_million",
+    ):
+        m.build_hosted_rows(w, pricing)
+
+
 # --------------------------------------------------------------------------
 # Real pricing.json shipped alongside the script
 # --------------------------------------------------------------------------
@@ -314,6 +374,38 @@ def test_load_pricing_raises_config_error_on_invalid_json(tmp_path: Path):
 def test_load_pricing_raises_config_error_on_missing_file(tmp_path: Path):
     with pytest.raises(m.ConfigError, match="pricing file not found"):
         m.load_pricing(tmp_path / "missing-pricing.json")
+
+
+def test_load_pricing_tolerates_extra_top_level_keys(tmp_path: Path):
+    # Regression guard: load_pricing only requires `as_of` and `providers`.
+    # Real pricing files may carry extra metadata keys, and tightening
+    # validation to reject unknown keys would silently break them.
+    pricing_path = tmp_path / "pricing.json"
+    pricing_path.write_text(
+        json.dumps(
+            {
+                "as_of": "2026-01-01",
+                "providers": {
+                    "claude": {
+                        "models": {
+                            "opus-5": {
+                                "display_name": "Claude Opus 5",
+                                "input_per_million": 5.0,
+                                "output_per_million": 25.0,
+                            }
+                        }
+                    }
+                },
+                "extra": "value",
+                "notes": "some future metadata",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    pricing = m.load_pricing(pricing_path)
+    assert pricing["as_of"] == "2026-01-01"
+    assert "claude" in pricing["providers"]
 
 
 # --------------------------------------------------------------------------
@@ -984,6 +1076,74 @@ def test_prompt_float_accepts_default_without_minimum_check(monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# prompt_choice case-insensitive matching
+# --------------------------------------------------------------------------
+
+
+def test_prompt_choice_lowercase_input_lowercase_choices(monkeypatch):
+    # Baseline: existing callers passing lowercase choices and lowercase
+    # input must keep working unchanged.
+    monkeypatch.setattr("builtins.input", lambda _: "ollama")
+    assert m.prompt_choice("Pick", ["ollama", "other"]) == "ollama"
+
+
+def test_prompt_choice_uppercase_input_lowercase_choices(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _: "OLLAMA")
+    assert m.prompt_choice("Pick", ["ollama", "other"]) == "ollama"
+
+
+def test_prompt_choice_mixed_case_input_lowercase_choices(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _: "Ollama")
+    assert m.prompt_choice("Pick", ["ollama", "other"]) == "ollama"
+
+
+def test_prompt_choice_mixed_case_choice_matched_case_insensitively(monkeypatch):
+    # The original-cased choice must be returned, not the casefolded input.
+    monkeypatch.setattr("builtins.input", lambda _: "newprovider")
+    assert m.prompt_choice("Pick", ["NewProvider", "other"]) == "NewProvider"
+
+
+def test_prompt_choice_mixed_case_choice_exact_case_input(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _: "NewProvider")
+    assert m.prompt_choice("Pick", ["NewProvider", "other"]) == "NewProvider"
+
+
+def test_prompt_choice_prompt_preserves_original_casing(monkeypatch):
+    # Display casing is a separate concern from matching: the prompt shown to
+    # the user must list the original-cased choices, not the casefolded ones.
+    captured = {}
+
+    def fake_input(prompt):
+        captured["prompt"] = prompt
+        return "newprovider"
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    m.prompt_choice("Pick", ["NewProvider", "other"])
+    assert "NewProvider" in captured["prompt"]
+    assert "newprovider" not in captured["prompt"]
+
+
+def test_prompt_choice_reprompts_on_invalid_input(monkeypatch, capsys):
+    # prompt_choice loops until it gets a valid answer; it does NOT fall back
+    # to the default on invalid (non-empty) input. Feed one invalid value
+    # followed by a valid one, and assert the error message lists the
+    # original-cased choices.
+    inputs = iter(["not-a-choice", "newprovider"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+    result = m.prompt_choice("Pick", ["NewProvider", "other"])
+    assert result == "NewProvider"
+    out = capsys.readouterr().out
+    assert "NewProvider" in out
+    assert "newprovider" not in out
+
+
+def test_prompt_choice_empty_input_returns_default(monkeypatch):
+    # The default is only used when the user submits an empty answer.
+    monkeypatch.setattr("builtins.input", lambda _: "")
+    assert m.prompt_choice("Pick", ["NewProvider", "other"], default="other") == "other"
+
+
+# --------------------------------------------------------------------------
 # Non-interactive config validation
 # --------------------------------------------------------------------------
 
@@ -1170,6 +1330,30 @@ def test_main_non_interactive_config_error_reports_and_exits_nonzero(
     exit_code = m.main(["--non-interactive", "--config", str(config_path)])
     assert exit_code == 1
     assert "hourly_rate" in capsys.readouterr().err
+
+
+def test_main_non_interactive_missing_pricing_file_reports_and_exits_nonzero(
+    tmp_path: Path, capsys
+):
+    """Issue #33 end-to-end: a missing pricing.json in --non-interactive mode
+    must print a clear, user-facing message (not a raw traceback) and exit
+    non-zero -- via main()'s existing ConfigError handler, since
+    run_non_interactive itself re-raises rather than swallowing it."""
+    config_path = tmp_path / "config.json"
+    config = {
+        "workload": {
+            "requests_per_day": 1000,
+            "avg_input_tokens": 500,
+            "avg_output_tokens": 300,
+        },
+        "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+        "pricing_file": "does_not_exist.json",
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    exit_code = m.main(["--non-interactive", "--config", str(config_path)])
+    assert exit_code == 1
+    assert "pricing file not found" in capsys.readouterr().err
 
 
 def test_run_non_interactive_missing_pricing_file_raises_config_error(tmp_path: Path):
