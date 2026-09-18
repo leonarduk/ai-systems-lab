@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -1330,6 +1331,21 @@ def test_run_non_interactive_resolves_relative_pricing_file_against_config_dir(
 # --------------------------------------------------------------------------
 # main() CLI export-flag handling
 # --------------------------------------------------------------------------
+
+
+def test_main_version_flag_prints_version_and_exits_zero(capsys, monkeypatch):
+    # argparse's "version" action prints to stdout and raises SystemExit(0).
+    # %(prog)s is derived from sys.argv[0], which under pytest is the test
+    # runner rather than this script, so pin it. Asserting only the version
+    # suffix would let a reordered or truncated format string through, which
+    # is exactly the regression this smoke test exists to catch.
+    monkeypatch.setattr(sys, "argv", ["llm_cost_comparison.py", "--version"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        m.main(["--version"])
+
+    assert exc_info.value.code == 0
+    assert capsys.readouterr().out == f"llm_cost_comparison.py {m.VERSION}\n"
 
 
 def test_main_non_interactive_export_without_path_defaults(
