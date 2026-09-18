@@ -341,23 +341,45 @@ class TestRulesBlock:
         prompt = context.build_system_prompt(knowledge_dir=knowledge_dir)
         assert prompt.rstrip().endswith(context.RULES_BLOCK.rstrip())
 
-    def test_rules_block_included_when_max_tokens_too_small(self, knowledge_dir):
-        # Budget smaller than the static sections plus the rules block: the
-        # GitHub section must be dropped entirely, but the rules block is
-        # appended unconditionally and the prompt must remain well-formed.
-        static_size = context.estimate_tokens(
-            context.ROLE_BLOCK + context.RULES_BLOCK
+    def test_raises_when_budget_is_below_the_static_floor(self, tmp_path):
+        # The role block, summary, profile and rules block are all appended
+        # unconditionally, so their combined size is a floor no amount of
+        # GitHub trimming can get under. A budget below it is unsatisfiable and
+        # must surface as PromptTooLargeError naming both numbers — not as a
+        # crash from the negative GitHub budget that max(..., 0) clamps away,
+        # and not as a silently truncated prompt.
+        (tmp_path / "summary.txt").write_text(
+            "I'm a senior engineer with 20 years of experience.", encoding="utf-8"
         )
-        # Pick a budget that is clearly below the static floor but still
-        # positive, so we exercise the max(budget_for_github, 0) clamp.
-        tiny_budget = max(static_size - 1, 1)
-
-        prompt = context.build_system_prompt(
-            max_tokens=tiny_budget, knowledge_dir=knowledge_dir
+        (tmp_path / "profile.md").write_text(
+            "## Experience\nSenior Software Engineer at Acme.", encoding="utf-8"
+        )
+        # No github.json: this prompt is exactly the unconditional floor.
+        floor = context.estimate_tokens(
+            context.build_system_prompt(max_tokens=40000, knowledge_dir=tmp_path)
         )
 
-        # Rules block content survives even when the budget is exhausted.
-        assert context.RULES_BLOCK.rstrip() in prompt
-        # Prompt is non-empty and well-formed (no negative-budget artifacts).
-        assert prompt.strip()
-        assert "issue-worm" not in prompt
+        # At the floor it still builds...
+        assert (
+            context.estimate_tokens(
+                context.build_system_prompt(max_tokens=floor, knowledge_dir=tmp_path)
+            )
+            == floor
+        )
+
+        # ...and one token under it cannot.
+        with pytest.raises(context.PromptTooLargeError) as exc_info:
+            context.build_system_prompt(max_tokens=floor - 1, knowledge_dir=tmp_path)
+
+        message = str(exc_info.value)
+        assert str(floor) in message
+        assert str(floor - 1) in message
+
+    def test_budget_below_floor_still_raises_with_github_records(self, knowledge_dir):
+        # Same floor, but with GitHub records present: the section is trimmed
+        # away to nothing and the budget is still unmeetable. The clamp on
+        # max(budget_for_github, 0) means the negative budget never reaches
+        # _github_section, so this is a PromptTooLargeError rather than an
+        # IndexError or a ValueError from the trimming loop.
+        with pytest.raises(context.PromptTooLargeError):
+            context.build_system_prompt(max_tokens=1, knowledge_dir=knowledge_dir)
