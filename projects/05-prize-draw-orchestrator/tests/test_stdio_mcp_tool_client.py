@@ -57,30 +57,25 @@ def test_unknown_tool_is_raised_as_mcp_tool_error(mock_mcp_server_path: str):
         client.call_tool("no_such_tool", {})
 
 
-# A server that dies before the handshake surfaces as the ExceptionGroup the
-# underlying anyio task group raises, NOT as the MCPToolError the client wraps
-# tool-level failures in. These tests pin that as it stands rather than assert
-# the nicer behaviour, so they document the gap instead of hiding it: a caller
-# currently has to catch ExceptionGroup as well as MCPToolError to handle a
-# server that fails to start. Worth a follow-up to wrap it.
-@pytest.mark.parametrize(
-    "mode, expected_in_message",
-    [("crash", "TaskGroup"), ("normal", "TaskGroup")],
-)
-def test_server_that_never_completes_the_handshake_raises(
-    mock_mcp_server_path, tmp_path, mode, expected_in_message
-):
-    if mode == "crash":
-        client = _client(mock_mcp_server_path, mode="crash")
-    else:
-        # Same failure shape, reached a different way: the command itself is
-        # missing, so the subprocess exits before speaking MCP at all.
-        client = StdioMCPToolClient(
-            command=sys.executable,
-            args=[str(tmp_path / "does_not_exist.py")],
-        )
+# A server that fails before or during the handshake surfaces as the
+# ExceptionGroup the underlying anyio task group raises, NOT as the
+# MCPToolError the client wraps tool-level failures in — so a caller currently
+# has to catch both. Accept either rather than asserting the group
+# specifically: the looser form keeps passing once the client is fixed to wrap
+# these, instead of pinning the present gap in place.
+@pytest.mark.parametrize("mode", ["crash", "malformed"])
+def test_server_failing_before_handshake_raises(mock_mcp_server_path, mode):
+    client = _client(mock_mcp_server_path, mode=mode)
 
-    with pytest.raises(ExceptionGroup) as exc_info:
+    with pytest.raises((MCPToolError, ExceptionGroup)):
         client.call_tool("echo", {"text": "hello"})
 
-    assert expected_in_message in str(exc_info.value)
+
+def test_missing_server_command_raises(tmp_path):
+    client = StdioMCPToolClient(
+        command=sys.executable,
+        args=[str(tmp_path / "does_not_exist.py")],
+    )
+
+    with pytest.raises((MCPToolError, ExceptionGroup)):
+        client.call_tool("echo", {"text": "hello"})
