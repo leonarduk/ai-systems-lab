@@ -231,7 +231,7 @@ class TestProcessCandidate:
         )
         assert outcome == "entered"
         # process_candidate applies the fallback where it builds submit_fields
-        # (orchestrator.py: `parsed.get("entry_url") or candidate.get("url")`),
+        # (`parsed.get("entry_url") or candidate.get("url")`),
         # not by writing back into the response it returns — so the submission
         # is where a null entry_url has to be resolved, and details["entry_url"]
         # legitimately stays None. That is the only read of entry_url in the
@@ -246,13 +246,40 @@ class TestProcessCandidate:
             client.submitted[0]["fields"]["entry_url"] == "https://example.com/draw-1"
         )
 
+    def test_llm_entry_url_takes_precedence_over_candidate_url(self):
+        # The other half of the `or`: when the LLM supplies a URL it wins.
+        # Without this, flipping the operands to
+        # `candidate.get("url") or parsed.get("entry_url")` would pass every
+        # other entry_url test here.
+        client = FakeMCPToolClient(
+            pages={"draw-1": {"content": "Win 100 pounds cash, no purchase necessary"}}
+        )
+        response = dict(_ELIGIBLE_RESPONSE_WITH_NULL_ENTRY_URL)
+        response["entry_url"] = "https://example.com/real-entry-form"
+        llm = FakeLLMProvider(fixed_response=response)
+
+        process_candidate(
+            client,
+            llm,
+            CRITERIA,
+            make_candidate(url="https://example.com/draw-1"),
+            dry_run=True,
+            confirm_personal_data=False,
+        )
+
+        assert len(client.submitted) == 1
+        assert (
+            client.submitted[0]["fields"]["entry_url"]
+            == "https://example.com/real-entry-form"
+        )
+
     @pytest.mark.xfail(
         strict=True,
         reason=(
             "Issue #233's acceptance criteria assume process_candidate writes the "
             "resolved entry_url back into the response it returns. It does not — "
-            "the fallback is applied only where submit_fields is built "
-            "(orchestrator.py:276). Recorded as issue #543; this xfail is the "
+            "the fallback is applied only where process_candidate builds "
+            "submit_fields. Recorded as issue #543; this xfail is the "
             "executable form of that discrepancy and will start failing loudly "
             "if write-back is ever added."
         ),
@@ -291,6 +318,7 @@ class TestProcessCandidate:
             confirm_personal_data=False,
         )
 
+        assert len(client.submitted) == 1
         assert client.submitted[0]["fields"]["entry_url"] is None
 
     def test_personal_data_requirement_allows_entry_with_explicit_confirmation(self):
