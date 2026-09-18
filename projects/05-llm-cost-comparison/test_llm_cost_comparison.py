@@ -1985,3 +1985,224 @@ def test_run_non_interactive_multiple_presets_prints_one_combined_table_and_expo
     data = json.loads(export_path.read_text(encoding="utf-8"))
     scenarios_seen = {row["scenario"] for row in data}
     assert scenarios_seen == {"Casual personal use", "Autonomous coding agent"}
+
+
+# --------------------------------------------------------------------------
+# Full interactive end-to-end session (monkeypatched input())
+# --------------------------------------------------------------------------
+
+
+_PRICING_FIXTURE = {
+    "as_of": "2026-01-01",
+    "note": "test fixture",
+    "providers": {
+        "claude": {
+            "models": {
+                "opus-5": {
+                    "display_name": "Claude Opus 5",
+                    "input_per_million": 5.0,
+                    "output_per_million": 25.0,
+                }
+            }
+        }
+    },
+}
+
+
+def _interactive_session(monkeypatch, answers: dict):
+    """Drive run_interactive() by matching prompts rather than counting them.
+
+    A positional list of answers breaks the moment a prompt is added, removed
+    or reordered, and fails as an opaque StopIteration that says nothing about
+    which prompt drifted. Matching on a substring of the prompt keeps these
+    tests readable and pins each answer to the question it belongs to.
+
+    Every prompt must be matched by exactly one fragment. Falling back to ""
+    would be worse than the StopIteration it replaces: an empty string is
+    usually accepted as the shown default, so a reworded prompt would let the
+    test keep passing while silently no longer exercising the intended path.
+    Prompts whose default is genuinely what we want are listed explicitly in
+    `_ACCEPT_DEFAULT` rather than left to fall through.
+
+    An answer may be a string, or a list of strings to return on successive
+    matches (used to feed an invalid answer followed by a valid one).
+    """
+    pending = {
+        fragment: list(value) if isinstance(value, list) else None
+        for fragment, value in answers.items()
+    }
+
+    def fake_input(prompt: str = "") -> str:
+        for fragment, value in answers.items():
+            if fragment in prompt:
+                queued = pending[fragment]
+                if queued is None:
+                    return value
+                if not queued:
+                    pytest.fail(f"ran out of scripted answers for prompt: {prompt!r}")
+                return queued.pop(0)
+        pytest.fail(
+            f"unscripted prompt: {prompt!r}\n"
+            "Add a fragment of it to the test's answers, or to _ACCEPT_DEFAULT."
+        )
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    monkeypatch.setattr(m, "load_pricing", lambda *a, **k: dict(_PRICING_FIXTURE))
+    # Belt and braces: fail loudly rather than reach the network if a future
+    # prompt change routes past the explicit answers below.
+    monkeypatch.setattr(
+        m, "fetch_octopus_agile_rate", lambda *a, **k: pytest.fail("network call")
+    )
+    monkeypatch.setattr(m, "fetch_fx_rate", lambda *a, **k: pytest.fail("network call"))
+
+
+# Prompts whose shown default is what these tests want. Listed explicitly so
+# that an unrecognised prompt is an error rather than a silent default.
+_ACCEPT_DEFAULT = {
+    "Extra power draw while generating": "",
+    "Total system power draw while running": "",
+    "Export results to a file?": "",
+    "Save these settings as defaults": "",
+}
+
+
+# Answers shared by every interactive test: skip all hardware probing and
+# supply the electricity rate by hand so nothing touches the network.
+_OFFLINE_ANSWERS = {
+    "auto-detect an NVIDIA GPU": "n",
+    "benchmark a running local model endpoint": "n",
+    "Look up your current unit rate live": "n",
+    # Declining the Octopus lookup still leaves the currency as GBP, which
+    # triggers a live FX conversion. Paying in USD keeps the run offline.
+    "Do you pay for electricity in GBP": "n",
+    "Electricity rate": "0.15",
+    # Pinned rather than defaulted so the local cost column is deterministic.
+    "Measured or estimated tokens/sec": "40",
+    **_ACCEPT_DEFAULT,
+}
+
+
+def test_run_interactive_end_to_end_preset(monkeypatch, capsys):
+    # Pick preset #1 ("casual") and the default "existing" hardware mode, then
+    # compare against every hosted model.
+    _interactive_session(
+        monkeypatch,
+        {
+            "Scenario [1-7]": "1",
+            "Skip benchmark": "y",
+            "Hardware mode": "existing",
+            "Compare against all of the above?": "y",
+            **_OFFLINE_ANSWERS,
+        },
+    )
+
+    exit_code = m.run_interactive()
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Casual personal use" in out
+    assert "Claude Opus 5" in out
+
+
+def test_run_interactive_end_to_end_custom_workload(monkeypatch, capsys):
+    # The "custom numbers" branch is the last menu entry, after the presets
+    # and the "compare all" option.
+    custom_option = str(len(m.WORKLOAD_PRESETS) + 2)
+    _interactive_session(
+        monkeypatch,
+        {
+            "Scenario [1-7]": custom_option,
+            "Expected requests/day": "1000",
+            "Average input tokens/request": "500",
+            "Average output tokens/request": "300",
+            "Skip benchmark": "y",
+            "Hardware mode": "buying",
+            # "buying" swaps the two power-basis prompts for an up-front
+            # hardware cost, a lifetime to amortise it over, and a single
+            # under-load power figure.
+            "Hardware cost (USD)": "1600",
+            "Expected hardware lifetime (years)": "3",
+            "Power draw under load (W)": "450",
+            "Compare against all of the above?": "y",
+            **_OFFLINE_ANSWERS,
+        },
+    )
+
+    exit_code = m.run_interactive()
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    # "buying" amortises the hardware cost, so the local row is labelled
+    # differently from the "existing" (electricity-only) row above.
+    assert "Local (buy hardware)" in out
+    assert "40.0 tok/s" in out
+    assert "Claude Opus 5" in out
+
+
+def test_run_interactive_end_to_end_compare_all_presets(monkeypatch, capsys):
+    # "Compare all scenarios" sits directly after the presets and produces one
+    # row group per preset.
+    all_option = str(len(m.WORKLOAD_PRESETS) + 1)
+    _interactive_session(
+        monkeypatch,
+        {
+            "Scenario [1-7]": all_option,
+            "Skip benchmark": "y",
+            "Hardware mode": "existing",
+            "Compare against all of the above?": "y",
+            **_OFFLINE_ANSWERS,
+        },
+    )
+
+    exit_code = m.run_interactive()
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    for preset in m.WORKLOAD_PRESETS:
+        assert preset.label in out
+    assert "Claude Opus 5" in out
+
+
+def test_run_interactive_reprompts_on_invalid_scenario(monkeypatch, capsys):
+    # Out-of-range and non-numeric menu answers must both be rejected with a
+    # readable message and re-prompted, not crash or silently pick a default.
+    _interactive_session(
+        monkeypatch,
+        {
+            "Scenario [1-7]": ["99", "abc", "1"],
+            "Skip benchmark": "y",
+            "Hardware mode": "existing",
+            "Compare against all of the above?": "y",
+            **_OFFLINE_ANSWERS,
+        },
+    )
+
+    exit_code = m.run_interactive()
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert out.count("Please enter a number from 1 to 7.") == 2
+    # Having recovered, the run still completes against the chosen preset.
+    assert "Casual personal use" in out
+
+
+def test_run_interactive_falls_back_to_manual_throughput(monkeypatch, capsys):
+    # With the benchmark not skipped but both GPU auto-detect and the local
+    # endpoint declined, throughput has to come from the manual prompt. This is
+    # the fallback path that has no hardware to measure from.
+    _interactive_session(
+        monkeypatch,
+        {
+            "Scenario [1-7]": "1",
+            "Skip benchmark": "n",
+            "Hardware mode": "existing",
+            "Compare against all of the above?": "y",
+            **_OFFLINE_ANSWERS,
+        },
+    )
+
+    exit_code = m.run_interactive()
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Claude Opus 5" in out
