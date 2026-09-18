@@ -128,11 +128,17 @@ class StdioMCPToolClient:
         # TimeoutError is replaced, not collected. Without this flag a call
         # timeout is indistinguishable from a transport failure.
         timed_out = False
+        # The inner timeouts bound the two waits that can actually stall. The
+        # outer one is a backstop for everything they do not cover — spawning
+        # the subprocess, and the context managers' own setup and teardown — so
+        # no path through here is unbounded.
+        #
+        # The backstop needs no flag of its own, unlike the inner timeouts: it
+        # is the outermost context manager, so its __aexit__ converts the
+        # cancellation into TimeoutError after any teardown error from within,
+        # and that conversion wins. The inner timeouts sit inside the session's
+        # task group, which is why theirs get replaced instead.
         try:
-            # The inner timeouts bound the two waits that can actually stall.
-            # The outer one is a backstop for everything they do not cover —
-            # spawning the subprocess, and the context managers' own setup and
-            # teardown — so no path through here is unbounded.
             async with asyncio.timeout(self.connect_timeout + self.call_timeout):
                 async with stdio_client(server_params) as (read, write):
                     async with ClientSession(read, write) as session:

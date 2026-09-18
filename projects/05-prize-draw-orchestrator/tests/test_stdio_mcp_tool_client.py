@@ -10,6 +10,7 @@ which meant five of its six tests silently did nothing.
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import sys
 import threading
@@ -166,6 +167,47 @@ def test_call_exceeding_its_budget_times_out(mock_mcp_server_path):
         client.call_tool("echo", {"text": "hello"})
 
     assert "did not respond within the timeout" in str(exc_info.value)
+
+
+def test_outer_backstop_bounds_a_stalled_session_setup(monkeypatch):
+    # The inner timeouts only start once the session is up, so a setup that
+    # never returns would slip past both. The backstop covers that. Run it on a
+    # daemon thread with a bounded join for the same reason as the hang test
+    # above: without the backstop there is nothing to end this, and the test
+    # should fail rather than stall CI.
+    import mcp.client.stdio as stdio_module
+
+    class StallingSession:
+        async def __aenter__(self):
+            await asyncio.sleep(3600)
+
+        async def __aexit__(self, *exc_info):
+            return False
+
+    monkeypatch.setattr(
+        stdio_module, "stdio_client", lambda *args, **kwargs: StallingSession()
+    )
+    client = StdioMCPToolClient(
+        command=sys.executable,
+        args=["-c", "pass"],
+        connect_timeout=0.2,
+        call_timeout=0.2,
+    )
+    outcome = {}
+
+    def call():
+        try:
+            outcome["returned"] = client.call_tool("echo", {"text": "hello"})
+        except BaseException as exc:  # noqa: BLE001 - recorded and re-checked below
+            outcome["raised"] = exc
+
+    worker = threading.Thread(target=call, daemon=True)
+    worker.start()
+    worker.join(timeout=20)
+
+    assert not worker.is_alive(), "session setup was never bounded by the backstop"
+    assert isinstance(outcome.get("raised"), MCPToolError), outcome
+    assert "did not respond within the timeout" in str(outcome["raised"])
 
 
 def test_timeout_is_reported_even_when_it_is_not_the_first_group_member(monkeypatch):
