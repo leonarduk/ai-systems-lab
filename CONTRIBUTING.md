@@ -45,6 +45,10 @@ Since this is a learning/portfolio project:
 - ❌ Requests to add new features
 - ❌ Style/formatting nitpicks (unless they impact functionality)
 
+## MCP Server Suite: Version Pin Requirement
+
+If you're touching anything under `projects/01-mcp-server-suite/servers/`, note that every server's `requirements.txt` must pin `mcp<2.0.0` — CI enforces this and will fail with `::error::FAIL: <file> does not pin mcp<2.0.0` otherwise. See the [MCP Version Pin section in the suite README](./projects/01-mcp-server-suite/README.md#mcp-version-pin) for the rationale and the exact file glob.
+
 ## Automated PR Review
 
 Every pull request is automatically reviewed by Claude, DeepSeek, and GPT (see
