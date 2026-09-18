@@ -26,6 +26,11 @@ permissions:
 jobs:
   ping:
     runs-on: ubuntu-latest
+    # Bound the whole job, not just each curl call. Two attempts at
+    # --max-time 60 plus runner overhead fit comfortably in 5 minutes, while
+    # still preventing a runaway job from consuming free-tier minutes if
+    # curl or the runner misbehaves.
+    timeout-minutes: 5
     steps:
       - name: Ping the app (retry once, never fail the run on a transient miss)
         run: |
