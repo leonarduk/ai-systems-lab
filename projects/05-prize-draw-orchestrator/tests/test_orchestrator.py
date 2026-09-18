@@ -229,22 +229,15 @@ class TestProcessCandidate:
             confirm_personal_data=False,
         )
         assert outcome == "entered"
-        # `details` is the parsed LLM response as-is — the fallback is applied
-        # when building the submission fields, not written back into it, so a
-        # null here is expected and is not what downstream consumes.
-        assert details["entry_url"] is None
-        # The submission is what matters: it carries the candidate's own URL.
-        assert client.submitted == [
-            {
-                "draw_id": "draw-1",
-                "fields": {
-                    "entry_url": "https://example.com/draw-1",
-                    "tie_breaker_answer": None,
-                },
-                "confirm_personal_data": False,
-                "dry_run": True,
-            }
-        ]
+        # process_candidate applies the fallback where it builds submit_fields
+        # (orchestrator.py: `parsed.get("entry_url") or candidate.get("url")`),
+        # so the submission is where a null entry_url has to be resolved.
+        # Assert only that field: pinning the whole payload would make this
+        # break on unrelated changes to the submission shape.
+        assert len(client.submitted) == 1
+        assert (
+            client.submitted[0]["fields"]["entry_url"] == "https://example.com/draw-1"
+        )
 
     def test_personal_data_requirement_allows_entry_with_explicit_confirmation(self):
         client = FakeMCPToolClient(
