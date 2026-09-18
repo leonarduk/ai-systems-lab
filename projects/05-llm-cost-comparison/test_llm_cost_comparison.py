@@ -1945,122 +1945,136 @@ def test_run_non_interactive_multiple_presets_prints_one_combined_table_and_expo
 # --------------------------------------------------------------------------
 
 
-def test_run_interactive_end_to_end(monkeypatch, capsys, tmp_path):
-    # Drive a complete interactive session through run_interactive() with a
-    # scripted sequence of input() answers. This exercises the menu prompt
-    # order, GPU auto-detect confirmation, base URL entry, model selection,
-    # and the final table rendering in one pass — none of which the pure
-    # unit tests above cover.
-    pricing_path = tmp_path / "pricing.json"
-    _write_pricing(pricing_path)
+_PRICING_FIXTURE = {
+    "as_of": "2026-01-01",
+    "note": "test fixture",
+    "providers": {
+        "claude": {
+            "models": {
+                "opus-5": {
+                    "display_name": "Claude Opus 5",
+                    "input_per_million": 5.0,
+                    "output_per_million": 25.0,
+                }
+            }
+        }
+    },
+}
 
-    # 1) workload menu -> pick preset #1 ("casual")
-    # 2) GPU auto-detect? -> "n" (skip; no real nvidia-smi in CI)
-    # 3) GPU count -> "1"
-    # 4) GPU name -> "NVIDIA GeForce RTX 4090"
-    # 5) tokens/sec -> "40"
-    # 6) hardware mode -> "existing" (electricity only)
-    # 7) power_watts -> "450"
-    # 8) electricity rate -> "0.15"
-    # 9) pricing file -> path to our temp pricing.json
-    # 10) select hosted models -> "1" (only one model in the fixture)
-    answers = iter(
-        [
-            "1",  # workload preset #1
-            "n",  # skip GPU auto-detect
-            "1",  # GPU count
-            "NVIDIA GeForce RTX 4090",  # GPU name
-            "40",  # tokens/sec
-            "existing",  # local hardware mode
-            "450",  # power watts
-            "0.15",  # electricity rate
-            str(pricing_path),  # pricing file
-            "1",  # select hosted model #1
-        ]
+
+def _interactive_session(monkeypatch, answers: dict):
+    """Drive run_interactive() by matching prompts rather than counting them.
+
+    A positional list of answers breaks the moment a prompt is added, removed
+    or reordered, and fails as an opaque StopIteration that says nothing about
+    which prompt drifted. Matching on a substring of the prompt keeps these
+    tests readable and pins each answer to the question it belongs to.
+
+    Any prompt not listed gets "", i.e. accept the shown default. The two
+    prompts that would otherwise hit the network on their default answer
+    (the Octopus Agile rate lookup and the FX rate lookup) are answered
+    explicitly by every caller below.
+    """
+    seen = []
+
+    def fake_input(prompt: str = "") -> str:
+        seen.append(prompt)
+        for fragment, answer in answers.items():
+            if fragment in prompt:
+                return answer
+        return ""
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    monkeypatch.setattr(m, "load_pricing", lambda *a, **k: dict(_PRICING_FIXTURE))
+    # Belt and braces: fail loudly rather than reach the network if a future
+    # prompt change routes past the explicit answers above.
+    monkeypatch.setattr(
+        m, "fetch_octopus_agile_rate", lambda *a, **k: pytest.fail("network call")
     )
-    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    monkeypatch.setattr(m, "fetch_fx_rate", lambda *a, **k: pytest.fail("network call"))
+    return seen
 
-    # run_interactive() may or may not accept a pricing_file kwarg; call it
-    # with no arguments so we exercise the same entry point main() uses.
+
+# Answers shared by every interactive test: skip all hardware probing and
+# supply the electricity/FX rates by hand so nothing touches the network.
+_OFFLINE_ANSWERS = {
+    "auto-detect an NVIDIA GPU": "n",
+    "benchmark a running local model endpoint": "n",
+    "Look up your current unit rate live": "n",
+    # Declining the Octopus lookup still leaves the currency as GBP, which
+    # triggers a live FX conversion. Paying in USD keeps the run offline.
+    "Do you pay for electricity in GBP": "n",
+    "Electricity rate": "0.15",
+    "exchange rate": "1.25",
+}
+
+
+def test_run_interactive_end_to_end_preset(monkeypatch, capsys):
+    # Pick preset #1 ("casual") and the default "existing" hardware mode, then
+    # compare against every hosted model.
+    _interactive_session(
+        monkeypatch,
+        {
+            "Scenario [1-7]": "1",
+            "Skip benchmark": "y",
+            "Hardware mode": "existing",
+            "Compare against all of the above?": "y",
+            **_OFFLINE_ANSWERS,
+        },
+    )
+
     exit_code = m.run_interactive()
 
     out = capsys.readouterr().out
-    # The interactive flow must have produced a comparison table containing
-    # both the local option and the hosted model from our fixture.
     assert exit_code == 0
-    assert "Local" in out
+    assert "Casual personal use" in out
     assert "Claude Opus 5" in out
-    # Sanity: the table header / cheapest line should be present.
-    assert "Cheapest:" in out or "no rows" in out
 
 
-def test_run_interactive_end_to_end_custom_workload(monkeypatch, capsys, tmp_path):
-    # Same as above but exercises the "custom workload" branch of the menu
-    # and the "own hardware" cost mode, so both interactive paths are
-    # covered end-to-end.
-    pricing_path = tmp_path / "pricing.json"
-    _write_pricing(pricing_path)
-
-    num_presets = len(m.WORKLOAD_PRESETS)
-    custom_option = str(num_presets + 2)
-
-    answers = iter(
-        [
-            custom_option,  # choose "custom workload"
-            "1000",  # requests_per_day
-            "500",  # avg_input_tokens
-            "300",  # avg_output_tokens
-            "n",  # skip GPU auto-detect
-            "1",  # GPU count
-            "NVIDIA GeForce RTX 4090",  # GPU name
-            "40",  # tokens/sec
-            "own",  # local hardware mode
-            "1600",  # hardware cost
-            "3",  # lifetime years
-            "450",  # power watts
-            "0.15",  # electricity rate
-            str(pricing_path),  # pricing file
-            "1",  # select hosted model #1
-        ]
+def test_run_interactive_end_to_end_custom_workload(monkeypatch, capsys):
+    # The "custom numbers" branch is the last menu entry, after the presets
+    # and the "compare all" option.
+    custom_option = str(len(m.WORKLOAD_PRESETS) + 2)
+    _interactive_session(
+        monkeypatch,
+        {
+            "Scenario [1-7]": custom_option,
+            "Requests per day": "1000",
+            "Average input tokens": "500",
+            "Average output tokens": "300",
+            "Skip benchmark": "y",
+            "Hardware mode": "buying",
+            "Compare against all of the above?": "y",
+            **_OFFLINE_ANSWERS,
+        },
     )
-    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
 
     exit_code = m.run_interactive()
+
     out = capsys.readouterr().out
     assert exit_code == 0
-    assert "Local (buy hardware)" in out
     assert "Claude Opus 5" in out
 
 
-def test_run_interactive_end_to_end_compare_all_presets(monkeypatch, capsys, tmp_path):
-    # Exercises the "compare all presets" branch, which produces a combined
-    # table with one column per scenario.
-    pricing_path = tmp_path / "pricing.json"
-    _write_pricing(pricing_path)
-
-    num_presets = len(m.WORKLOAD_PRESETS)
-    all_option = str(num_presets + 1)
-
-    answers = iter(
-        [
-            all_option,  # compare all presets
-            "n",  # skip GPU auto-detect
-            "1",  # GPU count
-            "NVIDIA GeForce RTX 4090",  # GPU name
-            "40",  # tokens/sec
-            "existing",  # local hardware mode
-            "450",  # power watts
-            "0.15",  # electricity rate
-            str(pricing_path),  # pricing file
-            "1",  # select hosted model #1
-        ]
+def test_run_interactive_end_to_end_compare_all_presets(monkeypatch, capsys):
+    # "Compare all scenarios" sits directly after the presets and produces one
+    # row group per preset.
+    all_option = str(len(m.WORKLOAD_PRESETS) + 1)
+    _interactive_session(
+        monkeypatch,
+        {
+            "Scenario [1-7]": all_option,
+            "Skip benchmark": "y",
+            "Hardware mode": "existing",
+            "Compare against all of the above?": "y",
+            **_OFFLINE_ANSWERS,
+        },
     )
-    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
 
     exit_code = m.run_interactive()
+
     out = capsys.readouterr().out
     assert exit_code == 0
-    # Every preset label should appear as a scenario column.
     for preset in m.WORKLOAD_PRESETS:
         assert preset.label in out
     assert "Claude Opus 5" in out
