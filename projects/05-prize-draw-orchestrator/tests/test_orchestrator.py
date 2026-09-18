@@ -235,9 +235,8 @@ class TestProcessCandidate:
         # not by writing back into the response it returns — so the submission
         # is where a null entry_url has to be resolved, and details["entry_url"]
         # legitimately stays None. That is the only read of entry_url in the
-        # project, so there is no second consumer to guard. Issue #233's
-        # acceptance criteria name the returned candidate instead; the
-        # discrepancy is recorded on the issue.
+        # project, so there is no second consumer to guard, and issue #233's AC
+        # has been amended to name the submission payload accordingly.
         #
         # Assert only that field: pinning the whole payload would make this
         # break on unrelated changes to the submission shape.
@@ -276,12 +275,13 @@ class TestProcessCandidate:
     @pytest.mark.xfail(
         strict=True,
         reason=(
-            "Issue #233's acceptance criteria assume process_candidate writes the "
-            "resolved entry_url back into the response it returns. It does not — "
-            "the fallback is applied only where process_candidate builds "
-            "submit_fields. Recorded as issue #543; this xfail is the "
-            "executable form of that discrepancy and will start failing loudly "
-            "if write-back is ever added."
+            "process_candidate does not write the resolved entry_url back into "
+            "the response it returns — the fallback is applied only where it "
+            "builds submit_fields. Issue #233 originally assumed otherwise; its "
+            "AC has been amended to name the submission payload, and whether to "
+            "add the write-back is tracked as issue #543. This xfail is the "
+            "executable form of that decision and will start failing loudly if "
+            "write-back is ever added."
         ),
     )
     def test_returned_candidate_carries_resolved_entry_url(self):
