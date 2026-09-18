@@ -15,11 +15,9 @@ The first CLI argument selects the behaviour under test:
 - "crash":     exit non-zero before serving, to model a server that dies on spawn.
 - "malformed": write a non-JSON line to stdout and exit, to model a server that
                answers with something the client cannot parse.
-
-Note "malformed" exits after writing. A server that writes garbage and then
-holds the pipe open hangs the client forever instead of failing — there is no
-handshake timeout — so that variant cannot be asserted on without a test that
-never returns. Raised as a follow-up rather than pinned here.
+- "hang":      write a non-JSON line and hold the pipe open, never completing the
+               handshake. This is the case that used to block the client forever;
+               it is now bounded by StdioMCPToolClient's connect timeout.
 """
 
 from __future__ import annotations
@@ -52,6 +50,16 @@ def main() -> int:
         # than a hang.
         sys.stdout.write("this is not json-rpc\n")
         sys.stdout.flush()
+        return 0
+    if mode == "hang":
+        # Same unparseable output, but the pipe stays open, so the client is
+        # left waiting on a handshake reply that never comes. Only the connect
+        # timeout ends this.
+        sys.stdout.write("this is not json-rpc\n")
+        sys.stdout.flush()
+        for _ in sys.stdin:
+            sys.stdout.write("still not json\n")
+            sys.stdout.flush()
         return 0
     build_server(mode).run()
     return 0
