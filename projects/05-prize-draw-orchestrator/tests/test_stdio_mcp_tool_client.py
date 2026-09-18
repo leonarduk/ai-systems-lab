@@ -147,6 +147,27 @@ def test_timeout_does_not_leave_the_server_running(mock_mcp_server_path):
     assert server_pids() - before == set()
 
 
+def test_call_finishing_inside_its_budget_is_not_cut_short(mock_mcp_server_path):
+    # The other side of the timeout: a tool that takes real time must still
+    # succeed. Without this, tightening the default call_timeout would look
+    # fine — every other test here either fails fast or never returns.
+    client = _client(mock_mcp_server_path, mode="slow", call_timeout=15.0)
+
+    assert client.call_tool("echo", {"text": "hello"}) == {"echoed": "hello"}
+
+
+def test_call_exceeding_its_budget_times_out(mock_mcp_server_path):
+    # ...and the same call is cut off when the budget is below the work, so the
+    # test above is passing because the budget is respected rather than because
+    # the timeout never fires.
+    client = _client(mock_mcp_server_path, mode="slow", call_timeout=0.2)
+
+    with pytest.raises(MCPToolError) as exc_info:
+        client.call_tool("echo", {"text": "hello"})
+
+    assert "did not respond within the timeout" in str(exc_info.value)
+
+
 def test_timeout_is_reported_even_when_it_is_not_the_first_group_member(monkeypatch):
     # The real hang produces a single-member group, so nothing above
     # distinguishes "scan every member" from "look at the first". Drive the

@@ -121,6 +121,13 @@ class StdioMCPToolClient:
         server_params = StdioServerParameters(
             command=self.command, args=self.args, env=self.env
         )
+        # Set when a timeout fires inside the session. The exception itself
+        # does not survive the trip out: cancelling the call tears the stream
+        # down, that teardown fails with BrokenResourceError, and the enclosing
+        # task group raises a fresh group containing only *that* — the
+        # TimeoutError is replaced, not collected. Without this flag a call
+        # timeout is indistinguishable from a transport failure.
+        timed_out = False
         try:
             # The inner timeouts bound the two waits that can actually stall.
             # The outer one is a backstop for everything they do not cover —
@@ -129,21 +136,28 @@ class StdioMCPToolClient:
             async with asyncio.timeout(self.connect_timeout + self.call_timeout):
                 async with stdio_client(server_params) as (read, write):
                     async with ClientSession(read, write) as session:
-                        async with asyncio.timeout(self.connect_timeout):
-                            await session.initialize()
-                        async with asyncio.timeout(self.call_timeout):
-                            result = await session.call_tool(name, arguments=arguments)
+                        try:
+                            async with asyncio.timeout(self.connect_timeout):
+                                await session.initialize()
+                            async with asyncio.timeout(self.call_timeout):
+                                result = await session.call_tool(
+                                    name, arguments=arguments
+                                )
+                        except TimeoutError:
+                            timed_out = True
+                            raise
         except TimeoutError as exc:
             raise MCPToolError(self._timeout_message(name)) from exc
         except BaseExceptionGroup as group:
             # stdio_client runs its reader and writer in an anyio task group, so
             # anything that goes wrong before or during the session arrives
-            # wrapped — including the timeouts above, which are raised inside
-            # that group rather than around it. Unwrap so callers only ever have
-            # to handle MCPToolError, and keep the original as __cause__.
+            # wrapped. Unwrap so callers only ever have to handle MCPToolError,
+            # and keep the original as __cause__.
             leaves = _leaves(group)
-            # Never convert an interrupt into a tool error: the caller asked to
-            # stop, and swallowing it here would leave them unable to.
+            # Checked before the timeout below, deliberately: a group can carry
+            # both, and a caller asking to stop outranks reporting why the call
+            # was slow. Never convert an interrupt into a tool error — swallowing
+            # it here would leave them unable to stop the poll loop.
             if any(
                 isinstance(leaf, (KeyboardInterrupt, SystemExit)) for leaf in leaves
             ):
@@ -151,7 +165,7 @@ class StdioMCPToolClient:
             # Scan every member rather than taking the first: a timeout can be
             # collected alongside a cancellation or a broken-pipe error from the
             # reader task, and anyio does not promise which comes first.
-            if any(isinstance(leaf, TimeoutError) for leaf in leaves):
+            if timed_out or any(isinstance(leaf, TimeoutError) for leaf in leaves):
                 raise MCPToolError(self._timeout_message(name)) from group
             raise MCPToolError(
                 f"MCP server {self.command!r} failed while calling tool {name!r}: "

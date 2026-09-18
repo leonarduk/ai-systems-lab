@@ -18,13 +18,21 @@ The first CLI argument selects the behaviour under test:
 - "hang":      write a non-JSON line and hold the pipe open, never completing the
                handshake. This is the case that used to block the client forever;
                it is now bounded by StdioMCPToolClient's connect timeout.
+- "slow":      `echo` sleeps before returning, to check the call timeout does not
+               cut short work that finishes inside its budget.
 """
 
 from __future__ import annotations
 
 import sys
 
+import time
+
 from mcp.server.fastmcp import FastMCP
+
+# Long enough that a too-aggressive call timeout would cut it off, short enough
+# to keep the suite fast.
+SLOW_TOOL_SECONDS = 1.0
 
 
 def build_server(mode: str) -> FastMCP:
@@ -35,6 +43,8 @@ def build_server(mode: str) -> FastMCP:
         """Echo back the provided text."""
         if mode == "error":
             raise RuntimeError("mock server was asked to fail")
+        if mode == "slow":
+            time.sleep(SLOW_TOOL_SECONDS)
         return {"echoed": text}
 
     return server
