@@ -170,7 +170,7 @@ class TestFindContactLeaks:
 
     def test_finds_planted_phone(self):
         leaks = build_profile.find_contact_leaks("## Contact\n+44 7911 123456\n")
-        assert any(pattern == "phone" for _, pattern, _ in leaks)
+        assert any(pattern == "phone number" for _, pattern, _ in leaks)
 
     def test_finds_planted_postcode(self):
         leaks = build_profile.find_contact_leaks("## Location\nSW1A 1AA\n")
@@ -178,7 +178,7 @@ class TestFindContactLeaks:
 
     def test_finds_planted_street_address(self):
         leaks = build_profile.find_contact_leaks("## Address\n123 Example Street\n")
-        assert any(pattern == "street_address" for _, pattern, _ in leaks)
+        assert any(pattern == "street address" for _, pattern, _ in leaks)
 
     def test_clean_file_has_no_leaks(self):
         text = "## Experience\nSenior Software Engineer\nAcme Corporation\n"
@@ -229,7 +229,7 @@ class TestCli:
 
         assert exit_code == 1
         captured = capsys.readouterr()
-        assert "phone" in captured.err
+        assert "phone number" in captured.err
 
     def test_check_exits_one_on_planted_postcode(self, tmp_path, capsys):
         dirty = tmp_path / "dirty.md"
@@ -249,7 +249,7 @@ class TestCli:
 
         assert exit_code == 1
         captured = capsys.readouterr()
-        assert "street_address" in captured.err
+        assert "street address" in captured.err
 
     def test_pdf_required_without_check(self):
         with pytest.raises(SystemExit):
