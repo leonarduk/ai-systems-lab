@@ -231,7 +231,13 @@ class TestProcessCandidate:
         assert outcome == "entered"
         # process_candidate applies the fallback where it builds submit_fields
         # (orchestrator.py: `parsed.get("entry_url") or candidate.get("url")`),
-        # so the submission is where a null entry_url has to be resolved.
+        # not by writing back into the response it returns — so the submission
+        # is where a null entry_url has to be resolved, and details["entry_url"]
+        # legitimately stays None. That is the only read of entry_url in the
+        # project, so there is no second consumer to guard. Issue #233's
+        # acceptance criteria name the returned candidate instead; the
+        # discrepancy is recorded on the issue.
+        #
         # Assert only that field: pinning the whole payload would make this
         # break on unrelated changes to the submission shape.
         assert len(client.submitted) == 1
