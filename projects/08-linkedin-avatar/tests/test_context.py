@@ -149,26 +149,70 @@ class TestBuildSystemPrompt:
         message = str(exc_info.value)
         assert "5" in message
 
-    def test_prompt_fits_exactly_at_max_tokens(self, knowledge_dir):
-        # First, build the prompt with a generous budget to learn its exact
-        # token count. The prompt is deterministic, so this count is stable.
-        prompt = context.build_system_prompt(max_tokens=40000, knowledge_dir=knowledge_dir)
-        exact_tokens = context.estimate_tokens(prompt)
-
-        # Sanity check: the estimate must be consistent across calls.
-        assert context.estimate_tokens(prompt) == exact_tokens
-
-        # An exact fit must not raise: the budget check uses `>` not `>=`.
-        result = context.build_system_prompt(
-            max_tokens=exact_tokens, knowledge_dir=knowledge_dir
+    def test_prompt_fits_exactly_at_max_tokens(self, tmp_path):
+        # build_system_prompt derives the GitHub section's budget from
+        # max_tokens (max_tokens - static sections - rules), so the assembled
+        # prompt is NOT invariant to the budget. Measuring it once at a
+        # generous budget and reusing that number can therefore land on a
+        # different, smaller prompt and miss the boundary entirely.
+        #
+        # Instead, walk the budget down to one that is genuinely
+        # self-consistent — the prompt it produces is exactly that many tokens
+        # — and require the GitHub section to have been trimmed to get there,
+        # which is the scenario issue #154 asks for. Each demotion drops the
+        # prompt by a large step, so this settles within a few dozen budgets.
+        (tmp_path / "summary.txt").write_text(
+            "I'm a senior engineer with 20 years of experience.", encoding="utf-8"
         )
-        assert context.estimate_tokens(result) == exact_tokens
+        (tmp_path / "profile.md").write_text(
+            "## Experience\nSenior Software Engineer at Acme.", encoding="utf-8"
+        )
+        repos = [
+            make_repo(f"repo-{i}", f"2026-{i % 9 + 1:02d}-10", readme_len=200 + 40 * i)
+            for i in range(6)
+        ]
+        (tmp_path / "github.json").write_text(json.dumps(repos), encoding="utf-8")
 
-        # One token less must raise, proving we are truly at the boundary.
+        def kept_in_full(prompt):
+            # A full record is rendered as "### name"; a demoted one as
+            # "- name: description".
+            return [r["name"] for r in repos if f"### {r['name']}" in prompt]
+
+        untrimmed = context.build_system_prompt(
+            max_tokens=40000, knowledge_dir=tmp_path
+        )
+        assert len(kept_in_full(untrimmed)) == len(repos)
+
+        exact = None
+        for budget in range(context.estimate_tokens(untrimmed) - 1, 0, -1):
+            try:
+                candidate = context.build_system_prompt(
+                    max_tokens=budget, knowledge_dir=tmp_path
+                )
+            except context.PromptTooLargeError:
+                continue
+            if context.estimate_tokens(candidate) == budget and 0 < len(
+                kept_in_full(candidate)
+            ) < len(repos):
+                exact = budget
+                break
+        assert exact is not None, "no exact-fit budget with a trimmed GitHub section"
+
+        prompt = context.build_system_prompt(max_tokens=exact, knowledge_dir=tmp_path)
+
+        # The boundary itself: an exact fit is allowed because the budget check
+        # is `>` and not `>=`. This assertion is the one that fails if that
+        # comparison is ever tightened.
+        assert context.estimate_tokens(prompt) == exact
+
+        # ...and the GitHub section really was trimmed to reach it, rather than
+        # the static sections happening to fill the budget on their own.
+        assert "## GitHub projects" in prompt
+        assert 0 < len(kept_in_full(prompt)) < len(repos)
+
+        # One token less genuinely does not fit.
         with pytest.raises(context.PromptTooLargeError):
-            context.build_system_prompt(
-                max_tokens=exact_tokens - 1, knowledge_dir=knowledge_dir
-            )
+            context.build_system_prompt(max_tokens=exact - 1, knowledge_dir=tmp_path)
 
 
 class TestGithubSectionTrimming:
