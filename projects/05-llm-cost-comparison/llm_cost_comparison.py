@@ -2217,6 +2217,32 @@ def _require_numeric_fields(
             )
 
 
+def _validate_workload(workload: Workload) -> None:
+    """Reject workloads that cannot produce a meaningful comparison.
+
+    ``requests_per_day`` and ``avg_input_tokens`` must be strictly positive: a
+    workload with no requests, or no input, has nothing to cost. A zero
+    ``avg_output_tokens`` is legitimate, though (a classification-only workload
+    generates no output), so it is only rejected when negative.
+
+    Validating the resolved :class:`Workload` rather than the raw config means
+    every accepted config shape — ``workload``, ``workload_preset`` and
+    ``workload_presets`` — is held to the same rule and reports the same
+    message, instead of only the explicit-dict shape being checked.
+    """
+    for field_name in ("requests_per_day", "avg_input_tokens"):
+        value = getattr(workload, field_name)
+        if value <= 0:
+            raise ConfigError(
+                f"workload.{field_name} must be a positive number, got {value!r}"
+            )
+    if workload.avg_output_tokens < 0:
+        raise ConfigError(
+            "workload.avg_output_tokens must be a non-negative number, "
+            f"got {workload.avg_output_tokens!r}"
+        )
+
+
 def _resolve_workload_scenarios(config: dict) -> list:
     """Resolve the config's workload section to a list of scenarios.
 
@@ -2252,9 +2278,9 @@ def _resolve_workload_scenarios(config: dict) -> list:
         )
         for field_name in ("requests_per_day", "avg_input_tokens", "avg_output_tokens"):
             value = config["workload"][field_name]
-            if not isinstance(value, (int, float)) or value < 0:
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
                 raise ConfigError(
-                    f"workload.{field_name} must be a non-negative number, got {value!r}"
+                    f"workload.{field_name} must be a number, got {value!r}"
                 )
         try:
             workload = Workload(**config["workload"])
@@ -2262,11 +2288,7 @@ def _resolve_workload_scenarios(config: dict) -> list:
             raise ConfigError(
                 f"workload config has an unexpected field: {exc}"
             ) from exc
-        if workload.monthly_total_tokens <= 0:
-            raise ConfigError(
-                "workload produces zero total tokens/month — set requests_per_day and "
-                "at least one of avg_input_tokens/avg_output_tokens above zero"
-            )
+        _validate_workload(workload)
         return [("custom", "Custom", workload)]
 
     keys = (
@@ -2274,7 +2296,12 @@ def _resolve_workload_scenarios(config: dict) -> list:
         if "workload_preset" in config
         else config["workload_presets"]
     )
-    return [(p.key, p.label, p.to_workload()) for p in (get_preset(k) for k in keys)]
+    scenarios = [
+        (p.key, p.label, p.to_workload()) for p in (get_preset(k) for k in keys)
+    ]
+    for _key, _label, workload in scenarios:
+        _validate_workload(workload)
+    return scenarios
 
 
 def run_non_interactive(
@@ -2324,30 +2351,6 @@ def run_non_interactive(
 
     _require_keys(config, ["local"], "top-level")
     scenarios = _resolve_workload_scenarios(config)
-
-    for _key, _label, _workload in scenarios:
-        # requests_per_day and avg_input_tokens must be strictly positive —
-        # a workload with no requests or no input isn't meaningful. But
-        # avg_output_tokens == 0 alone is legitimate (a classification-only
-        # workload with no generated output), so it's only checked for being
-        # negative, not zero; monthly_total_tokens is checked separately to
-        # still catch input == output == 0.
-        for _field in ("requests_per_day", "avg_input_tokens"):
-            _value = getattr(_workload, _field)
-            if _value <= 0:
-                raise ConfigError(
-                    f"workload.{_field} must be a positive number, got {_value!r}"
-                )
-        if _workload.avg_output_tokens < 0:
-            raise ConfigError(
-                f"workload.avg_output_tokens must be a positive number, "
-                f"got {_workload.avg_output_tokens!r}"
-            )
-        if _workload.monthly_total_tokens <= 0:
-            raise ConfigError(
-                "workload produces zero total tokens/month — set requests_per_day and "
-                "at least one of avg_input_tokens/avg_output_tokens above zero"
-            )
 
     pricing_path = Path(config.get("pricing_file", DEFAULT_PRICING_PATH))
     if not pricing_path.is_absolute():

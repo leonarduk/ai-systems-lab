@@ -1473,6 +1473,9 @@ def test_run_non_interactive_rejects_zero_tokens_per_sec_in_every_mode(
 
 
 def test_run_non_interactive_rejects_zero_total_workload_tokens(tmp_path: Path):
+    # A workload with no input and no output used to surface as the vague
+    # "zero total tokens" error. It is now caught by the per-field rule, which
+    # names the offending field (issue #36).
     pricing_path = tmp_path / "pricing.json"
     _write_pricing(pricing_path)
     config_path = tmp_path / "config.json"
@@ -1487,7 +1490,9 @@ def test_run_non_interactive_rejects_zero_total_workload_tokens(tmp_path: Path):
     }
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
-    with pytest.raises(m.ConfigError, match="zero total tokens"):
+    with pytest.raises(
+        m.ConfigError, match=r"workload\.avg_input_tokens must be a positive number"
+    ):
         m.run_non_interactive(config_path, export_fmt=None, export_path=None)
 
 
@@ -1524,7 +1529,10 @@ def test_run_non_interactive_rejects_nonpositive_workload_field(
     }
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
-    with pytest.raises(m.ConfigError, match=field):
+    expected = "non-negative" if field == "avg_output_tokens" else "positive"
+    with pytest.raises(
+        m.ConfigError, match=rf"workload\.{field} must be a {expected} number"
+    ):
         m.run_non_interactive(config_path, export_fmt=None, export_path=None)
 
 
