@@ -287,6 +287,66 @@ def test_build_hosted_rows_raises_config_error_on_malformed_pricing():
         m.build_hosted_rows(w, pricing)
 
 
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        None,  # missing
+        0,  # zero
+        -1.0,  # negative
+        "1.0",  # non-numeric
+        float("nan"),  # NaN
+        float("inf"),  # inf
+        True,  # bool (int subclass)
+    ],
+)
+def test_build_hosted_rows_direct_call_rejects_invalid_price(bad_value):
+    # build_hosted_rows is called directly here with a hand-constructed
+    # pricing dict that bypassed load_pricing. The guard must still raise
+    # ConfigError with the established message rather than silently
+    # computing a cost from an invalid price.
+    pricing = {
+        "providers": {
+            "claude": {
+                "models": {
+                    "opus-5": {
+                        "display_name": "Claude Opus 5",
+                        "input_per_million": bad_value,
+                        "output_per_million": 25.0,
+                    }
+                }
+            }
+        }
+    }
+    w = m.Workload(1000, 500, 300)
+    with pytest.raises(
+        m.ConfigError,
+        match=r"pricing model 'claude/opus-5' is missing a numeric input_per_million",
+    ):
+        m.build_hosted_rows(w, pricing)
+
+
+def test_build_hosted_rows_direct_call_rejects_invalid_output_price():
+    pricing = {
+        "providers": {
+            "claude": {
+                "models": {
+                    "opus-5": {
+                        "display_name": "Claude Opus 5",
+                        "input_per_million": 5.0,
+                        "output_per_million": 0,
+                    }
+                }
+            }
+        }
+    }
+    w = m.Workload(1000, 500, 300)
+    with pytest.raises(
+        m.ConfigError,
+        match=r"pricing model 'claude/opus-5' is missing a numeric output_per_million",
+    ):
+        m.build_hosted_rows(w, pricing)
+
+
 # --------------------------------------------------------------------------
 # Real pricing.json shipped alongside the script
 # --------------------------------------------------------------------------
@@ -314,6 +374,38 @@ def test_load_pricing_raises_config_error_on_invalid_json(tmp_path: Path):
 def test_load_pricing_raises_config_error_on_missing_file(tmp_path: Path):
     with pytest.raises(m.ConfigError, match="pricing file not found"):
         m.load_pricing(tmp_path / "missing-pricing.json")
+
+
+def test_load_pricing_tolerates_extra_top_level_keys(tmp_path: Path):
+    # Regression guard: load_pricing only requires `as_of` and `providers`.
+    # Real pricing files may carry extra metadata keys, and tightening
+    # validation to reject unknown keys would silently break them.
+    pricing_path = tmp_path / "pricing.json"
+    pricing_path.write_text(
+        json.dumps(
+            {
+                "as_of": "2026-01-01",
+                "providers": {
+                    "claude": {
+                        "models": {
+                            "opus-5": {
+                                "display_name": "Claude Opus 5",
+                                "input_per_million": 5.0,
+                                "output_per_million": 25.0,
+                            }
+                        }
+                    }
+                },
+                "extra": "value",
+                "notes": "some future metadata",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    pricing = m.load_pricing(pricing_path)
+    assert pricing["as_of"] == "2026-01-01"
+    assert "claude" in pricing["providers"]
 
 
 # --------------------------------------------------------------------------
@@ -697,15 +789,62 @@ def test_run_non_interactive_end_to_end(tmp_path: Path, capsys):
 
 
 def test_validate_http_url_accepts_http_and_https():
-    m._validate_http_url("http://localhost:11434")
-    m._validate_http_url("https://example.com")
+    assert m._validate_http_url("http://localhost:11434") == "http://localhost:11434"
+    assert m._validate_http_url("https://example.com") == "https://example.com"
 
 
 def test_validate_http_url_rejects_other_schemes():
     with pytest.raises(ValueError):
         m._validate_http_url("file:///etc/passwd")
     with pytest.raises(ValueError):
-        m._validate_http_url("not-a-url")
+        m._validate_http_url("ftp://example.com")
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("localhost:11434", "http://localhost:11434"),
+        ("127.0.0.1:8000", "http://127.0.0.1:8000"),
+        ("example.com", "http://example.com"),
+        ("  localhost:11434  ", "http://localhost:11434"),
+    ],
+)
+def test_validate_http_url_prepends_http_when_scheme_missing(raw, expected):
+    assert m._validate_http_url(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "   ",
+        "http://",
+        # Normalizes to "http://://x" — a scheme with no host behind it.
+        "://x",
+    ],
+)
+def test_validate_http_url_rejects_input_with_no_host(raw):
+    with pytest.raises(ValueError, match="must include a host"):
+        m._validate_http_url(raw)
+
+
+def test_validate_http_url_keeps_path_on_scheme_less_input():
+    assert m._validate_http_url("localhost:11434/v1") == "http://localhost:11434/v1"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "http://localhost:11434",
+        "https://example.com",
+        "HTTP://localhost:11434",
+    ],
+)
+def test_validate_http_url_does_not_double_prepend(raw):
+    result = m._validate_http_url(raw)
+    assert result.lower().startswith(("http://", "https://"))
+    assert "http://http" not in result.lower()
+    assert "https://http" not in result.lower()
 
 
 class _FakeHTTPResponse:
@@ -984,6 +1123,74 @@ def test_prompt_float_accepts_default_without_minimum_check(monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# prompt_choice case-insensitive matching
+# --------------------------------------------------------------------------
+
+
+def test_prompt_choice_lowercase_input_lowercase_choices(monkeypatch):
+    # Baseline: existing callers passing lowercase choices and lowercase
+    # input must keep working unchanged.
+    monkeypatch.setattr("builtins.input", lambda _: "ollama")
+    assert m.prompt_choice("Pick", ["ollama", "other"]) == "ollama"
+
+
+def test_prompt_choice_uppercase_input_lowercase_choices(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _: "OLLAMA")
+    assert m.prompt_choice("Pick", ["ollama", "other"]) == "ollama"
+
+
+def test_prompt_choice_mixed_case_input_lowercase_choices(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _: "Ollama")
+    assert m.prompt_choice("Pick", ["ollama", "other"]) == "ollama"
+
+
+def test_prompt_choice_mixed_case_choice_matched_case_insensitively(monkeypatch):
+    # The original-cased choice must be returned, not the casefolded input.
+    monkeypatch.setattr("builtins.input", lambda _: "newprovider")
+    assert m.prompt_choice("Pick", ["NewProvider", "other"]) == "NewProvider"
+
+
+def test_prompt_choice_mixed_case_choice_exact_case_input(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _: "NewProvider")
+    assert m.prompt_choice("Pick", ["NewProvider", "other"]) == "NewProvider"
+
+
+def test_prompt_choice_prompt_preserves_original_casing(monkeypatch):
+    # Display casing is a separate concern from matching: the prompt shown to
+    # the user must list the original-cased choices, not the casefolded ones.
+    captured = {}
+
+    def fake_input(prompt):
+        captured["prompt"] = prompt
+        return "newprovider"
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    m.prompt_choice("Pick", ["NewProvider", "other"])
+    assert "NewProvider" in captured["prompt"]
+    assert "newprovider" not in captured["prompt"]
+
+
+def test_prompt_choice_reprompts_on_invalid_input(monkeypatch, capsys):
+    # prompt_choice loops until it gets a valid answer; it does NOT fall back
+    # to the default on invalid (non-empty) input. Feed one invalid value
+    # followed by a valid one, and assert the error message lists the
+    # original-cased choices.
+    inputs = iter(["not-a-choice", "newprovider"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+    result = m.prompt_choice("Pick", ["NewProvider", "other"])
+    assert result == "NewProvider"
+    out = capsys.readouterr().out
+    assert "NewProvider" in out
+    assert "newprovider" not in out
+
+
+def test_prompt_choice_empty_input_returns_default(monkeypatch):
+    # The default is only used when the user submits an empty answer.
+    monkeypatch.setattr("builtins.input", lambda _: "")
+    assert m.prompt_choice("Pick", ["NewProvider", "other"], default="other") == "other"
+
+
+# --------------------------------------------------------------------------
 # Non-interactive config validation
 # --------------------------------------------------------------------------
 
@@ -1170,6 +1377,30 @@ def test_main_non_interactive_config_error_reports_and_exits_nonzero(
     exit_code = m.main(["--non-interactive", "--config", str(config_path)])
     assert exit_code == 1
     assert "hourly_rate" in capsys.readouterr().err
+
+
+def test_main_non_interactive_missing_pricing_file_reports_and_exits_nonzero(
+    tmp_path: Path, capsys
+):
+    """Issue #33 end-to-end: a missing pricing.json in --non-interactive mode
+    must print a clear, user-facing message (not a raw traceback) and exit
+    non-zero -- via main()'s existing ConfigError handler, since
+    run_non_interactive itself re-raises rather than swallowing it."""
+    config_path = tmp_path / "config.json"
+    config = {
+        "workload": {
+            "requests_per_day": 1000,
+            "avg_input_tokens": 500,
+            "avg_output_tokens": 300,
+        },
+        "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+        "pricing_file": "does_not_exist.json",
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    exit_code = m.main(["--non-interactive", "--config", str(config_path)])
+    assert exit_code == 1
+    assert "pricing file not found" in capsys.readouterr().err
 
 
 def test_run_non_interactive_missing_pricing_file_raises_config_error(tmp_path: Path):
@@ -1754,3 +1985,224 @@ def test_run_non_interactive_multiple_presets_prints_one_combined_table_and_expo
     data = json.loads(export_path.read_text(encoding="utf-8"))
     scenarios_seen = {row["scenario"] for row in data}
     assert scenarios_seen == {"Casual personal use", "Autonomous coding agent"}
+
+
+# --------------------------------------------------------------------------
+# Full interactive end-to-end session (monkeypatched input())
+# --------------------------------------------------------------------------
+
+
+_PRICING_FIXTURE = {
+    "as_of": "2026-01-01",
+    "note": "test fixture",
+    "providers": {
+        "claude": {
+            "models": {
+                "opus-5": {
+                    "display_name": "Claude Opus 5",
+                    "input_per_million": 5.0,
+                    "output_per_million": 25.0,
+                }
+            }
+        }
+    },
+}
+
+
+def _interactive_session(monkeypatch, answers: dict):
+    """Drive run_interactive() by matching prompts rather than counting them.
+
+    A positional list of answers breaks the moment a prompt is added, removed
+    or reordered, and fails as an opaque StopIteration that says nothing about
+    which prompt drifted. Matching on a substring of the prompt keeps these
+    tests readable and pins each answer to the question it belongs to.
+
+    Every prompt must be matched by exactly one fragment. Falling back to ""
+    would be worse than the StopIteration it replaces: an empty string is
+    usually accepted as the shown default, so a reworded prompt would let the
+    test keep passing while silently no longer exercising the intended path.
+    Prompts whose default is genuinely what we want are listed explicitly in
+    `_ACCEPT_DEFAULT` rather than left to fall through.
+
+    An answer may be a string, or a list of strings to return on successive
+    matches (used to feed an invalid answer followed by a valid one).
+    """
+    pending = {
+        fragment: list(value) if isinstance(value, list) else None
+        for fragment, value in answers.items()
+    }
+
+    def fake_input(prompt: str = "") -> str:
+        for fragment, value in answers.items():
+            if fragment in prompt:
+                queued = pending[fragment]
+                if queued is None:
+                    return value
+                if not queued:
+                    pytest.fail(f"ran out of scripted answers for prompt: {prompt!r}")
+                return queued.pop(0)
+        pytest.fail(
+            f"unscripted prompt: {prompt!r}\n"
+            "Add a fragment of it to the test's answers, or to _ACCEPT_DEFAULT."
+        )
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    monkeypatch.setattr(m, "load_pricing", lambda *a, **k: dict(_PRICING_FIXTURE))
+    # Belt and braces: fail loudly rather than reach the network if a future
+    # prompt change routes past the explicit answers below.
+    monkeypatch.setattr(
+        m, "fetch_octopus_agile_rate", lambda *a, **k: pytest.fail("network call")
+    )
+    monkeypatch.setattr(m, "fetch_fx_rate", lambda *a, **k: pytest.fail("network call"))
+
+
+# Prompts whose shown default is what these tests want. Listed explicitly so
+# that an unrecognised prompt is an error rather than a silent default.
+_ACCEPT_DEFAULT = {
+    "Extra power draw while generating": "",
+    "Total system power draw while running": "",
+    "Export results to a file?": "",
+    "Save these settings as defaults": "",
+}
+
+
+# Answers shared by every interactive test: skip all hardware probing and
+# supply the electricity rate by hand so nothing touches the network.
+_OFFLINE_ANSWERS = {
+    "auto-detect an NVIDIA GPU": "n",
+    "benchmark a running local model endpoint": "n",
+    "Look up your current unit rate live": "n",
+    # Declining the Octopus lookup still leaves the currency as GBP, which
+    # triggers a live FX conversion. Paying in USD keeps the run offline.
+    "Do you pay for electricity in GBP": "n",
+    "Electricity rate": "0.15",
+    # Pinned rather than defaulted so the local cost column is deterministic.
+    "Measured or estimated tokens/sec": "40",
+    **_ACCEPT_DEFAULT,
+}
+
+
+def test_run_interactive_end_to_end_preset(monkeypatch, capsys):
+    # Pick preset #1 ("casual") and the default "existing" hardware mode, then
+    # compare against every hosted model.
+    _interactive_session(
+        monkeypatch,
+        {
+            "Scenario [1-7]": "1",
+            "Skip benchmark": "y",
+            "Hardware mode": "existing",
+            "Compare against all of the above?": "y",
+            **_OFFLINE_ANSWERS,
+        },
+    )
+
+    exit_code = m.run_interactive()
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Casual personal use" in out
+    assert "Claude Opus 5" in out
+
+
+def test_run_interactive_end_to_end_custom_workload(monkeypatch, capsys):
+    # The "custom numbers" branch is the last menu entry, after the presets
+    # and the "compare all" option.
+    custom_option = str(len(m.WORKLOAD_PRESETS) + 2)
+    _interactive_session(
+        monkeypatch,
+        {
+            "Scenario [1-7]": custom_option,
+            "Expected requests/day": "1000",
+            "Average input tokens/request": "500",
+            "Average output tokens/request": "300",
+            "Skip benchmark": "y",
+            "Hardware mode": "buying",
+            # "buying" swaps the two power-basis prompts for an up-front
+            # hardware cost, a lifetime to amortise it over, and a single
+            # under-load power figure.
+            "Hardware cost (USD)": "1600",
+            "Expected hardware lifetime (years)": "3",
+            "Power draw under load (W)": "450",
+            "Compare against all of the above?": "y",
+            **_OFFLINE_ANSWERS,
+        },
+    )
+
+    exit_code = m.run_interactive()
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    # "buying" amortises the hardware cost, so the local row is labelled
+    # differently from the "existing" (electricity-only) row above.
+    assert "Local (buy hardware)" in out
+    assert "40.0 tok/s" in out
+    assert "Claude Opus 5" in out
+
+
+def test_run_interactive_end_to_end_compare_all_presets(monkeypatch, capsys):
+    # "Compare all scenarios" sits directly after the presets and produces one
+    # row group per preset.
+    all_option = str(len(m.WORKLOAD_PRESETS) + 1)
+    _interactive_session(
+        monkeypatch,
+        {
+            "Scenario [1-7]": all_option,
+            "Skip benchmark": "y",
+            "Hardware mode": "existing",
+            "Compare against all of the above?": "y",
+            **_OFFLINE_ANSWERS,
+        },
+    )
+
+    exit_code = m.run_interactive()
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    for preset in m.WORKLOAD_PRESETS:
+        assert preset.label in out
+    assert "Claude Opus 5" in out
+
+
+def test_run_interactive_reprompts_on_invalid_scenario(monkeypatch, capsys):
+    # Out-of-range and non-numeric menu answers must both be rejected with a
+    # readable message and re-prompted, not crash or silently pick a default.
+    _interactive_session(
+        monkeypatch,
+        {
+            "Scenario [1-7]": ["99", "abc", "1"],
+            "Skip benchmark": "y",
+            "Hardware mode": "existing",
+            "Compare against all of the above?": "y",
+            **_OFFLINE_ANSWERS,
+        },
+    )
+
+    exit_code = m.run_interactive()
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert out.count("Please enter a number from 1 to 7.") == 2
+    # Having recovered, the run still completes against the chosen preset.
+    assert "Casual personal use" in out
+
+
+def test_run_interactive_falls_back_to_manual_throughput(monkeypatch, capsys):
+    # With the benchmark not skipped but both GPU auto-detect and the local
+    # endpoint declined, throughput has to come from the manual prompt. This is
+    # the fallback path that has no hardware to measure from.
+    _interactive_session(
+        monkeypatch,
+        {
+            "Scenario [1-7]": "1",
+            "Skip benchmark": "n",
+            "Hardware mode": "existing",
+            "Compare against all of the above?": "y",
+            **_OFFLINE_ANSWERS,
+        },
+    )
+
+    exit_code = m.run_interactive()
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Claude Opus 5" in out
