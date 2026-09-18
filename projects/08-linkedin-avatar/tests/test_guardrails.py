@@ -65,43 +65,61 @@ class TestSlidingWindowRateLimits:
 
         assert state.check_request("s1", "1.1.1.1", "hi")[0] is True
 
-    def test_rate_limit_releases_at_exact_window_boundary(self):
-        # Boundary test: the sliding window uses `cutoff = now - window_seconds`
-        # and evicts events with `timestamp <= cutoff`. At exactly
-        # `window_seconds` elapsed, the original event must be evicted and a
-        # new request allowed. This catches off-by-one regressions (e.g. using
-        # `<` instead of `<=`, or `>` instead of `>=`).
+    def test_rate_limit_still_enforced_at_exact_window_boundary(self):
+        # allow() keeps events with `timestamp >= cutoff`, where
+        # `cutoff = now - window_seconds`. At exactly window_seconds elapsed the
+        # original event sits *on* the cutoff, so it is still counted and the
+        # limit holds; the window releases on the following tick. This pins the
+        # `>=` and would fail if it were loosened to `>`.
         clock = FakeClock()
         limiter = guardrails._SlidingWindowLimiter(
             max_events=1, window_seconds=3600, clock=clock
         )
 
-        # Fill the window.
-        assert limiter.allow() is True
-        # Immediately after, the limit is enforced.
-        assert limiter.allow() is False
+        assert limiter.allow("k") is True
+        assert limiter.allow("k") is False
 
-        # Advance to exactly window_seconds - 1: still within the window.
+        # Just inside the window.
         clock.advance(3599)
-        assert limiter.allow() is False
+        assert limiter.allow("k") is False
 
-        # Advance one more second to land exactly on window_seconds elapsed.
+        # Exactly window_seconds elapsed: the event is on the cutoff, not past
+        # it, so it still counts.
         clock.advance(1)
-        assert limiter.allow() is True
+        assert limiter.allow("k") is False
 
-    def test_rate_limit_enforced_just_before_window_boundary(self):
-        # Inverse boundary test: at `window_seconds - 1` elapsed, the original
-        # event is still inside the window and the limit must remain enforced.
+        # One tick beyond the boundary: the event finally falls out.
+        clock.advance(1)
+        assert limiter.allow("k") is True
+
+    def test_denied_requests_do_not_extend_the_window(self):
+        # A rejected call must not record a new timestamp, or a caller that
+        # keeps retrying would hold its own window open indefinitely.
         clock = FakeClock()
         limiter = guardrails._SlidingWindowLimiter(
             max_events=1, window_seconds=3600, clock=clock
         )
 
-        assert limiter.allow() is True
-        assert limiter.allow() is False
+        assert limiter.allow("k") is True
+        for _ in range(5):
+            clock.advance(600)
+            assert limiter.allow("k") is False
 
-        clock.advance(3599)
-        assert limiter.allow() is False
+        # 3000s of rejected retries later, the original event still governs:
+        # it expires 3601s after it was recorded, not after the last attempt.
+        clock.advance(601)
+        assert limiter.allow("k") is True
+
+    def test_limits_are_tracked_per_key(self):
+        clock = FakeClock()
+        limiter = guardrails._SlidingWindowLimiter(
+            max_events=1, window_seconds=3600, clock=clock
+        )
+
+        assert limiter.allow("a") is True
+        assert limiter.allow("a") is False
+        # A different key has its own window.
+        assert limiter.allow("b") is True
 
     def test_ip_limit_is_independent_of_session_limit(self):
         state, clock = make_state(session_rate_limit="1000/hour", ip_rate_limit="1/day")
