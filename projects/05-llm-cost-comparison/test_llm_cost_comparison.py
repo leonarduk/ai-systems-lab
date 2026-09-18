@@ -1693,55 +1693,94 @@ def _stub_gpu_info(name="NVIDIA GeForce RTX 3090"):
     }
 
 
-def test_interactive_local_setup_existing_hardware_branch(monkeypatch):
-    # Drive the "existing hardware" branch: user picks the existing-hardware
-    # option, accepts the detected GPU, and accepts the detected power draw.
-    # GPU detection and any benchmark are fully mocked so no real hardware
-    # or network is required.
-    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: _stub_gpu_info())
+# Answers for a full "existing hardware" pass. Matched against prompt text
+# rather than fed positionally: a positional list fails as a bare
+# StopIteration naming neither the prompt nor the drift, which is how the
+# first version of these tests failed.
+_LOCAL_SETUP_ANSWERS = {
+    # Not skipped, so GPU detection and the benchmark question are both asked.
+    "Skip benchmark": "n",
+    "auto-detect an NVIDIA GPU": "y",
+    "benchmark a running local model endpoint": "n",
+    "Measured or estimated tokens/sec": "40",
+    "Hardware mode": "existing",
+    # Keep the run offline: decline the live Octopus lookup, and pay in USD so
+    # no FX conversion is attempted.
+    "Look up your current unit rate live": "n",
+    "Do you pay for electricity in GBP": "n",
+    "Electricity rate": "0.15",
+    # The two power prompts take the defaults derived from GPU detection —
+    # which is exactly what the detected/undetected assertions below compare.
+    "Extra power draw while generating": "",
+    "Total system power draw while running": "",
+}
 
-    def _fail_benchmark(*args, **kwargs):
-        raise AssertionError("benchmark must not run in existing-hardware branch")
 
-    monkeypatch.setattr(m, "benchmark_ollama", _fail_benchmark)
-    monkeypatch.setattr(m, "benchmark_openai_compatible", _fail_benchmark)
+def _local_setup(monkeypatch, gpu_info):
+    """Run interactive_local_setup offline with GPU detection stubbed.
 
-    # Answers: choose the "existing" mode, accept detected GPU, accept power,
-    # then provide tokens/sec and electricity rate.
-    answers = iter(["existing", "y", "y", "40", "0.15"])
-    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    Both benchmark entry points are replaced with stubs that fail the test if
+    called: the "existing hardware" branch must never reach them.
+    """
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: gpu_info)
 
-    result = m.interactive_local_setup()
-    assert isinstance(result, tuple)
-    # The returned tuple must reflect the existing-hardware mode selection.
-    assert "existing" in result
-    # The detected GPU name should be surfaced somewhere in the returned data.
-    assert any(
-        isinstance(item, str) and "RTX 3090" in item for item in result
-    ) or any(
-        isinstance(item, dict) and item.get("name") == "NVIDIA GeForce RTX 3090"
-        for item in result
+    def _no_benchmark(*args, **kwargs):
+        raise AssertionError("benchmark must not run in the existing-hardware branch")
+
+    monkeypatch.setattr(m, "benchmark_ollama", _no_benchmark)
+    monkeypatch.setattr(m, "benchmark_openai_compatible", _no_benchmark)
+    monkeypatch.setattr(
+        m, "fetch_octopus_agile_rate", lambda *a, **k: pytest.fail("network call")
+    )
+    monkeypatch.setattr(m, "fetch_fx_rate", lambda *a, **k: pytest.fail("network call"))
+
+    def fake_input(prompt: str = "") -> str:
+        for fragment, answer in _LOCAL_SETUP_ANSWERS.items():
+            if fragment in prompt:
+                return answer
+        pytest.fail(f"unscripted prompt: {prompt!r}")
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    return m.interactive_local_setup()
+
+
+def test_interactive_local_setup_existing_hardware_branch(monkeypatch, capsys):
+    row_builder, display_currency, usd_per_gbp, tokens_per_sec, settings = _local_setup(
+        monkeypatch, _stub_gpu_info()
     )
 
+    # The documented return shape: (row_builder, display_currency, usd_per_gbp,
+    # tokens_per_sec, settings). "existing" is carried in settings, not as a
+    # bare tuple element.
+    assert callable(row_builder)
+    assert display_currency == "USD"
+    assert usd_per_gbp is None
+    assert tokens_per_sec == 40.0
+    assert settings["mode"] == "existing"
+    assert settings["tokens_per_sec"] == 40.0
+    assert settings["electricity_rate_per_kwh"] == 0.15
 
-def test_interactive_local_setup_existing_hardware_with_no_gpu_detected(monkeypatch):
-    # Edge case: no GPU detected. The existing-hardware branch must still
-    # complete without crashing and must not attempt a benchmark.
-    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: None)
+    # The detected card is surfaced to the user and drives the power defaults.
+    out = capsys.readouterr().out
+    assert "RTX 3090" in out
+    assert settings["power_watts_extra"] == 150
+    assert settings["power_watts_total"] == 250.0
 
-    def _fail_benchmark(*args, **kwargs):
-        raise AssertionError("benchmark must not run in existing-hardware branch")
 
-    monkeypatch.setattr(m, "benchmark_ollama", _fail_benchmark)
-    monkeypatch.setattr(m, "benchmark_openai_compatible", _fail_benchmark)
+def test_interactive_local_setup_existing_hardware_with_no_gpu_detected(
+    monkeypatch, capsys
+):
+    _, _, _, tokens_per_sec, settings = _local_setup(monkeypatch, None)
 
-    # Answers: choose existing mode, then provide tokens/sec and rate.
-    answers = iter(["existing", "40", "0.15"])
-    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    assert settings["mode"] == "existing"
+    assert tokens_per_sec == 40.0
 
-    result = m.interactive_local_setup()
-    assert isinstance(result, tuple)
-    assert "existing" in result
+    # With nothing detected the user is told so, and the power defaults fall
+    # back to the generic figures rather than the card-derived ones above.
+    out = capsys.readouterr().out
+    assert "No GPU detected" in out
+    assert settings["power_watts_extra"] == 250.0
+    assert settings["power_watts_total"] == 350.0
 
 
 # --------------------------------------------------------------------------
