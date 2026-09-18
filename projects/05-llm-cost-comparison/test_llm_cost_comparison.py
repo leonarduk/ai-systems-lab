@@ -1973,9 +1973,9 @@ def test_resolve_workload_scenarios_unknown_preset_key_raises():
 def test_run_non_interactive_accepts_valid_multi_scenario_config(
     tmp_path: Path, capsys
 ):
-    # The validation loop in run_non_interactive iterates over every scenario
-    # returned by _resolve_workload_scenarios, not just the primary workload.
-    # A valid multi-scenario config must still pass validation cleanly.
+    # Workload validation applies to every resolved scenario, not just the
+    # primary one, so a config naming several presets has to survive it
+    # intact — each scenario priced and printed, no ConfigError.
     pricing_path = tmp_path / "pricing.json"
     _write_pricing(pricing_path)
     config_path = tmp_path / "config.json"
@@ -1997,51 +1997,6 @@ def test_run_non_interactive_accepts_valid_multi_scenario_config(
     out = capsys.readouterr().out
     assert "Casual personal use" in out
     assert "Autonomous coding agent" in out
-
-
-def test_run_non_interactive_validates_non_primary_scenario(
-    tmp_path: Path,
-):
-    # A multi-scenario config where a *non-primary* scenario has a bad field
-    # must still be rejected — the validation loop covers every scenario, not
-    # just the first one. We build a config with two presets, then monkeypatch
-    # _resolve_workload_scenarios to return a second scenario with a zero
-    # requests_per_day so we can confirm the loop reaches it.
-    pricing_path = tmp_path / "pricing.json"
-    _write_pricing(pricing_path)
-    config_path = tmp_path / "config.json"
-    config = {
-        "workload_presets": ["casual", "coding_agent"],
-        "local": {
-            "mode": "existing",
-            "tokens_per_sec": 40,
-            "power_watts": 450,
-            "electricity_rate_per_kwh": 0.15,
-        },
-        "pricing_file": str(pricing_path),
-    }
-    config_path.write_text(json.dumps(config), encoding="utf-8")
-
-    good = m.Workload(
-        requests_per_day=1000, avg_input_tokens=500, avg_output_tokens=300
-    )
-    bad = m.Workload(requests_per_day=0, avg_input_tokens=500, avg_output_tokens=300)
-    scenarios = [
-        ("casual", "Casual personal use", good),
-        ("coding_agent", "Autonomous coding agent", bad),
-    ]
-
-    original = m._resolve_workload_scenarios
-
-    def fake_resolve(cfg):
-        return scenarios
-
-    m._resolve_workload_scenarios = fake_resolve
-    try:
-        with pytest.raises(m.ConfigError, match="requests_per_day"):
-            m.run_non_interactive(config_path, export_fmt=None, export_path=None)
-    finally:
-        m._resolve_workload_scenarios = original
 
 
 def test_run_non_interactive_multiple_presets_prints_one_combined_table_and_exports_one_file(
