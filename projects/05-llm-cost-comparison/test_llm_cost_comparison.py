@@ -1970,6 +1970,35 @@ def test_resolve_workload_scenarios_unknown_preset_key_raises():
 # --------------------------------------------------------------------------
 
 
+def test_run_non_interactive_accepts_valid_multi_scenario_config(
+    tmp_path: Path, capsys
+):
+    # Workload validation applies to every resolved scenario, not just the
+    # primary one, so a config naming several presets has to survive it
+    # intact — each scenario priced and printed, no ConfigError.
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    config = {
+        "workload_presets": ["casual", "coding_agent"],
+        "local": {
+            "mode": "existing",
+            "tokens_per_sec": 40,
+            "power_watts": 450,
+            "electricity_rate_per_kwh": 0.15,
+        },
+        "pricing_file": str(pricing_path),
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    # Must not raise ConfigError.
+    exit_code = m.run_non_interactive(config_path, export_fmt=None, export_path=None)
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "Casual personal use" in out
+    assert "Autonomous coding agent" in out
+
+
 def test_run_non_interactive_multiple_presets_prints_one_combined_table_and_exports_one_file(
     tmp_path: Path, capsys
 ):
