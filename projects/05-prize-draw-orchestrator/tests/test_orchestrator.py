@@ -39,6 +39,19 @@ class TestCheckDuplicate:
         assert check_duplicate(client, "draw-1") is True
 
 
+_ELIGIBLE_RESPONSE_WITH_NULL_ENTRY_URL = {
+    "prize": "GBP 100 cash",
+    "closing_date": "2026-08-15",
+    "entry_requirements": "Fill in the web form",
+    "entry_url": None,
+    "requires_purchase": False,
+    "has_complex_tie_breaker": False,
+    "tie_breaker_answer": None,
+    "eligible": True,
+    "reason": "Matches all criteria",
+}
+
+
 class TestProcessCandidate:
     def test_duplicate_is_skipped_before_parsing(self):
         client = FakeMCPToolClient(already_logged={"draw-1"})
@@ -197,6 +210,116 @@ class TestProcessCandidate:
         assert outcome == "needs_review"
         assert client.submitted == []
         assert "personal" in details["reason"].lower()
+
+    def test_null_entry_url_falls_back_to_candidate_url(self):
+        # Regression test: `entry_url` is nullable in `_NULLABLE_EXTRACTION_KEYS`,
+        # so a `null` value from the LLM is a valid, expected input. The
+        # `parsed.get("entry_url") or candidate.get("url")` fallback in
+        # `process_candidate` must populate `entry_url` from the candidate's
+        # `url` rather than letting `None` propagate downstream.
+        client = FakeMCPToolClient(
+            pages={"draw-1": {"content": "Win 100 pounds cash, no purchase necessary"}}
+        )
+        llm = FakeLLMProvider(fixed_response=_ELIGIBLE_RESPONSE_WITH_NULL_ENTRY_URL)
+        outcome, details = process_candidate(
+            client,
+            llm,
+            CRITERIA,
+            make_candidate(url="https://example.com/draw-1"),
+            dry_run=True,
+            confirm_personal_data=False,
+        )
+        assert outcome == "entered"
+        # process_candidate applies the fallback where it builds submit_fields
+        # (`parsed.get("entry_url") or candidate.get("url")`),
+        # not by writing back into the response it returns — so the submission
+        # is where a null entry_url has to be resolved, and details["entry_url"]
+        # legitimately stays None. That is the only read of entry_url in the
+        # project, so there is no second consumer to guard, and issue #233's AC
+        # has been amended to name the submission payload accordingly.
+        #
+        # Assert only that field: pinning the whole payload would make this
+        # break on unrelated changes to the submission shape.
+        assert len(client.submitted) == 1
+        assert (
+            client.submitted[0]["fields"]["entry_url"] == "https://example.com/draw-1"
+        )
+
+    def test_llm_entry_url_takes_precedence_over_candidate_url(self):
+        # The other half of the `or`: when the LLM supplies a URL it wins.
+        # Without this, flipping the operands to
+        # `candidate.get("url") or parsed.get("entry_url")` would pass every
+        # other entry_url test here.
+        client = FakeMCPToolClient(
+            pages={"draw-1": {"content": "Win 100 pounds cash, no purchase necessary"}}
+        )
+        response = dict(_ELIGIBLE_RESPONSE_WITH_NULL_ENTRY_URL)
+        response["entry_url"] = "https://example.com/real-entry-form"
+        llm = FakeLLMProvider(fixed_response=response)
+
+        process_candidate(
+            client,
+            llm,
+            CRITERIA,
+            make_candidate(url="https://example.com/draw-1"),
+            dry_run=True,
+            confirm_personal_data=False,
+        )
+
+        assert len(client.submitted) == 1
+        assert (
+            client.submitted[0]["fields"]["entry_url"]
+            == "https://example.com/real-entry-form"
+        )
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "process_candidate does not write the resolved entry_url back into "
+            "the response it returns — the fallback is applied only where it "
+            "builds submit_fields. Issue #233 originally assumed otherwise; its "
+            "AC has been amended to name the submission payload, and whether to "
+            "add the write-back is tracked as issue #543. This xfail is the "
+            "executable form of that decision and will start failing loudly if "
+            "write-back is ever added."
+        ),
+    )
+    def test_returned_candidate_carries_resolved_entry_url(self):
+        client = FakeMCPToolClient(
+            pages={"draw-1": {"content": "Win 100 pounds cash, no purchase necessary"}}
+        )
+        llm = FakeLLMProvider(fixed_response=_ELIGIBLE_RESPONSE_WITH_NULL_ENTRY_URL)
+
+        _, details = process_candidate(
+            client,
+            llm,
+            CRITERIA,
+            make_candidate(url="https://example.com/draw-1"),
+            dry_run=True,
+            confirm_personal_data=False,
+        )
+
+        assert details["entry_url"] == "https://example.com/draw-1"
+
+    def test_null_entry_url_with_no_candidate_url_stays_null(self):
+        # The fallback is a plain `or`, so with nothing to fall back to the
+        # submission carries None rather than inventing a URL.
+        client = FakeMCPToolClient(
+            pages={"draw-1": {"content": "Win 100 pounds cash, no purchase necessary"}}
+        )
+        llm = FakeLLMProvider(fixed_response=_ELIGIBLE_RESPONSE_WITH_NULL_ENTRY_URL)
+
+        process_candidate(
+            client,
+            llm,
+            CRITERIA,
+            make_candidate(url=None),
+            dry_run=True,
+            confirm_personal_data=False,
+        )
+
+        assert len(client.submitted) == 1
+        assert client.submitted[0]["fields"]["entry_url"] is None
 
     def test_personal_data_requirement_allows_entry_with_explicit_confirmation(self):
         client = FakeMCPToolClient(
