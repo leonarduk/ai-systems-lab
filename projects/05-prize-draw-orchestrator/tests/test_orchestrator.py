@@ -39,6 +39,19 @@ class TestCheckDuplicate:
         assert check_duplicate(client, "draw-1") is True
 
 
+_ELIGIBLE_RESPONSE_WITH_NULL_ENTRY_URL = {
+    "prize": "GBP 100 cash",
+    "closing_date": "2026-08-15",
+    "entry_requirements": "Fill in the web form",
+    "entry_url": None,
+    "requires_purchase": False,
+    "has_complex_tie_breaker": False,
+    "tie_breaker_answer": None,
+    "eligible": True,
+    "reason": "Matches all criteria",
+}
+
+
 class TestProcessCandidate:
     def test_duplicate_is_skipped_before_parsing(self):
         client = FakeMCPToolClient(already_logged={"draw-1"})
@@ -207,19 +220,7 @@ class TestProcessCandidate:
         client = FakeMCPToolClient(
             pages={"draw-1": {"content": "Win 100 pounds cash, no purchase necessary"}}
         )
-        llm = FakeLLMProvider(
-            fixed_response={
-                "prize": "GBP 100 cash",
-                "closing_date": "2026-08-15",
-                "entry_requirements": "Fill in the web form",
-                "entry_url": None,
-                "requires_purchase": False,
-                "has_complex_tie_breaker": False,
-                "tie_breaker_answer": None,
-                "eligible": True,
-                "reason": "Matches all criteria",
-            }
-        )
+        llm = FakeLLMProvider(fixed_response=_ELIGIBLE_RESPONSE_WITH_NULL_ENTRY_URL)
         outcome, details = process_candidate(
             client,
             llm,
@@ -244,6 +245,53 @@ class TestProcessCandidate:
         assert (
             client.submitted[0]["fields"]["entry_url"] == "https://example.com/draw-1"
         )
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "Issue #233's acceptance criteria assume process_candidate writes the "
+            "resolved entry_url back into the response it returns. It does not — "
+            "the fallback is applied only where submit_fields is built "
+            "(orchestrator.py:276). Recorded as issue #543; this xfail is the "
+            "executable form of that discrepancy and will start failing loudly "
+            "if write-back is ever added."
+        ),
+    )
+    def test_returned_candidate_carries_resolved_entry_url(self):
+        client = FakeMCPToolClient(
+            pages={"draw-1": {"content": "Win 100 pounds cash, no purchase necessary"}}
+        )
+        llm = FakeLLMProvider(fixed_response=_ELIGIBLE_RESPONSE_WITH_NULL_ENTRY_URL)
+
+        _, details = process_candidate(
+            client,
+            llm,
+            CRITERIA,
+            make_candidate(url="https://example.com/draw-1"),
+            dry_run=True,
+            confirm_personal_data=False,
+        )
+
+        assert details["entry_url"] == "https://example.com/draw-1"
+
+    def test_null_entry_url_with_no_candidate_url_stays_null(self):
+        # The fallback is a plain `or`, so with nothing to fall back to the
+        # submission carries None rather than inventing a URL.
+        client = FakeMCPToolClient(
+            pages={"draw-1": {"content": "Win 100 pounds cash, no purchase necessary"}}
+        )
+        llm = FakeLLMProvider(fixed_response=_ELIGIBLE_RESPONSE_WITH_NULL_ENTRY_URL)
+
+        process_candidate(
+            client,
+            llm,
+            CRITERIA,
+            make_candidate(url=None),
+            dry_run=True,
+            confirm_personal_data=False,
+        )
+
+        assert client.submitted[0]["fields"]["entry_url"] is None
 
     def test_personal_data_requirement_allows_entry_with_explicit_confirmation(self):
         client = FakeMCPToolClient(
