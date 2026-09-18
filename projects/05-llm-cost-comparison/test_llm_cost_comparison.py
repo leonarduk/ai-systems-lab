@@ -789,15 +789,62 @@ def test_run_non_interactive_end_to_end(tmp_path: Path, capsys):
 
 
 def test_validate_http_url_accepts_http_and_https():
-    m._validate_http_url("http://localhost:11434")
-    m._validate_http_url("https://example.com")
+    assert m._validate_http_url("http://localhost:11434") == "http://localhost:11434"
+    assert m._validate_http_url("https://example.com") == "https://example.com"
 
 
 def test_validate_http_url_rejects_other_schemes():
     with pytest.raises(ValueError):
         m._validate_http_url("file:///etc/passwd")
     with pytest.raises(ValueError):
-        m._validate_http_url("not-a-url")
+        m._validate_http_url("ftp://example.com")
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("localhost:11434", "http://localhost:11434"),
+        ("127.0.0.1:8000", "http://127.0.0.1:8000"),
+        ("example.com", "http://example.com"),
+        ("  localhost:11434  ", "http://localhost:11434"),
+    ],
+)
+def test_validate_http_url_prepends_http_when_scheme_missing(raw, expected):
+    assert m._validate_http_url(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "   ",
+        "http://",
+        # Normalizes to "http://://x" — a scheme with no host behind it.
+        "://x",
+    ],
+)
+def test_validate_http_url_rejects_input_with_no_host(raw):
+    with pytest.raises(ValueError, match="must include a host"):
+        m._validate_http_url(raw)
+
+
+def test_validate_http_url_keeps_path_on_scheme_less_input():
+    assert m._validate_http_url("localhost:11434/v1") == "http://localhost:11434/v1"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "http://localhost:11434",
+        "https://example.com",
+        "HTTP://localhost:11434",
+    ],
+)
+def test_validate_http_url_does_not_double_prepend(raw):
+    result = m._validate_http_url(raw)
+    assert result.lower().startswith(("http://", "https://"))
+    assert "http://http" not in result.lower()
+    assert "https://http" not in result.lower()
 
 
 class _FakeHTTPResponse:
