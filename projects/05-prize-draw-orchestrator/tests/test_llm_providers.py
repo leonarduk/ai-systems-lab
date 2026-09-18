@@ -214,6 +214,24 @@ class TestBuildLLMProvider:
         assert isinstance(provider, ClaudeProvider)
         assert provider.api_key == "env-secret"
 
+    def test_deepseek_config_key_takes_precedence_over_env_var(self, monkeypatch):
+        """When both config and env var are set, the config value wins."""
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "env-key")
+        provider = build_llm_provider(
+            FakeConfig(llm_provider="deepseek", deepseek_api_key="config-key")
+        )
+        assert isinstance(provider, DeepSeekProvider)
+        assert provider.api_key == "config-key"
+
+    def test_claude_config_key_takes_precedence_over_env_var(self, monkeypatch):
+        """When both config and env var are set, the config value wins."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "env-key")
+        provider = build_llm_provider(
+            FakeConfig(llm_provider="claude", anthropic_api_key="config-key")
+        )
+        assert isinstance(provider, ClaudeProvider)
+        assert provider.api_key == "config-key"
+
 
 class TestParseJsonObjectEdgeCases:
     """Edge cases for the JSON extraction helpers introduced in PR #237.
