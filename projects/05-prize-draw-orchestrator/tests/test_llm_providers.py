@@ -231,3 +231,56 @@ class TestBuildLLMProvider:
         )
         assert isinstance(provider, ClaudeProvider)
         assert provider.api_key == "config-key"
+
+
+class TestParseJsonObjectEdgeCases:
+    """Edge cases for the JSON extraction helpers introduced in PR #237.
+
+    These tests pin the *current* behavior of the fenced/prose/brace-slicing
+    heuristics. They intentionally assert that ambiguous inputs raise
+    ``LLMProviderError`` rather than silently mis-parsing, so any future
+    change to the extraction logic must update these tests explicitly.
+    """
+
+    def _provider(self):
+        # OllamaProvider is the simplest concrete provider; its generate_json
+        # delegates to the shared _parse_json_object helper.
+        return OllamaProvider()
+
+    def _mock_response(self, content):
+        mock_response = Mock()
+        mock_response.json.return_value = {"response": content}
+        mock_response.raise_for_status = Mock()
+        return mock_response
+
+    def test_empty_json_fenced_block_raises(self):
+        """A ```json fence with empty inner content must raise, not return {}."""
+        mock_response = self._mock_response("```json\n```")
+        with patch("llm_providers.requests.post", return_value=mock_response):
+            with pytest.raises(LLMProviderError):
+                self._provider().generate_json("prompt")
+
+    def test_empty_bare_fenced_block_raises(self):
+        """A bare ``` fence with empty inner content must raise, not return {}."""
+        mock_response = self._mock_response("```\n```")
+        with patch("llm_providers.requests.post", return_value=mock_response):
+            with pytest.raises(LLMProviderError):
+                self._provider().generate_json("prompt")
+
+    def test_multiple_json_objects_raises(self):
+        """Two JSON objects in one response must raise rather than pick one."""
+        mock_response = self._mock_response(
+            '{"eligible": true} but note {"x": 1} is unrelated'
+        )
+        with patch("llm_providers.requests.post", return_value=mock_response):
+            with pytest.raises(LLMProviderError):
+                self._provider().generate_json("prompt")
+
+    def test_trailing_brace_in_prose_raises(self):
+        """A valid object followed by prose containing a `}` must raise."""
+        mock_response = self._mock_response(
+            '{"eligible": true} trailing text with a } brace'
+        )
+        with patch("llm_providers.requests.post", return_value=mock_response):
+            with pytest.raises(LLMProviderError):
+                self._provider().generate_json("prompt")
