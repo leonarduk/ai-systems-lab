@@ -341,13 +341,28 @@ class TestRulesBlock:
         prompt = context.build_system_prompt(knowledge_dir=knowledge_dir)
         assert prompt.rstrip().endswith(context.RULES_BLOCK.rstrip())
 
+    @staticmethod
+    def _unbounded_budget(knowledge_dir):
+        """A budget that cannot bind, derived from the inputs rather than guessed.
+
+        estimate_tokens is ceil(len/CHARS_PER_TOKEN_ESTIMATE), so the character
+        count of every input is always an upper bound on the token count. Using
+        it avoids a magic constant that silently stops being "large enough" as
+        the static text grows.
+        """
+        chars = len(context.ROLE_BLOCK) + len(context.RULES_BLOCK)
+        for name in ("summary.txt", "profile.md", "github.json"):
+            path = knowledge_dir / name
+            if path.exists():
+                chars += len(path.read_text(encoding="utf-8"))
+        return chars + 1
+
     def test_raises_when_budget_is_below_the_static_floor(self, tmp_path):
         # The role block, summary, profile and rules block are all appended
         # unconditionally, so their combined size is a floor no amount of
         # GitHub trimming can get under. A budget below it is unsatisfiable and
-        # must surface as PromptTooLargeError naming both numbers — not as a
-        # crash from the negative GitHub budget that max(..., 0) clamps away,
-        # and not as a silently truncated prompt.
+        # must surface as PromptTooLargeError naming both numbers, rather than
+        # a silently truncated prompt.
         (tmp_path / "summary.txt").write_text(
             "I'm a senior engineer with 20 years of experience.", encoding="utf-8"
         )
@@ -356,7 +371,9 @@ class TestRulesBlock:
         )
         # No github.json: this prompt is exactly the unconditional floor.
         floor = context.estimate_tokens(
-            context.build_system_prompt(max_tokens=40000, knowledge_dir=tmp_path)
+            context.build_system_prompt(
+                max_tokens=self._unbounded_budget(tmp_path), knowledge_dir=tmp_path
+            )
         )
 
         # At the floor it still builds...
@@ -375,11 +392,54 @@ class TestRulesBlock:
         assert str(floor) in message
         assert str(floor - 1) in message
 
-    def test_budget_below_floor_still_raises_with_github_records(self, knowledge_dir):
-        # Same floor, but with GitHub records present: the section is trimmed
-        # away to nothing and the budget is still unmeetable. The clamp on
-        # max(budget_for_github, 0) means the negative budget never reaches
-        # _github_section, so this is a PromptTooLargeError rather than an
-        # IndexError or a ValueError from the trimming loop.
+    def test_github_section_never_receives_a_negative_budget(
+        self, monkeypatch, knowledge_dir
+    ):
+        # build_system_prompt computes budget_for_github as
+        # max_tokens - static - rules, which goes negative once the budget is
+        # below the static floor, and clamps it with max(..., 0).
+        #
+        # Note the clamp can only ever be observed from inside: a negative
+        # budget_for_github requires max_tokens below static + rules, while
+        # returning a prompt requires max_tokens at or above the assembled
+        # floor, which is strictly larger. Those ranges do not overlap, so
+        # there is no budget for which the clamp is active *and* a prompt
+        # comes back — the section's budget has to be inspected directly.
+        seen = []
+        real_github_section = context._github_section
+
+        def spy(records, section_budget):
+            seen.append(section_budget)
+            return real_github_section(records, section_budget)
+
+        monkeypatch.setattr(context, "_github_section", spy)
+
         with pytest.raises(context.PromptTooLargeError):
             context.build_system_prompt(max_tokens=1, knowledge_dir=knowledge_dir)
+
+        assert seen == [0], "negative GitHub budget reached _github_section"
+
+    def test_rules_block_survives_a_fully_trimmed_github_section(self, knowledge_dir):
+        # Under maximum budget pressure — the smallest budget that still builds
+        # — the GitHub section has been trimmed as far as it goes, but the rules
+        # block is appended unconditionally and must still be there. This is
+        # what would fail if the rules block were ever made budget-dependent.
+        budget = context.estimate_tokens(
+            context.build_system_prompt(
+                max_tokens=self._unbounded_budget(knowledge_dir),
+                knowledge_dir=knowledge_dir,
+            )
+        )
+        smallest = None
+        while True:
+            try:
+                smallest = context.build_system_prompt(
+                    max_tokens=budget, knowledge_dir=knowledge_dir
+                )
+            except context.PromptTooLargeError:
+                break
+            budget -= 1
+
+        assert smallest is not None
+        assert context.RULES_BLOCK.rstrip() in smallest
+        assert smallest.strip()
