@@ -12,6 +12,7 @@ from llm_providers import (
     DeepSeekProvider,
     LLMProviderError,
     OllamaProvider,
+    _parse_json_object,
     build_llm_provider,
 )
 
@@ -25,6 +26,35 @@ class FakeConfig:
         self.deepseek_model = kwargs.get("deepseek_model", "deepseek-v4-flash")
         self.anthropic_api_key = kwargs.get("anthropic_api_key", "")
         self.claude_model = kwargs.get("claude_model", "claude-sonnet-4-6")
+
+
+class TestParseJsonObject:
+    def test_plain_json_object(self):
+        assert _parse_json_object('{"eligible": true}', "Test") == {"eligible": True}
+
+    def test_fenced_json_with_language_tag(self):
+        raw = '```json\n{"eligible": true}\n```'
+        assert _parse_json_object(raw, "Test") == {"eligible": True}
+
+    def test_fenced_json_without_language_tag(self):
+        raw = '```\n{"eligible": false}\n```'
+        assert _parse_json_object(raw, "Test") == {"eligible": False}
+
+    def test_json_wrapped_in_prose(self):
+        raw = 'Sure, here is the result: {"eligible": true} — hope that helps!'
+        assert _parse_json_object(raw, "Test") == {"eligible": True}
+
+    def test_fenced_json_with_surrounding_prose(self):
+        raw = 'Here you go:\n```json\n{"eligible": true}\n```\nDone.'
+        assert _parse_json_object(raw, "Test") == {"eligible": True}
+
+    def test_invalid_json_raises(self):
+        with pytest.raises(LLMProviderError, match="did not return valid JSON"):
+            _parse_json_object("not json at all", "Test")
+
+    def test_non_object_json_raises(self):
+        with pytest.raises(LLMProviderError, match="isn't an object"):
+            _parse_json_object("[1, 2, 3]", "Test")
 
 
 class TestOllamaProvider:
@@ -41,6 +71,18 @@ class TestOllamaProvider:
         assert result == {"eligible": True}
         called_payload = mock_post.call_args.kwargs["json"]
         assert called_payload["format"] == {"type": "object"}
+
+    def test_generate_json_handles_fenced_response(self):
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "response": '```json\n{"eligible": true}\n```'
+        }
+        mock_response.raise_for_status = Mock()
+
+        with patch("llm_providers.requests.post", return_value=mock_response):
+            result = OllamaProvider().generate_json("prompt")
+
+        assert result == {"eligible": True}
 
     def test_connection_error_raises_llm_provider_error(self):
         with patch(
@@ -75,6 +117,18 @@ class TestDeepSeekProvider:
             result = DeepSeekProvider(api_key="secret").generate_json("prompt")
 
         assert result == {"eligible": False}
+
+    def test_generate_json_handles_fenced_content(self):
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": '```json\n{"eligible": true}\n```'}}]
+        }
+        mock_response.raise_for_status = Mock()
+
+        with patch("llm_providers.requests.post", return_value=mock_response):
+            result = DeepSeekProvider(api_key="secret").generate_json("prompt")
+
+        assert result == {"eligible": True}
 
     def test_no_choices_raises(self):
         mock_response = Mock()
@@ -133,18 +187,14 @@ class TestBuildLLMProvider:
         clear LLMProviderError naming DEEPSEEK_API_KEY (not a KeyError)."""
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         with pytest.raises(LLMProviderError, match="DEEPSEEK_API_KEY"):
-            build_llm_provider(
-                FakeConfig(llm_provider="deepseek", deepseek_api_key="")
-            )
+            build_llm_provider(FakeConfig(llm_provider="deepseek", deepseek_api_key=""))
 
     def test_claude_missing_api_key_raises(self, monkeypatch):
         """Selecting claude with no config key and no env var must raise a
         clear LLMProviderError naming ANTHROPIC_API_KEY (not a KeyError)."""
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         with pytest.raises(LLMProviderError, match="ANTHROPIC_API_KEY"):
-            build_llm_provider(
-                FakeConfig(llm_provider="claude", anthropic_api_key="")
-            )
+            build_llm_provider(FakeConfig(llm_provider="claude", anthropic_api_key=""))
 
     def test_deepseek_falls_back_to_env_var(self, monkeypatch):
         """When config has no key but DEEPSEEK_API_KEY is set, the env var is used."""

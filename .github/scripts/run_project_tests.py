@@ -7,6 +7,13 @@ some tests only import cleanly with their own project directory as rootdir).
 
 Written in Python (not the workflow's bash loop) so it also works as a local
 / CI-mirroring check on Windows via cicaid's `.cicaid-checks.toml`.
+
+Invariant: ``projects_root`` (i.e. ``projects/``) must NOT contain a
+``requirements.txt``. If one existed, ``find_project_dirs`` would resolve
+every test file's project dir to ``projects_root`` itself, collapsing the
+per-project runs into the single flat ``pytest projects/`` run this script
+exists to avoid (name collisions, wrong rootdirs). ``main()`` enforces this
+with a loud guard rather than silently degrading.
 """
 from __future__ import annotations
 
@@ -65,6 +72,12 @@ def find_project_dirs(
     ``requirements.txt`` is found anywhere in that ancestry, the project is
     still tested from the test file's own directory, matching python-ci.yml
     rather than being silently skipped.
+
+    Note: a ``requirements.txt`` placed directly at ``projects_root`` is
+    unsupported. It would make every test file resolve to ``projects_root``,
+    collapsing the per-project runs into the flat ``pytest projects/`` run
+    this module exists to avoid. ``main()`` guards against this; callers
+    passing a synthetic ``projects_root`` should not rely on that layout.
     """
     if excluded is None:
         excluded = EXCLUDED
@@ -91,6 +104,16 @@ def find_project_dirs(
 
 
 def main() -> int:
+    if (PROJECTS_ROOT / "requirements.txt").exists():
+        _error(
+            f"{PROJECTS_ROOT.relative_to(REPO_ROOT)}/requirements.txt must not "
+            "exist: it would collapse the per-project pytest runs into a "
+            "single flat `pytest projects/` run (name collisions, wrong "
+            "rootdirs). Move it into the individual project directory that "
+            "needs it."
+        )
+        return 2
+
     if importlib.util.find_spec("pytest") is None:
         _error(
             "pytest is not installed in this environment "
