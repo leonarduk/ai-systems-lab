@@ -229,7 +229,11 @@ class TestProcessCandidate:
             confirm_personal_data=False,
         )
         assert outcome == "entered"
-        assert details["entry_url"] == "https://example.com/draw-1"
+        # `details` is the parsed LLM response as-is — the fallback is applied
+        # when building the submission fields, not written back into it, so a
+        # null here is expected and is not what downstream consumes.
+        assert details["entry_url"] is None
+        # The submission is what matters: it carries the candidate's own URL.
         assert client.submitted == [
             {
                 "draw_id": "draw-1",
