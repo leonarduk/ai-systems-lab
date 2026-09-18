@@ -17,7 +17,7 @@ import time
 
 import pytest
 
-from mcp_client import MCPToolError, StdioMCPToolClient
+from mcp_client import MCPToolError, StdioMCPToolClient, _leaves
 
 
 def _client(
@@ -67,8 +67,11 @@ def test_unknown_tool_is_raised_as_mcp_tool_error(mock_mcp_server_path: str):
 def test_server_failing_before_handshake_raises(mock_mcp_server_path, mode):
     client = _client(mock_mcp_server_path, mode=mode)
 
-    with pytest.raises(MCPToolError):
+    with pytest.raises(MCPToolError) as exc_info:
         client.call_tool("echo", {"text": "hello"})
+
+    # Startup failures are wrapped, not swallowed.
+    assert exc_info.value.__cause__ is not None
 
 
 def test_missing_server_command_raises(tmp_path):
@@ -108,10 +111,17 @@ def test_unresponsive_server_times_out_instead_of_hanging(mock_mcp_server_path):
         "call_tool did not return within 20s despite a 2s connect timeout — "
         "the client is hanging on an unresponsive server again"
     )
-    assert isinstance(outcome.get("raised"), MCPToolError), outcome
-    assert "did not respond within the timeout" in str(outcome["raised"])
+    raised = outcome.get("raised")
+    assert isinstance(raised, MCPToolError), outcome
+    assert "did not respond within the timeout" in str(raised)
+    # The underlying failure is kept as __cause__ rather than discarded, so a
+    # traceback still shows what actually went wrong inside the session.
+    assert raised.__cause__ is not None
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="process listing below is POSIX-only (ps)"
+)
 def test_timeout_does_not_leave_the_server_running(mock_mcp_server_path):
     # A timeout that abandoned the subprocess would leak one process per poll.
     def server_pids():
@@ -135,3 +145,70 @@ def test_timeout_does_not_leave_the_server_running(mock_mcp_server_path):
     while time.monotonic() < deadline and server_pids() - before:
         time.sleep(0.2)
     assert server_pids() - before == set()
+
+
+def test_timeout_is_reported_even_when_it_is_not_the_first_group_member(monkeypatch):
+    # The real hang produces a single-member group, so nothing above
+    # distinguishes "scan every member" from "look at the first". Drive the
+    # branch directly: anyio can collect a reader-task failure alongside the
+    # timeout and promises no order, and reporting that as a generic failure
+    # would hide the actual cause.
+    import mcp.client.stdio as stdio_module
+
+    def exploding_stdio_client(*args, **kwargs):
+        raise ExceptionGroup(
+            "session failed", [ValueError("reader died"), TimeoutError()]
+        )
+
+    monkeypatch.setattr(stdio_module, "stdio_client", exploding_stdio_client)
+    client = StdioMCPToolClient(command=sys.executable, args=["-c", "pass"])
+
+    with pytest.raises(MCPToolError) as exc_info:
+        client.call_tool("echo", {"text": "hello"})
+
+    assert "did not respond within the timeout" in str(exc_info.value)
+
+
+def test_interrupt_is_not_converted_into_a_tool_error(monkeypatch):
+    # A caller asking to stop must not have that turned into MCPToolError, or
+    # they cannot interrupt the orchestrator's poll loop.
+    import mcp.client.stdio as stdio_module
+
+    def exploding_stdio_client(*args, **kwargs):
+        raise BaseExceptionGroup("interrupted", [KeyboardInterrupt()])
+
+    monkeypatch.setattr(stdio_module, "stdio_client", exploding_stdio_client)
+    client = StdioMCPToolClient(command=sys.executable, args=["-c", "pass"])
+
+    with pytest.raises(BaseExceptionGroup):
+        client.call_tool("echo", {"text": "hello"})
+
+
+class TestLeaves:
+    """`_leaves` decides whether a failure is reported as a timeout.
+
+    The timeout is raised inside anyio's task group, so it reaches the client
+    wrapped. A task group can collect several exceptions — a timeout alongside
+    a cancellation or a broken pipe from the reader task — and does not promise
+    an order, so scanning only the first member would misreport a timeout as a
+    generic failure depending on which arrived first.
+    """
+
+    def test_plain_exception_is_its_own_leaf(self):
+        exc = ValueError("boom")
+        assert _leaves(exc) == [exc]
+
+    def test_group_members_are_flattened(self):
+        first, second = ValueError("a"), TimeoutError()
+        assert _leaves(ExceptionGroup("g", [first, second])) == [first, second]
+
+    def test_nested_groups_are_flattened(self):
+        deep = TimeoutError()
+        group = ExceptionGroup(
+            "outer", [ValueError("a"), ExceptionGroup("inner", [deep])]
+        )
+        assert deep in _leaves(group)
+
+    def test_timeout_is_found_when_it_is_not_first(self):
+        group = ExceptionGroup("g", [ValueError("reader died"), TimeoutError()])
+        assert any(isinstance(leaf, TimeoutError) for leaf in _leaves(group))

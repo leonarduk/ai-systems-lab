@@ -33,15 +33,17 @@ DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
 DEFAULT_CALL_TIMEOUT_SECONDS = 60.0
 
 
-def _first_leaf(exc: BaseException) -> BaseException:
-    """Return the first non-group exception inside a (possibly nested) group.
+def _leaves(exc: BaseException) -> list[BaseException]:
+    """Flatten a (possibly nested) exception group to its non-group members.
 
     ExceptionGroup's own str() is just "unhandled errors in a TaskGroup", which
-    says nothing about what actually failed.
+    says nothing about what failed, so callers need the members. All of them:
+    a task group can collect several, and the one that matters — a timeout —
+    is not reliably first.
     """
-    while isinstance(exc, BaseExceptionGroup) and exc.exceptions:
-        exc = exc.exceptions[0]
-    return exc
+    if isinstance(exc, BaseExceptionGroup):
+        return [leaf for sub in exc.exceptions for leaf in _leaves(sub)]
+    return [exc]
 
 
 class MCPToolError(RuntimeError):
@@ -120,26 +122,40 @@ class StdioMCPToolClient:
             command=self.command, args=self.args, env=self.env
         )
         try:
-            async with stdio_client(server_params) as (read, write):
-                async with ClientSession(read, write) as session:
-                    async with asyncio.timeout(self.connect_timeout):
-                        await session.initialize()
-                    async with asyncio.timeout(self.call_timeout):
-                        result = await session.call_tool(name, arguments=arguments)
+            # The inner timeouts bound the two waits that can actually stall.
+            # The outer one is a backstop for everything they do not cover —
+            # spawning the subprocess, and the context managers' own setup and
+            # teardown — so no path through here is unbounded.
+            async with asyncio.timeout(self.connect_timeout + self.call_timeout):
+                async with stdio_client(server_params) as (read, write):
+                    async with ClientSession(read, write) as session:
+                        async with asyncio.timeout(self.connect_timeout):
+                            await session.initialize()
+                        async with asyncio.timeout(self.call_timeout):
+                            result = await session.call_tool(name, arguments=arguments)
         except TimeoutError as exc:
             raise MCPToolError(self._timeout_message(name)) from exc
         except BaseExceptionGroup as group:
             # stdio_client runs its reader and writer in an anyio task group, so
             # anything that goes wrong before or during the session arrives
-            # wrapped — including the timeout above, which is raised inside that
-            # group rather than around it. Unwrap so callers only ever have to
-            # handle MCPToolError, and keep the original as __cause__.
-            leaf = _first_leaf(group)
-            if isinstance(leaf, TimeoutError):
+            # wrapped — including the timeouts above, which are raised inside
+            # that group rather than around it. Unwrap so callers only ever have
+            # to handle MCPToolError, and keep the original as __cause__.
+            leaves = _leaves(group)
+            # Never convert an interrupt into a tool error: the caller asked to
+            # stop, and swallowing it here would leave them unable to.
+            if any(
+                isinstance(leaf, (KeyboardInterrupt, SystemExit)) for leaf in leaves
+            ):
+                raise
+            # Scan every member rather than taking the first: a timeout can be
+            # collected alongside a cancellation or a broken-pipe error from the
+            # reader task, and anyio does not promise which comes first.
+            if any(isinstance(leaf, TimeoutError) for leaf in leaves):
                 raise MCPToolError(self._timeout_message(name)) from group
             raise MCPToolError(
                 f"MCP server {self.command!r} failed while calling tool {name!r}: "
-                f"{leaf!r}"
+                f"{leaves[0]!r}"
             ) from group
 
         if getattr(result, "isError", False):
