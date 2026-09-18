@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any, Protocol
 
 import requests
@@ -26,6 +27,8 @@ DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6"
 DEFAULT_TIMEOUT = 60
+
+_FENCED_JSON_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
 
 
 class LLMProviderError(RuntimeError):
@@ -50,10 +53,51 @@ class LLMProvider(Protocol):
         ...
 
 
+def _extract_json_candidate(raw_text: str) -> str:
+    """Best-effort extraction of a JSON-object candidate from `raw_text`.
+
+    Handles three common LLM output shapes:
+      1. Plain JSON: `{"a": 1}`
+      2. Fenced JSON: ```json\n{"a": 1}\n``` (or bare ``` fences)
+      3. JSON embedded in prose: "Here you go: {"a": 1} — hope that helps!"
+
+    Returns the candidate substring (still a string; not yet parsed). If no
+    obvious candidate is found, returns the original text so the caller's
+    `json.loads` can produce a meaningful error.
+    """
+    text = raw_text.strip()
+    if not text:
+        return text
+
+    # 1. Try markdown code fences first (with or without a language tag).
+    fence_match = _FENCED_JSON_RE.search(text)
+    if fence_match:
+        inner = fence_match.group(1).strip()
+        if inner:
+            return inner
+
+    # 2. If the whole thing already looks like a JSON object, use it as-is.
+    if text.startswith("{") and text.endswith("}"):
+        return text
+
+    # 3. Otherwise, slice from the first `{` to the last `}` to strip prose.
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace != -1 and last_brace > first_brace:
+        return text[first_brace : last_brace + 1]
+
+    return text
+
+
 def _parse_json_object(raw_text: str, provider_name: str) -> dict[str, Any]:
-    """Parse `raw_text` as a JSON object, raising `LLMProviderError` if it isn't one."""
+    """Parse `raw_text` as a JSON object, raising `LLMProviderError` if it isn't one.
+
+    Tolerates markdown code fences and surrounding prose by extracting the
+    most likely JSON-object substring before parsing.
+    """
+    candidate = _extract_json_candidate(raw_text)
     try:
-        parsed = json.loads(raw_text.strip())
+        parsed = json.loads(candidate)
     except json.JSONDecodeError as exc:
         raise LLMProviderError(
             f"{provider_name} did not return valid JSON: {raw_text[:200]!r}"
