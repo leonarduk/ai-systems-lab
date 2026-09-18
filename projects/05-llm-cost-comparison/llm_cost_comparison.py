@@ -33,6 +33,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -1314,6 +1315,9 @@ def _validate_http_url(base_url: str) -> str:
     import re
 
     url = base_url.strip()
+    # urlsplit can't be used to detect the scheme here: it reads the "host" of
+    # a bare "localhost:11434" as a scheme, which is exactly the input this
+    # normalizes. Check for an explicit "<scheme>://" prefix instead.
     if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", url):
         url = "http://" + url
     scheme = url.split("://", 1)[0].lower()
@@ -1321,6 +1325,13 @@ def _validate_http_url(base_url: str) -> str:
         raise ValueError(
             f"base_url must start with http:// or https:// (got {base_url!r})"
         )
+    # Without this, empty or whitespace-only input normalizes to a bare
+    # "http://" and is accepted, then fails much later inside urllib with a
+    # confusing URLError. Reject it here with a clear message instead. This
+    # also catches malformed input like "://x", which normalizes to
+    # "http://://x" (netloc ":", no host).
+    if not urllib.parse.urlsplit(url).hostname:
+        raise ValueError(f"base_url must include a host (got {base_url!r})")
     return url
 
 

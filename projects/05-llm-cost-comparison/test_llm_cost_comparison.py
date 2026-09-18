@@ -724,6 +724,25 @@ def test_validate_http_url_prepends_http_when_scheme_missing(raw, expected):
 @pytest.mark.parametrize(
     "raw",
     [
+        "",
+        "   ",
+        "http://",
+        # Normalizes to "http://://x" — a scheme with no host behind it.
+        "://x",
+    ],
+)
+def test_validate_http_url_rejects_input_with_no_host(raw):
+    with pytest.raises(ValueError, match="must include a host"):
+        m._validate_http_url(raw)
+
+
+def test_validate_http_url_keeps_path_on_scheme_less_input():
+    assert m._validate_http_url("localhost:11434/v1") == "http://localhost:11434/v1"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
         "http://localhost:11434",
         "https://example.com",
         "HTTP://localhost:11434",
