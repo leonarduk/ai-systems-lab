@@ -209,10 +209,12 @@ class TestNotifyFanOut:
 
     def test_partial_failure_still_counts_as_sent(self, monkeypatch):
         # Both channels configured; Pushover succeeds, Telegram returns 500.
-        # _notify is documented as "sent if any channel sent", and that is the
-        # behaviour worth keeping: the notification did reach me, so a
-        # transient outage on one channel must not report the whole fan-out as
-        # failed. The per-channel statuses still record what happened.
+        # _notify is documented as "sent if any channel sent": the notification
+        # did reach me, so a transient outage on one channel must not report the
+        # whole fan-out as failed. The per-channel statuses still record what
+        # happened. Issue #191 originally specified "failed" here; its AC was
+        # amended to match this contract rather than change _notify, which the
+        # issue itself puts out of scope.
         self._configure_both_channels(monkeypatch)
 
         def fake_post(url, data, timeout):
