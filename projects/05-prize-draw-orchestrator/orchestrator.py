@@ -60,8 +60,12 @@ _EXTRACTION_SCHEMA = {
     },
     "required": [
         "prize",
+        # entry_requirements gates the personal-data safety check in
+        # process_candidate; if the LLM omits it the check silently passes,
+        # so it has to be mandatory rather than defaulted to "".
         "entry_requirements",
-        "entry_url",
+        # entry_url is deliberately NOT required: process_candidate falls back
+        # to the candidate's own URL when it is absent or null.
         "eligible",
         "requires_purchase",
         "has_complex_tie_breaker",
@@ -69,24 +73,39 @@ _EXTRACTION_SCHEMA = {
     ],
 }
 
-# Python-side validation contract for the parsed LLM response. Maps each
-# required key to the Python type we expect after JSON parsing. `None` is
-# accepted for the nullable keys (see `_NULLABLE_EXTRACTION_KEYS`).
-_EXTRACTION_FIELD_TYPES: dict[str, type] = {
-    "prize": str,
-    "closing_date": str,
-    "entry_requirements": str,
-    "entry_url": str,
-    "requires_purchase": bool,
-    "has_complex_tie_breaker": bool,
-    "tie_breaker_answer": str,
-    "eligible": bool,
-    "reason": str,
+_JSON_TYPE_TO_PYTHON: dict[str, type] = {
+    "string": str,
+    "boolean": bool,
+    "integer": int,
+    "number": float,
 }
+
+
+def _declared_types(declared: Any) -> list[str]:
+    """Normalize a JSON-schema ``type`` to a list, since it may be a string."""
+    return declared if isinstance(declared, list) else [declared]
+
+
+# The Python-side validation contract is derived from `_EXTRACTION_SCHEMA`
+# rather than restated, so the two can't drift: a hand-maintained copy was
+# stricter than the schema it mirrored (it required `closing_date`, which the
+# schema lists as optional and no caller reads), rejecting responses the
+# schema considers valid.
+_EXTRACTION_FIELD_TYPES: dict[str, tuple[type, ...]] = {
+    key: tuple(
+        _JSON_TYPE_TO_PYTHON[t] for t in _declared_types(prop["type"]) if t != "null"
+    )
+    for key, prop in _EXTRACTION_SCHEMA["properties"].items()
+}
+
+# Keys the LLM must always supply; the rest may be omitted entirely.
+_REQUIRED_EXTRACTION_KEYS = frozenset(_EXTRACTION_SCHEMA["required"])
 
 # Keys that may legitimately be `None` in the LLM response.
 _NULLABLE_EXTRACTION_KEYS = frozenset(
-    {"closing_date", "entry_url", "tie_breaker_answer"}
+    key
+    for key, prop in _EXTRACTION_SCHEMA["properties"].items()
+    if "null" in _declared_types(prop["type"])
 )
 
 
@@ -102,32 +121,32 @@ def _validate_extraction(parsed: Any) -> dict[str, Any]:
             f"LLM response must be a JSON object, got {type(parsed).__name__}"
         )
 
-    for key, expected_type in _EXTRACTION_FIELD_TYPES.items():
+    for key, expected_types in _EXTRACTION_FIELD_TYPES.items():
+        names = "/".join(t.__name__ for t in expected_types)
         if key not in parsed:
+            if key not in _REQUIRED_EXTRACTION_KEYS:
+                continue
             raise ValueError(
-                f"LLM response missing required key '{key}' "
-                f"(expected {expected_type.__name__})"
+                f"LLM response missing required key '{key}' (expected {names})"
             )
         value = parsed[key]
         if value is None:
             if key in _NULLABLE_EXTRACTION_KEYS:
                 continue
             raise ValueError(
-                f"LLM response key '{key}' must not be null "
-                f"(expected {expected_type.__name__})"
+                f"LLM response key '{key}' must not be null (expected {names})"
             )
-        # `bool` is a subclass of `int`; guard against bools sneaking into
-        # string fields and vice versa.
-        if expected_type is bool:
-            if not isinstance(value, bool):
-                raise ValueError(
-                    f"LLM response key '{key}' has invalid type: "
-                    f"expected bool, got {type(value).__name__}"
-                )
-        elif not isinstance(value, expected_type):
+        # `bool` is a subclass of `int`, so a bare isinstance check would let
+        # True/False through wherever an int is allowed, and vice versa.
+        if isinstance(value, bool) != (bool in expected_types):
             raise ValueError(
                 f"LLM response key '{key}' has invalid type: "
-                f"expected {expected_type.__name__}, got {type(value).__name__}"
+                f"expected {names}, got {type(value).__name__}"
+            )
+        if not isinstance(value, expected_types):
+            raise ValueError(
+                f"LLM response key '{key}' has invalid type: "
+                f"expected {names}, got {type(value).__name__}"
             )
 
     return parsed

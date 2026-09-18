@@ -7,6 +7,8 @@ from fakes import FakeLLMProvider, FakeMCPToolClient
 
 import pytest
 
+import orchestrator
+
 from orchestrator import (
     _validate_extraction,
     check_duplicate,
@@ -256,7 +258,9 @@ class TestValidateExtraction:
     def test_rejects_missing_required_key(self):
         payload = self._valid_payload()
         del payload["entry_requirements"]
-        with pytest.raises(ValueError, match="missing required key 'entry_requirements'"):
+        with pytest.raises(
+            ValueError, match="missing required key 'entry_requirements'"
+        ):
             _validate_extraction(payload)
 
     def test_rejects_wrong_type_for_string_field(self):
@@ -271,7 +275,9 @@ class TestValidateExtraction:
 
     def test_rejects_null_for_non_nullable_key(self):
         payload = self._valid_payload(entry_requirements=None)
-        with pytest.raises(ValueError, match="key 'entry_requirements' must not be null"):
+        with pytest.raises(
+            ValueError, match="key 'entry_requirements' must not be null"
+        ):
             _validate_extraction(payload)
 
     def test_rejects_bool_in_string_field(self):
@@ -279,6 +285,47 @@ class TestValidateExtraction:
         payload = self._valid_payload(prize=True)
         with pytest.raises(ValueError, match="key 'prize'.*expected str"):
             _validate_extraction(payload)
+
+
+class TestValidationContractMatchesSchema:
+    """The Python validator is derived from `_EXTRACTION_SCHEMA`, not restated.
+
+    A hand-maintained copy drifted from the schema once already: it required
+    `closing_date` and `entry_url`, which the schema treats as optional and
+    which no caller reads, so valid responses were rejected.
+    """
+
+    def test_required_keys_match_schema(self):
+        assert orchestrator._REQUIRED_EXTRACTION_KEYS == frozenset(
+            orchestrator._EXTRACTION_SCHEMA["required"]
+        )
+
+    def test_every_schema_property_is_validated(self):
+        assert set(orchestrator._EXTRACTION_FIELD_TYPES) == set(
+            orchestrator._EXTRACTION_SCHEMA["properties"]
+        )
+
+    def test_nullable_keys_are_the_ones_the_schema_allows_null(self):
+        expected = {
+            key
+            for key, prop in orchestrator._EXTRACTION_SCHEMA["properties"].items()
+            if "null"
+            in (prop["type"] if isinstance(prop["type"], list) else [prop["type"]])
+        }
+        assert orchestrator._NULLABLE_EXTRACTION_KEYS == expected
+
+    def test_optional_key_may_be_omitted(self):
+        # closing_date is a schema property but not required, so a response
+        # without it must validate.
+        payload = {
+            "prize": "Cash",
+            "entry_requirements": "",
+            "eligible": True,
+            "requires_purchase": False,
+            "has_complex_tie_breaker": False,
+            "reason": "",
+        }
+        assert _validate_extraction(payload) is payload
 
 
 class TestExtractAndClassifyValidation:
