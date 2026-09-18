@@ -9,6 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import avatar.tool_definitions as tool_definitions  # noqa: E402
 import avatar.tools as tools  # noqa: E402
 
 
@@ -297,6 +298,58 @@ class TestLookupProject:
         result = tools.lookup_project(name="issue-worm")
         assert result["found"] is False
 
+    def test_malformed_snapshot_file_does_not_raise(self, tmp_path, monkeypatch):
+        path = tmp_path / "github.json"
+        path.write_text("{invalid json", encoding="utf-8")
+        monkeypatch.setattr(tools, "GITHUB_SNAPSHOT_PATH", path)
+        result = tools.lookup_project(name="issue-worm")
+        assert result["found"] is False
+        assert "message" in result
+
+    def test_record_missing_name_is_skipped(self, tmp_path, monkeypatch):
+        records = [
+            {"description": "no name here", "url": "https://example.com/broken"},
+            {
+                "name": "issue-worm",
+                "description": "Multi-agent coder",
+                "url": "https://github.com/leonarduk/issue-worm",
+            },
+        ]
+        path = tmp_path / "github.json"
+        path.write_text(json.dumps(records), encoding="utf-8")
+        monkeypatch.setattr(tools, "GITHUB_SNAPSHOT_PATH", path)
+
+        result = tools.lookup_project(name="issue-worm")
+
+        assert result["found"] is True
+        assert result["project"]["name"] == "issue-worm"
+
+    def test_all_records_malformed_does_not_raise(self, tmp_path, monkeypatch):
+        records = [
+            {"description": "no name"},
+            "not-a-dict",
+            {"name": ""},
+            {"name": None},
+        ]
+        path = tmp_path / "github.json"
+        path.write_text(json.dumps(records), encoding="utf-8")
+        monkeypatch.setattr(tools, "GITHUB_SNAPSHOT_PATH", path)
+
+        result = tools.lookup_project(name="issue-worm")
+
+        assert result["found"] is False
+        assert "message" in result
+
+    def test_snapshot_not_a_list_does_not_raise(self, tmp_path, monkeypatch):
+        path = tmp_path / "github.json"
+        path.write_text(json.dumps({"not": "a list"}), encoding="utf-8")
+        monkeypatch.setattr(tools, "GITHUB_SNAPSHOT_PATH", path)
+
+        result = tools.lookup_project(name="issue-worm")
+
+        assert result["found"] is False
+        assert "message" in result
+
 
 class TestDispatch:
     def test_dispatches_known_tool(self):
@@ -313,8 +366,11 @@ class TestDispatch:
 
 
 class TestToolDefinitions:
+    def test_reexported_from_tools_module(self):
+        assert tools.TOOL_DEFINITIONS is tool_definitions.TOOL_DEFINITIONS
+
     def test_every_definition_is_strict_and_closed(self):
-        for tool in tools.TOOL_DEFINITIONS:
+        for tool in tool_definitions.TOOL_DEFINITIONS:
             function = tool["function"]
             assert function["strict"] is True
             params = function["parameters"]
