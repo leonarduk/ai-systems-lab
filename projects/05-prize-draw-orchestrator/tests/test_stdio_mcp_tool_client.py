@@ -11,6 +11,7 @@ which meant five of its six tests silently did nothing.
 from __future__ import annotations
 
 import sys
+import time
 
 import pytest
 
@@ -57,17 +58,14 @@ def test_unknown_tool_is_raised_as_mcp_tool_error(mock_mcp_server_path: str):
         client.call_tool("no_such_tool", {})
 
 
-# A server that fails before or during the handshake surfaces as the
-# ExceptionGroup the underlying anyio task group raises, NOT as the
-# MCPToolError the client wraps tool-level failures in — so a caller currently
-# has to catch both. Accept either rather than asserting the group
-# specifically: the looser form keeps passing once the client is fixed to wrap
-# these, instead of pinning the present gap in place.
+# A server that fails before or during the handshake fails inside the anyio
+# task group the mcp stdio client runs in, which raises an ExceptionGroup. The
+# client unwraps that, so callers only ever see MCPToolError.
 @pytest.mark.parametrize("mode", ["crash", "malformed"])
 def test_server_failing_before_handshake_raises(mock_mcp_server_path, mode):
     client = _client(mock_mcp_server_path, mode=mode)
 
-    with pytest.raises((MCPToolError, ExceptionGroup)):
+    with pytest.raises(MCPToolError):
         client.call_tool("echo", {"text": "hello"})
 
 
@@ -77,5 +75,47 @@ def test_missing_server_command_raises(tmp_path):
         args=[str(tmp_path / "does_not_exist.py")],
     )
 
-    with pytest.raises((MCPToolError, ExceptionGroup)):
+    with pytest.raises(MCPToolError):
         client.call_tool("echo", {"text": "hello"})
+
+
+def test_unparseable_output_with_open_pipe_times_out(mock_mcp_server_path):
+    # The "hang" server writes something the client cannot parse and then holds
+    # its stdout pipe open, so no reply to `initialize` ever arrives. Without a
+    # handshake timeout this call never returns; the assertion that matters is
+    # as much that the test finishes as that it raises.
+    timeout = 3.0
+    client = StdioMCPToolClient(
+        command=sys.executable,
+        args=[mock_mcp_server_path, "hang"],
+        timeout=timeout,
+    )
+
+    started = time.monotonic()
+    with pytest.raises(MCPToolError) as exc_info:
+        client.call_tool("echo", {"text": "hello"})
+    elapsed = time.monotonic() - started
+
+    assert "handshake" in str(exc_info.value)
+    # Generous headroom over `timeout` for process spawn and teardown, while
+    # still failing loudly if the timeout is not what ended the call.
+    assert elapsed < timeout + 20
+
+
+def test_tool_that_never_returns_times_out(mock_mcp_server_path):
+    # The handshake succeeds here; it is the tool call that never comes back,
+    # so this covers the second deadline rather than the handshake one.
+    timeout = 3.0
+    client = StdioMCPToolClient(
+        command=sys.executable,
+        args=[mock_mcp_server_path, "slow"],
+        timeout=timeout,
+    )
+
+    started = time.monotonic()
+    with pytest.raises(MCPToolError) as exc_info:
+        client.call_tool("echo", {"text": "hello"})
+    elapsed = time.monotonic() - started
+
+    assert "echo" in str(exc_info.value)
+    assert elapsed < timeout + 20

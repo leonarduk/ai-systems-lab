@@ -33,6 +33,13 @@ server is available, set `MCP_SERVER_COMMAND` / `MCP_SERVER_ARGS` to launch
 it and this client should work unmodified. All tests mock the protocol via
 `tests/fakes.py::FakeMCPToolClient`, so they never depend on a live server.
 
+Every failure mode of `StdioMCPToolClient` — a server that won't spawn, one
+that never finishes the handshake or never answers, or a tool that returns an
+error — is raised as `MCPToolError`, so callers only catch one exception type.
+The handshake and the tool call are each bounded by its `timeout` argument
+(30 seconds by default); without that bound, a server that writes something
+unparseable and keeps its stdout pipe open would stall a polling run forever.
+
 ## How it works
 
 1. `search_draws` returns candidate draws matching your configured criteria
