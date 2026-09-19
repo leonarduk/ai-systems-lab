@@ -353,6 +353,160 @@ def test_build_hosted_rows_direct_call_rejects_invalid_output_price():
 # --------------------------------------------------------------------------
 
 
+_CLAUDE_PRICING_PAGE = (
+    "<h2>Claude Opus 5</h2><td>$5 / MTok</td><td>$25 / MTok</td>"
+    "<h2>Claude Sonnet 5</h2><td>$2 / MTok</td><td>$10 / MTok</td>"
+    "<h2>Claude Haiku 4.5</h2><td>$1 / MTok</td><td>$5 / MTok</td>"
+)
+
+
+def _pricing_file_with_extra_claude_model(tmp_path: Path) -> Path:
+    path = tmp_path / "pricing.json"
+    path.write_text(
+        json.dumps(
+            {
+                "as_of": "2020-01-01",
+                "providers": {
+                    "claude": {
+                        "display_name": "Anthropic Claude",
+                        "models": {
+                            "opus-5": {
+                                "display_name": "Claude Opus 5",
+                                "input_per_million": 99.0,
+                                "output_per_million": 99.0,
+                            },
+                            # Dated snapshot in the shipped file that the
+                            # scrape does not produce.
+                            "sonnet-5-2026-09": {
+                                "display_name": "Claude Sonnet 5 (2026-09)",
+                                "input_per_million": 3.0,
+                                "output_per_million": 15.0,
+                            },
+                        },
+                    },
+                    "deepseek": {"display_name": "DeepSeek", "models": {}},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_fetch_claude_pricing_keeps_models_it_did_not_scrape(
+    tmp_path: Path, monkeypatch
+):
+    # Assigning a fresh "models" dict drops every key the scrape did not
+    # produce. The shipped file carries sonnet-5-2026-09, and a user may
+    # have added their own entries; one --update-pricing would delete
+    # them with no warning.
+    path = _pricing_file_with_extra_claude_model(tmp_path)
+    monkeypatch.setattr(
+        m.urllib.request,
+        "urlopen",
+        lambda *a, **k: _FakeHTTPResponse(_CLAUDE_PRICING_PAGE.encode("utf-8")),
+    )
+    assert m.fetch_claude_pricing(path) is True
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    models = data["providers"]["claude"]["models"]
+    assert models["sonnet-5-2026-09"]["input_per_million"] == 3.0
+    # Scraped models are updated in place, not merely added alongside.
+    assert models["opus-5"]["input_per_million"] == 5.0
+    assert models["opus-5"]["output_per_million"] == 25.0
+    # Other providers untouched.
+    assert "deepseek" in data["providers"]
+
+
+def test_fetch_claude_pricing_writes_the_shipped_model_keys(
+    tmp_path: Path, monkeypatch
+):
+    # The keys have to match what pricing.json and users' selected_models
+    # already use. Deriving them from display names ("claude-opus-5",
+    # "claude-haiku-45") would add a parallel set and orphan the originals.
+    path = _pricing_file_with_extra_claude_model(tmp_path)
+    monkeypatch.setattr(
+        m.urllib.request,
+        "urlopen",
+        lambda *a, **k: _FakeHTTPResponse(_CLAUDE_PRICING_PAGE.encode("utf-8")),
+    )
+    m.fetch_claude_pricing(path)
+    models = json.loads(path.read_text(encoding="utf-8"))["providers"]["claude"][
+        "models"
+    ]
+    assert {"opus-5", "sonnet-5", "haiku-4.5"} <= set(models)
+
+
+@pytest.mark.parametrize(
+    "page, why",
+    [
+        # Output below input: the regex paired a model with the wrong
+        # number, or picked up the next model's input rate.
+        (
+            "<h2>Claude Opus 5</h2>$25 / MTok $5 / MTok"
+            "<h2>Claude Sonnet 5</h2>$10 / MTok $2 / MTok",
+            "inverted",
+        ),
+        # Equal: almost certainly the same figure matched twice.
+        (
+            "<h2>Claude Opus 5</h2>$5 / MTok $5 / MTok"
+            "<h2>Claude Sonnet 5</h2>$2 / MTok $2 / MTok",
+            "equal",
+        ),
+        # Out of range: a seat price or an annual figure.
+        (
+            "<h2>Claude Opus 5</h2>$5000 / MTok $25000 / MTok"
+            "<h2>Claude Sonnet 5</h2>$2 / MTok $10 / MTok",
+            "too large",
+        ),
+    ],
+)
+def test_fetch_claude_pricing_refuses_an_implausible_pair(
+    tmp_path: Path, monkeypatch, capsys, page, why
+):
+    # The docstring promises the shipped values are left in place rather
+    # than clobbered with garbage on a page change. Returning False only
+    # when *nothing* parses does not deliver that: a reflowed page that
+    # parses to the wrong numbers is the more likely failure, and the
+    # more damaging one, since every figure the tool prints derives
+    # from these.
+    path = _pricing_file_with_extra_claude_model(tmp_path)
+    before = path.read_text(encoding="utf-8")
+    monkeypatch.setattr(
+        m.urllib.request,
+        "urlopen",
+        lambda *a, **k: _FakeHTTPResponse(page.encode("utf-8")),
+    )
+    assert m.fetch_claude_pricing(path) is False
+    assert path.read_text(encoding="utf-8") == before
+    assert "implausible" in capsys.readouterr().err
+
+
+def test_fetch_claude_pricing_accepts_the_real_published_rates(
+    tmp_path: Path, monkeypatch
+):
+    # Guard against a sanity check so tight it rejects reality: the
+    # current published rates must pass it.
+    path = _pricing_file_with_extra_claude_model(tmp_path)
+    monkeypatch.setattr(
+        m.urllib.request,
+        "urlopen",
+        lambda *a, **k: _FakeHTTPResponse(_CLAUDE_PRICING_PAGE.encode("utf-8")),
+    )
+    assert m.fetch_claude_pricing(path) is True
+    models = json.loads(path.read_text(encoding="utf-8"))["providers"]["claude"][
+        "models"
+    ]
+    assert (
+        models["sonnet-5"]["input_per_million"],
+        models["sonnet-5"]["output_per_million"],
+    ) == (2.0, 10.0)
+    assert (
+        models["haiku-4.5"]["input_per_million"],
+        models["haiku-4.5"]["output_per_million"],
+    ) == (1.0, 5.0)
+
+
 def test_load_shipped_pricing_file_is_well_formed():
     pricing = m.load_pricing()
     assert "providers" in pricing

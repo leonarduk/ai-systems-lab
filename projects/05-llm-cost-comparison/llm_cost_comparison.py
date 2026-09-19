@@ -211,6 +211,27 @@ def _extract_price(text: str, pattern: str) -> Optional[float]:
 CLAUDE_PRICING_URL = "https://docs.anthropic.com/en/docs/about-claude/pricing"
 
 
+# Loosest bounds that still catch a mis-parse. Real per-million rates have
+# stayed inside this range across every provider in pricing.json.
+MIN_PLAUSIBLE_PRICE_PER_MILLION = 0.01
+MAX_PLAUSIBLE_PRICE_PER_MILLION = 1000.0
+
+
+def _plausible_price_pair(input_price: float, output_price: float) -> bool:
+    """Sanity-check a scraped (input, output) per-million-token pair.
+
+    Output has always cost strictly more than input for these models, so
+    an equal or inverted pair means the regex matched the wrong number
+    rather than that a price moved.
+    """
+    for price in (input_price, output_price):
+        if not (
+            MIN_PLAUSIBLE_PRICE_PER_MILLION <= price <= MAX_PLAUSIBLE_PRICE_PER_MILLION
+        ):
+            return False
+    return output_price > input_price
+
+
 def fetch_claude_pricing(
     path: Path = DEFAULT_PRICING_PATH, timeout: float = 10.0
 ) -> bool:
@@ -270,6 +291,27 @@ def fetch_claude_pricing(
 
     if None in (opus_input, opus_output, sonnet_input, sonnet_output):
         return False
+    # A loose regex over reflowing HTML can pair the right model with the
+    # wrong number — a seat price, a discount, or the next model's input
+    # rate. Every Claude model has cost more per output token than per
+    # input token, by a wide margin, so a pair that fails that is a
+    # mis-parse rather than a price change, and writing it would poison
+    # every figure the tool prints.
+    for label, in_price, out_price in (
+        ("opus", opus_input, opus_output),
+        ("sonnet", sonnet_input, sonnet_output),
+        ("haiku", haiku_input, haiku_output),
+    ):
+        if in_price is None or out_price is None:
+            continue
+        if not _plausible_price_pair(in_price, out_price):
+            print(
+                f"Warning: implausible scraped {label} pricing "
+                f"(${in_price}/${out_price} per Mtok) — leaving "
+                f"{path} unchanged.",
+                file=sys.stderr,
+            )
+            return False
 
     # Read existing file directly (not via load_pricing, to avoid recursion).
     try:
@@ -297,10 +339,14 @@ def fetch_claude_pricing(
             "output_per_million": haiku_output,
         }
 
-    pricing.setdefault("providers", {})["claude"] = {
-        "display_name": "Anthropic Claude",
-        "models": claude_models,
-    }
+    # Merge, do not replace. Assigning a fresh "models" dict drops every
+    # model the scrape did not produce — the shipped file also carries
+    # sonnet-5-2026-09, and a user may have added their own entries. The
+    # DeepSeek fetcher gets away with replacing because its four keys are
+    # exactly what it writes; that is not true here.
+    provider = pricing.setdefault("providers", {}).setdefault("claude", {})
+    provider["display_name"] = "Anthropic Claude"
+    provider.setdefault("models", {}).update(claude_models)
     pricing["as_of"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     pricing["source_claude"] = CLAUDE_PRICING_URL
 
