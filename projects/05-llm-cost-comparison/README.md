@@ -113,11 +113,11 @@ How much the two differ depends on where the endpoint lives:
 
 The current code only reports wall-clock time. To get generation-only timing
 for a hosted model, you'd need to instrument the server response — for
-example, OpenAI's API surfaces a `time_per_output_token` value in its
-response headers, which this script does not currently read or display. If
-you need that figure, capture it yourself from the raw response (or the
-provider's usage dashboard) rather than relying on the benchmark's
-wall-clock number.
+example, some OpenAI-compatible servers expose timing metadata (for example,
+in response headers or in the final streaming chunk), which this script does
+not currently read or display. If you need that figure, capture it yourself
+from the raw response (or the provider's usage dashboard) rather than
+relying on the benchmark's wall-clock number.
 
 ## Traffic scenarios (workload presets)
 
@@ -173,7 +173,13 @@ requests/day and token counts behind each one.
     alike — is displayed and exported in GBP** whenever you choose GBP, not
     just the local electricity figure.
   - The non-interactive config still takes a single `power_watts` — pick
-    whichever basis applies to your situation.
+    whichever basis applies to your situation. Unlike the interactive flow,
+    it models **only one** power basis per run: it can't show "machine
+    already on for other reasons" (extra draw) and "machine only powered on
+    to run this" (whole-system draw) side by side. If you want both bases
+    compared in one table, run the script twice with two separate configs —
+    one with `power_watts` set to the extra-draw figure and one with it set
+    to the whole-system figure — and compare the two exports.
 - **When local can't keep up**: if the workload needs more compute-hours per
   month than actually exist in a month (a slow local setup can't keep up
   with a high-volume workload in real time), the *whole scenario* — local
