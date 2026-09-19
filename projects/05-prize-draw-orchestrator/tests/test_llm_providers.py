@@ -121,9 +121,7 @@ class TestDeepSeekProvider:
     def test_generate_json_handles_fenced_content(self):
         mock_response = Mock()
         mock_response.json.return_value = {
-            "choices": [
-                {"message": {"content": '```json\n{"eligible": true}\n```'}}
-            ]
+            "choices": [{"message": {"content": '```json\n{"eligible": true}\n```'}}]
         }
         mock_response.raise_for_status = Mock()
 
@@ -189,18 +187,14 @@ class TestBuildLLMProvider:
         clear LLMProviderError naming DEEPSEEK_API_KEY (not a KeyError)."""
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         with pytest.raises(LLMProviderError, match="DEEPSEEK_API_KEY"):
-            build_llm_provider(
-                FakeConfig(llm_provider="deepseek", deepseek_api_key="")
-            )
+            build_llm_provider(FakeConfig(llm_provider="deepseek", deepseek_api_key=""))
 
     def test_claude_missing_api_key_raises(self, monkeypatch):
         """Selecting claude with no config key and no env var must raise a
         clear LLMProviderError naming ANTHROPIC_API_KEY (not a KeyError)."""
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         with pytest.raises(LLMProviderError, match="ANTHROPIC_API_KEY"):
-            build_llm_provider(
-                FakeConfig(llm_provider="claude", anthropic_api_key="")
-            )
+            build_llm_provider(FakeConfig(llm_provider="claude", anthropic_api_key=""))
 
     def test_deepseek_falls_back_to_env_var(self, monkeypatch):
         """When config has no key but DEEPSEEK_API_KEY is set, the env var is used."""
@@ -219,3 +213,74 @@ class TestBuildLLMProvider:
         )
         assert isinstance(provider, ClaudeProvider)
         assert provider.api_key == "env-secret"
+
+    def test_deepseek_config_key_takes_precedence_over_env_var(self, monkeypatch):
+        """When both config and env var are set, the config value wins."""
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "env-key")
+        provider = build_llm_provider(
+            FakeConfig(llm_provider="deepseek", deepseek_api_key="config-key")
+        )
+        assert isinstance(provider, DeepSeekProvider)
+        assert provider.api_key == "config-key"
+
+    def test_claude_config_key_takes_precedence_over_env_var(self, monkeypatch):
+        """When both config and env var are set, the config value wins."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "env-key")
+        provider = build_llm_provider(
+            FakeConfig(llm_provider="claude", anthropic_api_key="config-key")
+        )
+        assert isinstance(provider, ClaudeProvider)
+        assert provider.api_key == "config-key"
+
+
+class TestParseJsonObjectEdgeCases:
+    """Edge cases for the JSON extraction helpers introduced in PR #237.
+
+    These tests pin the *current* behavior of the fenced/prose/brace-slicing
+    heuristics. They intentionally assert that ambiguous inputs raise
+    ``LLMProviderError`` rather than silently mis-parsing, so any future
+    change to the extraction logic must update these tests explicitly.
+    """
+
+    def _provider(self):
+        # OllamaProvider is the simplest concrete provider; its generate_json
+        # delegates to the shared _parse_json_object helper.
+        return OllamaProvider()
+
+    def _mock_response(self, content):
+        mock_response = Mock()
+        mock_response.json.return_value = {"response": content}
+        mock_response.raise_for_status = Mock()
+        return mock_response
+
+    def test_empty_json_fenced_block_raises(self):
+        """A ```json fence with empty inner content must raise, not return {}."""
+        mock_response = self._mock_response("```json\n```")
+        with patch("llm_providers.requests.post", return_value=mock_response):
+            with pytest.raises(LLMProviderError):
+                self._provider().generate_json("prompt")
+
+    def test_empty_bare_fenced_block_raises(self):
+        """A bare ``` fence with empty inner content must raise, not return {}."""
+        mock_response = self._mock_response("```\n```")
+        with patch("llm_providers.requests.post", return_value=mock_response):
+            with pytest.raises(LLMProviderError):
+                self._provider().generate_json("prompt")
+
+    def test_multiple_json_objects_raises(self):
+        """Two JSON objects in one response must raise rather than pick one."""
+        mock_response = self._mock_response(
+            '{"eligible": true} but note {"x": 1} is unrelated'
+        )
+        with patch("llm_providers.requests.post", return_value=mock_response):
+            with pytest.raises(LLMProviderError):
+                self._provider().generate_json("prompt")
+
+    def test_trailing_brace_in_prose_raises(self):
+        """A valid object followed by prose containing a `}` must raise."""
+        mock_response = self._mock_response(
+            '{"eligible": true} trailing text with a } brace'
+        )
+        with patch("llm_providers.requests.post", return_value=mock_response):
+            with pytest.raises(LLMProviderError):
+                self._provider().generate_json("prompt")
