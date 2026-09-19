@@ -296,6 +296,100 @@ class TestBuildSnapshot:
 
         assert records[0]["pushed_at"] == "2026-08-20"
 
+    def test_deterministic_output(self, monkeypatch, tmp_path):
+        """build_snapshot() must produce byte-identical output on repeated
+        runs with the same input. This exercises the full build_snapshot()
+        path against the raw HTTP layer (like TestPrivacyGuardrail) so that
+        a regression in sorting or dict ordering would actually be caught.
+
+        The mocked dataset deliberately uses repo names whose alphabetical
+        order differs from insertion order, and languages whose byte counts
+        tie, to expose any non-deterministic ordering."""
+        repos = [
+            make_repo("zeta-repo"),
+            make_repo("alpha-repo"),
+            make_repo("mid-repo"),
+            make_repo("beta-repo"),
+        ]
+        languages = {"Python": 100, "Shell": 500, "Dockerfile": 100}
+
+        def fake_get(url, headers, params=None, timeout=None):
+            if url.endswith("/repos") and params["page"] == 1:
+                return FakeResponse(200, json_data=repos)
+            if url.endswith("/repos"):
+                return FakeResponse(200, json_data=[])
+            if url.endswith("/languages"):
+                return FakeResponse(200, json_data=languages)
+            if url.endswith("/readme"):
+                return FakeResponse(200, text="# Title\n\nBody text.")
+            raise AssertionError(f"unexpected URL in test: {url}")
+
+        monkeypatch.setattr(snap.requests, "get", fake_get)
+
+        projects_md = tmp_path / "projects.md"
+        projects_md.write_text(
+            "## alpha-repo\n\nAlpha note.\n\n## zeta-repo\n\nZeta note.\n",
+            encoding="utf-8",
+        )
+
+        first = snap.build_snapshot("leonarduk", projects_md_path=projects_md)
+        second = snap.build_snapshot("leonarduk", projects_md_path=projects_md)
+
+        assert first == second
+
+        first_path = tmp_path / "first.json"
+        second_path = tmp_path / "second.json"
+        snap.write_snapshot(first, first_path)
+        snap.write_snapshot(second, second_path)
+
+        assert first_path.read_bytes() == second_path.read_bytes()
+
+    def test_readme_truncation_and_stripping(self, monkeypatch, tmp_path):
+        """README excerpts must be truncated to 1200 chars with markdown
+        formatting and badge images stripped. This exercises the full
+        build_snapshot() -> fetch_repos() path against the raw HTTP layer,
+        mirroring TestPrivacyGuardrail, so a regression in the stripping or
+        truncation logic would actually be caught here."""
+        repos = [make_repo("noisy-repo")]
+
+        long_body = " ".join(f"word{i}" for i in range(400))
+        readme_text = (
+            "![build](https://img.shields.io/badge/build-passing.svg)\n"
+            "![coverage](https://img.shields.io/badge/coverage-100%25.svg)\n"
+            "# Project Title\n\n"
+            "**Bold intro** and [a link](https://example.com) and `code`.\n\n"
+            f"{long_body}\n"
+        )
+        assert len(readme_text) > 1200
+
+        def fake_get(url, headers, params=None, timeout=None):
+            if url.endswith("/repos") and params["page"] == 1:
+                return FakeResponse(200, json_data=repos)
+            if url.endswith("/repos"):
+                return FakeResponse(200, json_data=[])
+            if url.endswith("/languages"):
+                return FakeResponse(200, json_data={})
+            if url.endswith("/readme"):
+                return FakeResponse(200, text=readme_text)
+            raise AssertionError(f"unexpected URL in test: {url}")
+
+        monkeypatch.setattr(snap.requests, "get", fake_get)
+
+        records = snap.build_snapshot(
+            "leonarduk", projects_md_path=tmp_path / "projects.md"
+        )
+
+        assert len(records) == 1
+        excerpt = records[0]["readme_excerpt"]
+
+        assert len(excerpt) <= 1200
+        assert "**" not in excerpt
+        assert "[" not in excerpt
+        assert "]" not in excerpt
+        assert "#" not in excerpt
+        assert "img.shields.io" not in excerpt
+        assert "badge" not in excerpt
+
 
 class TestWriteSnapshot:
     def test_deterministic_across_two_runs(self, tmp_path):
