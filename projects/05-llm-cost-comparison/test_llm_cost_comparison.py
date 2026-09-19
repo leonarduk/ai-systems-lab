@@ -9,6 +9,7 @@ interactive functions are thin wrappers over the tested pure functions.
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 import sys
 import threading
@@ -192,45 +193,72 @@ def test_build_local_row_flags_when_throughput_cannot_keep_up_in_real_time():
     assert row.monthly_cost > 0
 
 
-def test_build_local_row_scales_cost_by_machine_count_when_infeasible():
-    # A workload needing more than HOURS_PER_MONTH of compute on one machine
-    # must be costed as a fleet of ceil(hours_needed / HOURS_PER_MONTH)
-    # machines, each running up to HOURS_PER_MONTH hours — not as a single
-    # machine running for more hours than exist in a month (which would
-    # under-estimate the true cost of owning hardware for a multi-month
-    # workload).
-    #
-    # 500 req/day * 4800 tokens/req * 30 days = 72,000,000 tokens/month.
-    # At 10 tok/s, that needs 72e6/(10*3600) = 2000 hours — 720 exist in a
-    # month, so ceil(2000/720) = 3 machines are needed.
-    w = m.Workload(requests_per_day=500, avg_input_tokens=4000, avg_output_tokens=800)
+# A workload needing more compute-hours than a month contains, reused by
+# every fleet test below so they all describe the same scenario:
+#   500 req/day * 4800 tokens/req * 30 days = 72,000,000 tokens/month
+#   at 10 tok/s that is 72e6 / (10 * 3600) = 2000 machine-hours
+#   720 hours exist in a month, so ceil(2000 / 720) = 3 machines
+# Note 3 * 720 = 2160 > 2000: the fleet has 160 hours of spare capacity, and
+# nothing may be billed for it.
+_FLEET_WORKLOAD = dict(
+    requests_per_day=500, avg_input_tokens=4000, avg_output_tokens=800
+)
+_FLEET_TOKENS = 72_000_000
+_FLEET_HOURS = 2000.0
+_FLEET_MACHINES = 3
+
+
+def test_fleet_fixture_matches_its_stated_arithmetic():
+    # The expected costs below are hand-computed from these numbers, so if
+    # the fixture drifts the other tests would silently assert the wrong
+    # thing. Pin it.
+    w = m.Workload(**_FLEET_WORKLOAD)
+    assert w.monthly_total_tokens == _FLEET_TOKENS
+    assert m.hours_needed_for_workload(w.monthly_total_tokens, 10) == pytest.approx(
+        _FLEET_HOURS
+    )
+    assert math.ceil(_FLEET_HOURS / m.HOURS_PER_MONTH) == _FLEET_MACHINES
+    assert _FLEET_MACHINES * m.HOURS_PER_MONTH > _FLEET_HOURS
+
+
+def test_build_local_row_charges_variable_cost_for_hours_needed_not_fleet_capacity():
+    # "existing" is a purely variable mode: the only cost is electricity
+    # while generating. Three machines for 667 hours each burn exactly the
+    # same power as one machine for 2000 hours, so the bill is for 2000
+    # machine-hours — NOT 3 * 720 = 2160, which would charge for 160 hours
+    # of idle spare capacity nobody uses.
     row = m.build_local_row(
-        w,
+        m.Workload(**_FLEET_WORKLOAD),
         tokens_per_sec=10,
         mode="existing",
         power_watts=1000,  # 1 kW for easy math
         electricity_rate_per_kwh=0.10,
     )
     assert row.feasible is False
-    # Per-machine cost: 1 kW * $0.10/kWh * 720 hr = $72.00
-    # Fleet cost: 3 machines * $72.00 = $216.00
-    assert row.monthly_cost == pytest.approx(216.0)
-    # $/1M tokens is the same real per-token rate as a single machine would
-    # have: $216 / 72M tokens * 1M = $3.00/1M.
-    assert row.cost_per_million_tokens == pytest.approx(3.0)
+    # 1 kW * $0.10/kWh * 2000 hr = $200.00, not 3 * (1 * 0.10 * 720) = $216.
+    assert row.monthly_cost == pytest.approx(200.0)
+    assert row.cost_per_million_tokens == pytest.approx(200.0 / 72.0)
     assert "3 machines" in row.notes
 
 
-def test_build_local_row_owned_mode_scales_hardware_amortization_by_machine_count():
-    # The fixed hardware amortization component must also be multiplied by
-    # the machine count — otherwise a multi-month workload would look
-    # artificially cheap because only one card's amortization was charged.
-    #
-    # 500 req/day * 4800 tokens/req * 30 days = 72,000,000 tokens/month.
-    # At 10 tok/s, that needs 2000 hours -> ceil(2000/720) = 3 machines.
-    w = m.Workload(requests_per_day=500, avg_input_tokens=4000, avg_output_tokens=800)
+def test_build_local_row_rent_charges_hours_needed_not_fleet_capacity():
+    # Renting is billed by the hour, so a fleet delivering the workload
+    # rents 2000 GPU-hours in total. Capping each machine at 720 hours and
+    # multiplying by 3 would invoice 2160 hours — inflating the rented-cloud
+    # option by 8% here, and by nearly 2x just past the 720-hour boundary.
     row = m.build_local_row(
-        w,
+        m.Workload(**_FLEET_WORKLOAD), tokens_per_sec=10, mode="rent", hourly_rate=2.0
+    )
+    assert row.feasible is False
+    assert row.monthly_cost == pytest.approx(2.0 * _FLEET_HOURS)  # $4000, not $4320
+
+
+def test_build_local_row_owned_mode_scales_hardware_amortization_by_machine_count():
+    # The fixed hardware amortization must be multiplied by the machine
+    # count — charging one card's amortization for a three-card fleet is
+    # the under-estimate issue #52 is about.
+    row = m.build_local_row(
+        m.Workload(**_FLEET_WORKLOAD),
         tokens_per_sec=10,
         mode="own",
         hardware_cost=3600,  # $100/month amortized per machine
@@ -239,8 +267,131 @@ def test_build_local_row_owned_mode_scales_hardware_amortization_by_machine_coun
         electricity_rate_per_kwh=0.0,
     )
     assert row.feasible is False
-    # 3 machines * $100/month fixed = $300/month
-    assert row.monthly_cost == pytest.approx(300.0)
+    assert row.monthly_cost == pytest.approx(300.0)  # 3 machines * $100/month
+
+
+def test_build_local_row_owned_mode_splits_fixed_and_variable_correctly():
+    # Both components at once: fixed scales by machines, variable by hours.
+    row = m.build_local_row(
+        m.Workload(**_FLEET_WORKLOAD),
+        tokens_per_sec=10,
+        mode="own",
+        hardware_cost=3600,
+        lifetime_years=3,
+        power_watts=1000,
+        electricity_rate_per_kwh=0.10,
+    )
+    # 3 * $100 amortization + 1 kW * $0.10 * 2000 hr = $300 + $200 = $500.
+    # Scaling the whole per-machine cost instead would give 3 * (100 + 72)
+    # = $516, over-charging the electricity.
+    assert row.monthly_cost == pytest.approx(500.0)
+
+
+def test_build_local_row_always_on_scales_idle_draw_but_not_generation():
+    # A 24/7 server's idle draw is owed for all 720 hours per machine, so it
+    # triples with the fleet. The extra draw while generating is variable,
+    # so it is charged once for the 2000 machine-hours of actual work.
+    row = m.build_local_row(
+        m.Workload(**_FLEET_WORKLOAD),
+        tokens_per_sec=10,
+        mode="always_on",
+        idle_watts=100,
+        extra_watts=900,
+        electricity_rate_per_kwh=0.10,
+    )
+    idle = _FLEET_MACHINES * 0.1 * 0.10 * m.HOURS_PER_MONTH  # $21.60
+    generation = 0.9 * 0.10 * _FLEET_HOURS  # $180.00
+    assert row.monthly_cost == pytest.approx(idle + generation)  # $201.60
+
+
+@pytest.mark.parametrize(
+    "mode, kwargs",
+    [
+        ("existing", dict(power_watts=1000, electricity_rate_per_kwh=0.10)),
+        ("rent", dict(hourly_rate=2.0)),
+    ],
+)
+def test_purely_variable_modes_keep_the_same_rate_per_million(mode, kwargs):
+    # For modes with no fixed component, $/1M is a property of the hardware
+    # and the tariff, not of how big the workload is. A feasible run and an
+    # infeasible three-machine run at the same tok/s must price identically.
+    small = m.build_local_row(
+        m.Workload(requests_per_day=10, avg_input_tokens=4000, avg_output_tokens=800),
+        tokens_per_sec=10,
+        mode=mode,
+        **kwargs,
+    )
+    fleet = m.build_local_row(
+        m.Workload(**_FLEET_WORKLOAD), tokens_per_sec=10, mode=mode, **kwargs
+    )
+    assert small.feasible is True
+    assert fleet.feasible is False
+    assert fleet.cost_per_million_tokens == pytest.approx(small.cost_per_million_tokens)
+
+
+def test_owned_mode_rate_per_million_rises_with_the_fleet():
+    # The counterpart: with a fixed cost per machine, the third card's
+    # amortization has to be carried by the tokens. A model that kept $/1M
+    # flat here would be hiding exactly what issue #52 asks to surface.
+    common = dict(
+        tokens_per_sec=10,
+        mode="own",
+        hardware_cost=3600,
+        lifetime_years=3,
+        power_watts=1000,
+        electricity_rate_per_kwh=0.10,
+    )
+    # Same tokens/hour ratio, but small enough for one machine.
+    small = m.build_local_row(
+        m.Workload(requests_per_day=100, avg_input_tokens=4000, avg_output_tokens=800),
+        **common,
+    )
+    fleet = m.build_local_row(m.Workload(**_FLEET_WORKLOAD), **common)
+    assert small.feasible is True
+    assert fleet.feasible is False
+    assert fleet.cost_per_million_tokens < small.cost_per_million_tokens
+
+
+def test_build_local_row_uses_one_machine_exactly_at_the_month_boundary():
+    # 180 req/day * 4800 tokens * 30 = 25,920,000 tokens; at 10 tok/s that
+    # is exactly HOURS_PER_MONTH. ceil() must not round this up to 2 — the
+    # max(1, ...) and the <= in `feasible` both sit on this edge.
+    w = m.Workload(requests_per_day=180, avg_input_tokens=4000, avg_output_tokens=800)
+    assert m.hours_needed_for_workload(w.monthly_total_tokens, 10) == pytest.approx(
+        m.HOURS_PER_MONTH
+    )
+    row = m.build_local_row(w, tokens_per_sec=10, mode="rent", hourly_rate=2.0)
+    assert row.feasible is True
+    assert row.monthly_cost == pytest.approx(2.0 * m.HOURS_PER_MONTH)
+
+
+def test_build_local_row_costs_the_full_workload_not_just_what_one_machine_makes():
+    # $/1M is computed against the workload's full monthly total, which the
+    # fleet does deliver. Dividing by one machine's 720 hours of output
+    # would report a rate for tokens the user never asked for.
+    row = m.build_local_row(
+        m.Workload(**_FLEET_WORKLOAD),
+        tokens_per_sec=10,
+        mode="rent",
+        hourly_rate=2.0,
+    )
+    assert row.cost_per_million_tokens == pytest.approx(
+        row.monthly_cost / _FLEET_TOKENS * 1_000_000
+    )
+
+
+def test_build_local_row_rejects_a_zero_token_workload():
+    # ceil(0 / 720) is 0, so there is no max(1, ...) floor on the machine
+    # count: a zero-token workload has no hours to cost and is rejected
+    # downstream by cost_per_million_tokens. Clamping to one machine would
+    # only have produced a $0 row for a workload that does not exist.
+    with pytest.raises(ValueError, match="monthly_total_tokens must be > 0"):
+        m.build_local_row(
+            m.Workload(requests_per_day=0, avg_input_tokens=0, avg_output_tokens=0),
+            tokens_per_sec=10,
+            mode="rent",
+            hourly_rate=2.0,
+        )
 
 
 def test_build_local_row_no_warning_when_throughput_is_sufficient():

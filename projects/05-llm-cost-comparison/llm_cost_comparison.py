@@ -633,73 +633,93 @@ def build_local_row(
     ``hours_needed`` is how long this workload's tokens would take to
     generate at ``tokens_per_sec`` on a single machine. When that exceeds
     ``HOURS_PER_MONTH`` (a real month only has 720 hours), one machine
-    physically cannot produce the whole workload in real time — but running
-    it flat-out, 24/7, all month, *is* a real, payable scenario (the machine
-    simply isn't idle). To actually deliver the full workload within a
-    month, ``num_machines = ceil(hours_needed / HOURS_PER_MONTH)`` machines
-    would be needed, each running up to ``HOURS_PER_MONTH`` hours. The
-    per-machine cost is therefore computed for ``effective_hours`` (capped
-    at ``HOURS_PER_MONTH``) and then multiplied by ``num_machines``, so the
-    total reflects the real cost of the hardware fleet required to produce
-    the workload — not a straight-line extrapolation past hours that don't
-    exist in a month on a single card (which would under-estimate the true
-    cost of owning hardware for a multi-month workload).
+    physically cannot deliver the workload within the month, so the row is
+    costed as a fleet of ``num_machines = ceil(hours_needed /
+    HOURS_PER_MONTH)`` machines sharing the load. That is what issue #52
+    asks for: a single card billed for more hours than a month contains
+    under-states what owning the hardware really costs.
 
-    ``cost_per_million_tokens`` is computed against the tokens actually
-    produced (``tokens_per_sec * 3600 * effective_hours * num_machines``),
-    which equals the workload's full requested total when infeasible, so
-    the $/1M rate stays the same real, hours-independent per-token figure
-    either way. ``feasible`` still answers "can a single machine fully
-    replace hosted for this workload in real time", and infeasible rows are
-    still never ranked as "cheapest" (see ``render_table``).
+    The fleet's cost splits along the same fixed/variable line the
+    ``local_monthly_cost_*`` helpers already draw, and the two scale
+    differently:
+
+    * **Variable** costs — electricity while generating, per-hour GPU
+      rental — accrue per *machine-hour*, and the fleet's total is
+      ``hours_needed`` however it is divided between machines. Three
+      machines for 667 hours each costs the same electricity as one
+      machine for 2000 hours. So these are charged on the uncapped
+      ``hours_needed``, not on ``HOURS_PER_MONTH`` per machine.
+    * **Fixed** costs — hardware amortization, and a 24/7 server's idle
+      draw — are owed once per machine per month whether or not it is
+      busy, so these multiply by ``num_machines``.
+
+    Both are expressed by scaling the *fixed* input (``hardware_cost``,
+    ``idle_watts``) by ``num_machines`` and passing the fleet's total
+    machine-hours as the hours, which keeps a single implementation of each
+    cost model rather than a second one here.
+
+    Charging ``HOURS_PER_MONTH`` per machine instead would bill for the
+    fleet's spare capacity: ``ceil(2000 / 720) = 3`` machines can run 2160
+    machine-hours but only 2000 are needed, so a rented fleet would be
+    over-charged by 8% for hours nobody rents — and by nearly 2x at
+    ``hours_needed = 721``. That is the same species of misleading
+    comparison as the under-estimate, in the other direction.
+
+    ``cost_per_million_tokens`` is computed against the workload's full
+    monthly total, which the fleet does deliver. It is therefore unchanged
+    by machine count for the purely variable modes (``existing``,
+    ``rent``), and rises with it for ``own`` and ``always_on``, where each
+    additional machine adds a fixed cost that more tokens have to carry.
+    That rise is the honest answer to the issue, not a defect.
+
+    ``feasible`` still answers the narrower question "can a *single*
+    machine keep up with this workload in real time", and infeasible rows
+    are still never ranked as "cheapest" (see ``render_table``).
     """
     hours_needed = hours_needed_for_workload(
         workload.monthly_total_tokens, tokens_per_sec
     )
     feasible = hours_needed <= HOURS_PER_MONTH
-    effective_hours = min(hours_needed, HOURS_PER_MONTH)
-    num_machines = max(1, math.ceil(hours_needed / HOURS_PER_MONTH))
+    num_machines = math.ceil(hours_needed / HOURS_PER_MONTH)
     if mode == "own":
-        per_machine_cost = local_monthly_cost_owned(
-            hardware_cost,
+        monthly_cost = local_monthly_cost_owned(
+            hardware_cost * num_machines,
             lifetime_years,
             power_watts,
             electricity_rate_per_kwh,
-            effective_hours,
+            hours_needed,
         )
-        monthly_cost = per_machine_cost * num_machines
         name = name or "Local (buy hardware)"
     elif mode == "existing":
-        per_machine_cost = local_monthly_cost_existing_hardware(
-            power_watts, electricity_rate_per_kwh, effective_hours
+        monthly_cost = local_monthly_cost_existing_hardware(
+            power_watts, electricity_rate_per_kwh, hours_needed
         )
-        monthly_cost = per_machine_cost * num_machines
         name = name or "Local (already-on PC)"
     elif mode == "rent":
-        per_machine_cost = local_monthly_cost_rented(hourly_rate, effective_hours)
-        monthly_cost = per_machine_cost * num_machines
+        monthly_cost = local_monthly_cost_rented(hourly_rate, hours_needed)
         name = name or "Local (rented cloud GPU)"
     elif mode == "always_on":
-        per_machine_cost = local_monthly_cost_always_on(
-            idle_watts, extra_watts, electricity_rate_per_kwh, effective_hours
+        monthly_cost = local_monthly_cost_always_on(
+            idle_watts * num_machines,
+            extra_watts,
+            electricity_rate_per_kwh,
+            hours_needed,
         )
-        monthly_cost = per_machine_cost * num_machines
         name = name or "Local (24/7 server)"
     else:
         raise ValueError(f"Unknown local cost mode: {mode!r}")
-    tokens_produced = tokens_per_sec * 3600 * effective_hours * num_machines
-    per_million = cost_per_million_tokens(monthly_cost, tokens_produced)
+    per_million = cost_per_million_tokens(monthly_cost, workload.monthly_total_tokens)
     if feasible:
-        notes = (
-            f"~{effective_hours:.1f} compute-hrs/month at {tokens_per_sec:.1f} tok/s"
-        )
+        notes = f"~{hours_needed:.1f} compute-hrs/month at {tokens_per_sec:.1f} tok/s"
     else:
-        coverage_pct = effective_hours / hours_needed * 100
+        coverage_pct = HOURS_PER_MONTH / hours_needed * 100
+        parallel_needed = hours_needed / HOURS_PER_MONTH
+        machine_word = "machine" if num_machines == 1 else "machines"
         notes = (
-            f"running 24/7 all month at {tokens_per_sec:.1f} tok/s covers only "
-            f"~{coverage_pct:.0f}% of this workload's tokens — would need "
-            f"~{num_machines}x this throughput (i.e. {num_machines} machines) "
-            f"to fully replace hosted"
+            f"one machine running 24/7 all month at {tokens_per_sec:.1f} tok/s "
+            f"covers only ~{coverage_pct:.0f}% of this workload's tokens — costed "
+            f"as {num_machines} {machine_word} ({parallel_needed:.1f}x this "
+            f"throughput needed to fully replace hosted)"
         )
     return ComparisonRow(name, monthly_cost, per_million, notes, feasible=feasible)
 
