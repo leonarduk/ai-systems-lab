@@ -102,12 +102,8 @@ not currently read or display. If you need that figure, capture it yourself
 from the raw response (or the provider's usage dashboard) rather than
 relying on the benchmark's wall-clock number.
 
-**Note:** When benchmarking an OpenAI-compatible endpoint
-(`benchmark_openai_compatible`), the reported time includes network latency
-between the client and the remote endpoint. It is an end-to-end wall-clock
-duration, not a measure of model inference speed alone — so it is not
-directly comparable to a local model's generation-only timing.
-=======
+When the endpoint is not on loopback, the benchmark says this next to the
+number it reports, so the caveat reaches users who never read this file.
 
 ## Traffic scenarios (workload presets)
 
