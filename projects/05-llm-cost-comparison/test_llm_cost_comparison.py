@@ -353,6 +353,52 @@ def test_build_hosted_rows_direct_call_rejects_invalid_output_price():
 # --------------------------------------------------------------------------
 
 
+def test_no_function_local_imports():
+    # Issue #76 asks for `import re` to be hoisted. Hoisting the one the
+    # issue names leaves the pattern in place, so this pins the rule
+    # instead of the instance: a deferred stdlib import costs nothing at
+    # module scope and hides a dependency from anyone reading the imports.
+    #
+    # Structural rather than textual — a grep for "    import " misses
+    # `from x import y` and matches it inside strings and docstrings.
+    import ast
+
+    source = Path(m.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for inner in ast.walk(node):
+            if isinstance(inner, (ast.Import, ast.ImportFrom)):
+                names = ", ".join(a.name for a in inner.names)
+                offenders.append(f"{node.name}() line {inner.lineno}: {names}")
+    assert offenders == [], "function-local imports: " + "; ".join(offenders)
+
+
+def test_hoisted_modules_are_actually_used():
+    # The counterpart: hoisting is only an improvement if the name is
+    # still needed. An unused module-level import is what flake8's F401
+    # would catch, but F401 is not in the blocking CI selection
+    # (E9,F63,F7,F82), so nothing else here would notice.
+    import ast
+
+    source = Path(m.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imported = {
+        alias.asname or alias.name.split(".")[0]
+        for node in tree.body
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {
+        n.value.id
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+    }
+    assert imported - used == set()
+
+
 def test_load_shipped_pricing_file_is_well_formed():
     pricing = m.load_pricing()
     assert "providers" in pricing
