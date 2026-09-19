@@ -207,10 +207,17 @@ script. Its shape is:
 
 `label` is matched as a case-insensitive substring against the detected
 GPU's name (via `nvidia-smi`), so list more specific labels before more
-general ones. Edit this file to add your own card, adjust prices for your
-region, or correct a power figure — no Python changes needed. If the file
-is missing or malformed, the script falls back to a built-in copy of the
-shipped defaults so it still works out of the box.
+general ones — `RTX 4080 SUPER` must come before `RTX 4080`, or the
+shorter label swallows the match. `cost_usd` and `power_watts` must both
+be positive numbers. Edit this file to add your own card, adjust prices
+for your region, or correct a power figure — no Python changes needed.
+
+If the file is simply absent, the script quietly falls back to a built-in
+copy of the shipped defaults, so it works out of the box. If the file is
+present but unusable — invalid JSON, the wrong shape, or an entry missing
+or mistyping a field — it says so on stderr and then falls back. A single
+bad entry is skipped by name and the rest of your file is still used. The
+run is never aborted: these values only prefill prompts you can override.
 
 ## Updating pricing
 

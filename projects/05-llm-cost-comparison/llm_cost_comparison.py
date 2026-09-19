@@ -1198,9 +1198,11 @@ def fetch_fx_rate(
         return None
 
 
-# Fallback used only if ``gpu_power_defaults.json`` is missing or malformed,
-# so the script still works out of the box. The shipped JSON file is the
-# source of truth users are expected to edit; this mirrors its contents.
+# Fallback used only if ``gpu_power_defaults.json`` cannot be read, so the
+# script still prefills sensible figures out of the box. The shipped JSON
+# file is the source of truth users are expected to edit; this mirrors its
+# contents, and ``test_fallback_gpu_defaults_match_shipped_json`` fails if
+# the two ever drift apart.
 _FALLBACK_GPU_COST_POWER_DEFAULTS: tuple = (
     ("RTX 4090", 1600.0, 450.0),
     ("RTX 4080 SUPER", 1000.0, 320.0),
@@ -1220,28 +1222,85 @@ _FALLBACK_GPU_COST_POWER_DEFAULTS: tuple = (
 def load_gpu_defaults(path: Path = DEFAULT_GPU_DEFAULTS_PATH) -> tuple:
     """Load GPU price/power defaults from a JSON config file.
 
-    Mirrors ``load_pricing``'s pattern: reads a JSON file next to the script
-    and returns a tuple of ``(label, cost_usd, power_watts)`` entries, in
-    the same order as the file lists them (so more specific labels can be
-    listed before more general ones and still match first). Falls back to
-    ``_FALLBACK_GPU_COST_POWER_DEFAULTS`` if the file is missing or
-    malformed, so a user who has never touched the file sees no difference
-    in behavior.
+    Returns a tuple of ``(LABEL, cost_usd, power_watts)`` entries in the
+    order the file lists them, so a more specific label can be listed
+    before a more general one and still match first. Labels are upper-cased
+    here because ``lookup_gpu_defaults`` matches against an upper-cased
+    card name — a user who writes ``"rtx 5090"`` in the file gets the
+    case-insensitive matching the README promises.
+
+    Unlike ``load_pricing``, an unreadable file is not fatal: without
+    pricing nothing can be computed, whereas these values only prefill
+    prompts the user can override, so the run should continue. The file
+    simply being absent falls back silently. Anything else — unparseable
+    JSON, a non-object top level, an entry missing or mistyping a field,
+    an empty list — means the user edited the file and got it wrong, so it
+    warns on stderr before falling back. Silently ignoring a typo would
+    leave them wondering why their card never matches.
     """
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except FileNotFoundError:
         return _FALLBACK_GPU_COST_POWER_DEFAULTS
+    except (json.JSONDecodeError, OSError) as exc:
+        return _warn_bad_gpu_defaults(path, f"could not be read ({exc})")
+    if not isinstance(data, dict):
+        return _warn_bad_gpu_defaults(
+            path, f"must contain a JSON object, got {type(data).__name__}"
+        )
+    raw_entries = data.get("gpus", [])
+    if not isinstance(raw_entries, list):
+        return _warn_bad_gpu_defaults(
+            path, f'"gpus" must be a list, got {type(raw_entries).__name__}'
+        )
     entries = []
-    for item in data.get("gpus", []):
+    for index, item in enumerate(raw_entries):
         try:
-            entries.append(
-                (str(item["label"]), float(item["cost_usd"]), float(item["power_watts"]))
+            label = str(item["label"]).strip().upper()
+            cost = _gpu_default_number(item["cost_usd"])
+            power = _gpu_default_number(item["power_watts"])
+            if not label:
+                raise ValueError("label is empty")
+        except (KeyError, TypeError, ValueError, IndexError) as exc:
+            print(
+                f"Warning: skipping gpus[{index}] in {path}: {exc}",
+                file=sys.stderr,
             )
-        except (KeyError, TypeError, ValueError):
             continue
-    return tuple(entries) if entries else _FALLBACK_GPU_COST_POWER_DEFAULTS
+        entries.append((label, cost, power))
+    if not entries:
+        return _warn_bad_gpu_defaults(path, "listed no usable GPU entries")
+    return tuple(entries)
+
+
+def _warn_bad_gpu_defaults(path: Path, problem: str) -> tuple:
+    """Warn that ``path`` is unusable and return the built-in defaults."""
+    print(
+        f"Warning: {path} {problem}; using built-in GPU defaults.",
+        file=sys.stderr,
+    )
+    return _FALLBACK_GPU_COST_POWER_DEFAULTS
+
+
+def _gpu_default_number(value: object) -> float:
+    """Coerce a GPU cost/power field to a positive float.
+
+    ``bool`` is rejected explicitly: it subclasses ``int``, so ``true``
+    would otherwise be read as a cost of 1.0.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise TypeError(f"expected a number, got {value!r}")
+    number = float(value)
+    if not number > 0:
+        raise ValueError(f"expected a positive number, got {value!r}")
+    return number
+
+
+# The GPU price/power defaults in force for this run, read from
+# ``gpu_power_defaults.json`` at import. Kept under its original public
+# name so existing callers are unaffected by the move to a config file.
+GPU_COST_POWER_DEFAULTS: tuple = load_gpu_defaults()
 
 
 def lookup_gpu_defaults(
@@ -1249,14 +1308,14 @@ def lookup_gpu_defaults(
 ) -> Optional[tuple]:
     """Best-effort ``(cost_usd, power_watts)`` defaults for a detected GPU.
 
-    Matches by substring against the loaded GPU defaults (see
-    ``load_gpu_defaults``) so a detected card pre-fills a realistic
+    Matches by substring against ``GPU_COST_POWER_DEFAULTS`` (loaded from
+    ``gpu_power_defaults.json``) so a detected card pre-fills a realistic
     price/power pair instead of a generic default unrelated to the actual
     hardware. Returns None on no match — callers fall back to a generic
     default and the prompt still lets the user override.
     """
     if defaults is None:
-        defaults = load_gpu_defaults()
+        defaults = GPU_COST_POWER_DEFAULTS
     name = gpu_name.upper()
     for label, cost, power in defaults:
         if label in name:
