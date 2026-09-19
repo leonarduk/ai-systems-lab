@@ -5,8 +5,30 @@ on:
     types: [opened, reopened, synchronize]
 
 jobs:
+  # Gracefully skip the review when the required API key secret is not
+  # configured (e.g. initial repo setup, forks, or staging environments).
+  # This job always succeeds so it does not produce a failed check status;
+  # the review job below is gated on its output.
+  check-secret:
+    runs-on: ubuntu-latest
+    outputs:
+      has_secret: ${{ steps.check.outputs.has_secret }}
+    steps:
+      - id: check
+        name: Check for DEEPSEEK_API_KEY
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          if [ -z "${DEEPSEEK_API_KEY}" ]; then
+            echo "DEEPSEEK_API_KEY is not configured; skipping DeepSeek PR review."
+            echo "has_secret=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_secret=true" >> "$GITHUB_OUTPUT"
+          fi
+
   ai-review:
-    if: ${{ github.actor != 'dependabot[bot]' && vars.ENABLE_DEEPSEEK_REVIEW != 'false' }}
+    needs: check-secret
+    if: ${{ needs.check-secret.outputs.has_secret == 'true' && github.actor != 'dependabot[bot]' && vars.ENABLE_DEEPSEEK_REVIEW != 'false' }}
     permissions:
       pull-requests: write
       contents: read
