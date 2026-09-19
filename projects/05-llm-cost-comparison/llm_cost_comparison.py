@@ -85,6 +85,7 @@ def load_pricing(
     if try_refresh and path == DEFAULT_PRICING_PATH:
         fetch_deepseek_pricing(path)
         fetch_bedrock_pricing(path)
+        fetch_claude_pricing(path)
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -205,6 +206,153 @@ def _extract_price(text: str, pattern: str) -> Optional[float]:
         except ValueError:
             return None
     return None
+
+
+CLAUDE_PRICING_URL = "https://docs.anthropic.com/en/docs/about-claude/pricing"
+
+
+# Loosest bounds that still catch a mis-parse. Real per-million rates have
+# stayed inside this range across every provider in pricing.json.
+MIN_PLAUSIBLE_PRICE_PER_MILLION = 0.01
+MAX_PLAUSIBLE_PRICE_PER_MILLION = 1000.0
+
+
+def _plausible_price_pair(input_price: float, output_price: float) -> bool:
+    """Sanity-check a scraped (input, output) per-million-token pair.
+
+    Output has always cost strictly more than input for these models, so
+    an equal or inverted pair means the regex matched the wrong number
+    rather than that a price moved.
+    """
+    for price in (input_price, output_price):
+        if not (
+            MIN_PLAUSIBLE_PRICE_PER_MILLION <= price <= MAX_PLAUSIBLE_PRICE_PER_MILLION
+        ):
+            return False
+    return output_price > input_price
+
+
+def fetch_claude_pricing(
+    path: Path = DEFAULT_PRICING_PATH, timeout: float = 10.0
+) -> bool:
+    """Fetch Claude (Anthropic) pricing from the public docs page and update ``path``.
+
+    Anthropic doesn't publish a machine-readable pricing API, so this scrapes
+    the public pricing docs page the same way ``fetch_deepseek_pricing``
+    scrapes DeepSeek's docs. Returns ``True`` if the file was updated,
+    ``False`` on any failure (network, page structure change, no prices
+    parsed) — in which case existing Claude entries are left untouched.
+
+    Only the Claude section is touched; other providers (DeepSeek, Bedrock,
+    etc.) are preserved as-is.
+    """
+    try:
+        req = urllib.request.Request(
+            CLAUDE_PRICING_URL,
+            headers={"User-Agent": "Mozilla/5.0"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            text = resp.read().decode("utf-8")
+    except Exception:
+        return False
+
+    # The pricing page renders each model's input and output rates in the
+    # same row, so the output pattern skips the first dollar amount (input)
+    # and captures the second (output). Model names are matched loosely
+    # (case-insensitive, allowing for "Claude" prefixes and version suffixes)
+    # so a minor page reflow doesn't break the whole fetch.
+    opus_input = _extract_price(
+        text, r"claude\s*opus[^$]*?\$([\d.]+)\s*(?:/|per)?\s*(?:million|MTok|M tokens)"
+    )
+    opus_output = _extract_price(
+        text,
+        r"claude\s*opus[^$]*?\$[\d.]+\s*(?:/|per)?\s*(?:million|MTok|M tokens)"
+        r"[^$]*?\$([\d.]+)",
+    )
+    sonnet_input = _extract_price(
+        text,
+        r"claude\s*sonnet[^$]*?\$([\d.]+)\s*(?:/|per)?\s*(?:million|MTok|M tokens)",
+    )
+    sonnet_output = _extract_price(
+        text,
+        r"claude\s*sonnet[^$]*?\$[\d.]+\s*(?:/|per)?\s*(?:million|MTok|M tokens)"
+        r"[^$]*?\$([\d.]+)",
+    )
+    haiku_input = _extract_price(
+        text,
+        r"claude\s*haiku[^$]*?\$([\d.]+)\s*(?:/|per)?\s*(?:million|MTok|M tokens)",
+    )
+    haiku_output = _extract_price(
+        text,
+        r"claude\s*haiku[^$]*?\$[\d.]+\s*(?:/|per)?\s*(?:million|MTok|M tokens)"
+        r"[^$]*?\$([\d.]+)",
+    )
+
+    if None in (opus_input, opus_output, sonnet_input, sonnet_output):
+        return False
+    # A loose regex over reflowing HTML can pair the right model with the
+    # wrong number — a seat price, a discount, or the next model's input
+    # rate. Every Claude model has cost more per output token than per
+    # input token, by a wide margin, so a pair that fails that is a
+    # mis-parse rather than a price change, and writing it would poison
+    # every figure the tool prints.
+    for label, in_price, out_price in (
+        ("opus", opus_input, opus_output),
+        ("sonnet", sonnet_input, sonnet_output),
+        ("haiku", haiku_input, haiku_output),
+    ):
+        if in_price is None or out_price is None:
+            continue
+        if not _plausible_price_pair(in_price, out_price):
+            print(
+                f"Warning: implausible scraped {label} pricing "
+                f"(${in_price}/${out_price} per Mtok) — leaving "
+                f"{path} unchanged.",
+                file=sys.stderr,
+            )
+            return False
+
+    # Read existing file directly (not via load_pricing, to avoid recursion).
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            pricing = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pricing = {}
+
+    claude_models = {
+        "opus-5": {
+            "display_name": "Claude Opus 5",
+            "input_per_million": opus_input,
+            "output_per_million": opus_output,
+        },
+        "sonnet-5": {
+            "display_name": "Claude Sonnet 5",
+            "input_per_million": sonnet_input,
+            "output_per_million": sonnet_output,
+        },
+    }
+    if haiku_input is not None and haiku_output is not None:
+        claude_models["haiku-4.5"] = {
+            "display_name": "Claude Haiku 4.5",
+            "input_per_million": haiku_input,
+            "output_per_million": haiku_output,
+        }
+
+    # Merge, do not replace. Assigning a fresh "models" dict drops every
+    # model the scrape did not produce — the shipped file also carries
+    # sonnet-5-2026-09, and a user may have added their own entries. The
+    # DeepSeek fetcher gets away with replacing because its four keys are
+    # exactly what it writes; that is not true here.
+    provider = pricing.setdefault("providers", {}).setdefault("claude", {})
+    provider["display_name"] = "Anthropic Claude"
+    provider.setdefault("models", {}).update(claude_models)
+    pricing["as_of"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    pricing["source_claude"] = CLAUDE_PRICING_URL
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(pricing, f, indent=2)
+    return True
 
 
 BEDROCK_PRICING_URL = (
@@ -2529,7 +2677,8 @@ def main(argv: Optional[list] = None) -> int:
     if args.update_pricing:
         ok_ds = fetch_deepseek_pricing()
         ok_bd = fetch_bedrock_pricing()
-        if ok_ds or ok_bd:
+        ok_cl = fetch_claude_pricing()
+        if ok_ds or ok_bd or ok_cl:
             print(f"Updated {DEFAULT_PRICING_PATH}")
             return 0
         print(
