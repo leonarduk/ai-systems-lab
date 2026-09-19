@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import subprocess
 import sys
 import threading
@@ -71,6 +72,19 @@ class ConfigError(ValueError):
 # --------------------------------------------------------------------------
 
 
+def _validate_pricing(pricing: dict) -> None:
+    """Reject malformed per-model prices before any cost math runs.
+
+    Delegates to ``_validate_pricing_model`` so a price loaded from a file
+    and a price in a hand-built dict passed straight to
+    ``build_hosted_rows`` are held to the same rule and report the same
+    message. Raising at load time keeps the failure next to the malformed
+    data instead of surfacing as a nonsensical cost further downstream.
+    """
+    for provider_key, model_key, model_info in iter_models(pricing):
+        _validate_pricing_model(model_info, f"{provider_key}/{model_key}")
+
+
 def load_pricing(
     path: Path = DEFAULT_PRICING_PATH, *, try_refresh: bool = False
 ) -> dict:
@@ -81,17 +95,24 @@ def load_pricing(
     explicit ``--update-pricing`` command, and only for the shipped default
     pricing path so custom/user-edited config files are never overwritten
     implicitly.
+
+    Every model's ``input_per_million``/``output_per_million`` is validated
+    to be a finite, strictly positive number before the pricing dict is
+    returned (see ``_validate_pricing``), so downstream cost math never has
+    to defend against a zero, negative, or non-numeric rate.
     """
     if try_refresh and path == DEFAULT_PRICING_PATH:
         fetch_deepseek_pricing(path)
         fetch_bedrock_pricing(path)
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            pricing = json.load(f)
     except FileNotFoundError as exc:
         raise ConfigError(f"pricing file not found: {path}") from exc
     except json.JSONDecodeError as exc:
         raise ConfigError(f"pricing file {path} is not valid JSON: {exc}") from exc
+    _validate_pricing(pricing)
+    return pricing
 
 
 def iter_models(pricing: dict):
@@ -703,20 +724,23 @@ def _validate_pricing_model(model_info: dict, full_key: str) -> None:
     positive — a zero or negative price would silently produce a
     nonsensical cost, and ``NaN``/``inf`` would poison every downstream
     figure.
-    """
-    import math
 
+    The two failure modes get different messages because they are
+    different mistakes: a missing or non-numeric field is a malformed
+    file, whereas a present, numeric but non-positive rate is a plausible
+    value that happens to be invalid, and saying it "is missing" would
+    send the user looking for the wrong thing.
+    """
     for field in ("input_per_million", "output_per_million"):
         value = model_info.get(field)
-        ok = (
-            isinstance(value, (int, float))
-            and not isinstance(value, bool)
-            and math.isfinite(value)
-            and value > 0
-        )
-        if not ok:
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
             raise ConfigError(
                 f"pricing model {full_key!r} is missing a numeric {field}"
+            )
+        if not math.isfinite(value) or value <= 0:
+            raise ConfigError(
+                f"{field} for model {full_key!r} must be a positive number, "
+                f"got {value!r}"
             )
 
 
