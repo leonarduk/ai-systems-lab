@@ -2334,6 +2334,16 @@ def run_non_interactive(
     ``pricing_file``, if relative, is resolved against ``config_path``'s
     directory (not the process's working directory) so the example config
     works regardless of where the script is invoked from.
+
+    Optional top-level keys:
+      * ``"currency"`` — three-letter display currency code (default
+        ``"USD"``). ``"USD"`` and ``"GBP"`` print their symbol; any other
+        valid code prints verbatim (``"EUR 12.34"``).
+      * ``"static_fx_rate"`` — how many units of ``currency`` one US dollar
+        buys, so ``0.79`` shows a $100 figure as £79. Required when
+        ``currency != "USD"``; a static rate avoids a live FX call (no
+        network, no latency, no failure point). All cost math stays in USD
+        internally and rows are converted once, at display time.
     """
     try:
         with open(config_path, "r", encoding="utf-8") as f:
@@ -2360,6 +2370,32 @@ def run_non_interactive(
     # still get the exception to handle as they see fit.
     pricing = load_pricing(pricing_path)
     selected = set(config["selected_models"]) if "selected_models" in config else None
+
+    display_currency = config.get("currency", "USD")
+    if (
+        not isinstance(display_currency, str)
+        or len(display_currency) != 3
+        or not display_currency.isalpha()
+    ):
+        # A three-letter ISO 4217 code, not any non-empty string. render_table
+        # prints an unknown code verbatim as its own symbol ("EUR 12.34"),
+        # which reads fine for a real code and badly for "pounds" or "£".
+        raise ConfigError(
+            "currency must be a three-letter currency code (e.g. 'USD', "
+            f"'GBP'), got {display_currency!r}"
+        )
+    display_currency = display_currency.upper()
+    static_fx_rate = config.get("static_fx_rate")
+    if display_currency != "USD":
+        if (
+            not isinstance(static_fx_rate, (int, float))
+            or isinstance(static_fx_rate, bool)
+            or static_fx_rate <= 0
+        ):
+            raise ConfigError(
+                "static_fx_rate must be a positive number when currency is not "
+                f"'USD' (got {static_fx_rate!r})"
+            )
 
     local_cfg = config["local"]
     _require_keys(local_cfg, ["mode", "tokens_per_sec"], "local")
@@ -2457,6 +2493,15 @@ def run_non_interactive(
         rows = [build_local(effective_workload)] + build_hosted_rows(
             effective_workload, pricing, selected
         )
+        if display_currency != "USD":
+            # static_fx_rate is how many units of display_currency one USD
+            # buys (0.79 => $100 shows as £79), which is how anyone reading
+            # "USD->GBP rate" would write it. convert_rows_currency takes
+            # the opposite — USD per unit — because the interactive path
+            # feeds it a GBP->USD quote straight from the FX lookup. Hence
+            # the reciprocal. Passing the rate through unconverted made
+            # $300 render as £375 instead of £237.
+            rows = convert_rows_currency(rows, 1.0 / static_fx_rate)
         scenario_labels_rows.append((label, rows))
 
     if scaled_scenarios:
@@ -2472,24 +2517,28 @@ def run_non_interactive(
     if export_fmt and export_path:
         if multiple:
             if export_fmt == "csv":
-                export_combined_csv(scenario_labels_rows, export_path)
+                export_combined_csv(
+                    scenario_labels_rows, export_path, currency=display_currency
+                )
             else:
-                export_combined_json(scenario_labels_rows, export_path)
+                export_combined_json(
+                    scenario_labels_rows, export_path, currency=display_currency
+                )
         else:
             _label, rows = scenario_labels_rows[0]
             if export_fmt == "csv":
-                export_csv(rows, export_path)
+                export_csv(rows, export_path, currency=display_currency)
             else:
-                export_json(rows, export_path)
+                export_json(rows, export_path, currency=display_currency)
         print(f"Wrote {export_path}")
 
     if multiple:
         print("\n== Results (all scenarios) ==")
-        print(render_combined_table(scenario_labels_rows))
+        print(render_combined_table(scenario_labels_rows, currency=display_currency))
     else:
         label, rows = scenario_labels_rows[0]
         print(f"\n== {label} ==")
-        print(render_table(rows))
+        print(render_table(rows, currency=display_currency))
     return 0
 
 
@@ -2508,7 +2557,13 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument(
         "--config",
         type=Path,
-        help="JSON config file for --non-interactive mode (see run_non_interactive docstring).",
+        help=(
+            "JSON config file for --non-interactive mode (see run_non_interactive "
+            "docstring). Optional top-level keys: 'currency' (three-letter code, "
+            "default 'USD') and 'static_fx_rate' (units of that currency per USD, "
+            "e.g. 0.79 for GBP; required when currency != 'USD', and avoids a live "
+            "FX API call)."
+        ),
     )
     parser.add_argument(
         "--export", choices=["csv", "json"], help="Export results in this format."

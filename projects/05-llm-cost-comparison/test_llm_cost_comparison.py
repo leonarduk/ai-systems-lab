@@ -1496,6 +1496,227 @@ def test_run_non_interactive_rejects_nonpositive_tokens_per_sec(
         m.run_non_interactive(config_path, export_fmt=None, export_path=None)
 
 
+def test_run_non_interactive_static_currency_converts_table_and_export(
+    tmp_path: Path, capsys
+):
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    config = {
+        "workload": {
+            "requests_per_day": 1000,
+            "avg_input_tokens": 500,
+            "avg_output_tokens": 300,
+        },
+        "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+        "pricing_file": str(pricing_path),
+        "currency": "GBP",
+        "static_fx_rate": 0.8,
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    export_path = tmp_path / "out.json"
+    exit_code = m.run_non_interactive(
+        config_path, export_fmt="json", export_path=export_path
+    )
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "£" in out
+    assert "$" not in out
+
+    # The symbols alone prove nothing about the arithmetic. With
+    # static_fx_rate 0.8 meaning "0.8 GBP per USD", the Claude Opus 5 row
+    # costs $300/month in USD (1000 req/day * 500 in + 300 out tokens,
+    # priced at $5/$25 per million), so it must read £240 — not £375,
+    # which is what dividing by the rate instead of multiplying produced.
+    data = json.loads(export_path.read_text(encoding="utf-8"))
+    assert all("monthly_cost_gbp" in row for row in data)
+    assert all("monthly_cost_usd" not in row for row in data)
+    hosted = next(row for row in data if "Opus" in row["option"])
+    assert hosted["monthly_cost_gbp"] == pytest.approx(240.0)
+    assert "£240.00" in out
+    # A GBP figure must be smaller than the USD one it came from, since a
+    # pound buys more than a dollar. An inverted rate makes it larger,
+    # which is the sanity check that catches the direction regardless of
+    # the exact numbers.
+    assert hosted["monthly_cost_gbp"] < 300.0
+
+
+@pytest.mark.parametrize("rate", [True, False, 0, -1, "0.8", None, [0.8]])
+def test_run_non_interactive_rejects_a_non_positive_or_non_numeric_rate(
+    tmp_path: Path, rate
+):
+    # True is the interesting one: bool subclasses int, so without the
+    # explicit guard "static_fx_rate": true is accepted as a rate of 1.0
+    # and the table silently claims GBP figures that are really USD.
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workload": {
+                    "requests_per_day": 1000,
+                    "avg_input_tokens": 500,
+                    "avg_output_tokens": 300,
+                },
+                "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+                "pricing_file": str(pricing_path),
+                "currency": "GBP",
+                "static_fx_rate": rate,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(m.ConfigError, match="static_fx_rate must be a positive number"):
+        m.run_non_interactive(config_path, export_fmt=None, export_path=None)
+
+
+def test_static_fx_rate_is_units_of_currency_per_usd(tmp_path: Path, capsys):
+    # The direction, pinned on its own so it cannot be lost in a test that
+    # is also checking exports. Same config priced at two rates: doubling
+    # the rate must double the displayed figure.
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+
+    def run(rate):
+        config_path = tmp_path / f"config-{rate}.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "workload": {
+                        "requests_per_day": 1000,
+                        "avg_input_tokens": 500,
+                        "avg_output_tokens": 300,
+                    },
+                    "local": {
+                        "mode": "rent",
+                        "tokens_per_sec": 40,
+                        "hourly_rate": 2.5,
+                    },
+                    "pricing_file": str(pricing_path),
+                    "currency": "GBP",
+                    "static_fx_rate": rate,
+                }
+            ),
+            encoding="utf-8",
+        )
+        export_path = tmp_path / f"out-{rate}.json"
+        m.run_non_interactive(config_path, export_fmt="json", export_path=export_path)
+        capsys.readouterr()
+        data = json.loads(export_path.read_text(encoding="utf-8"))
+        return next(r for r in data if "Opus" in r["option"])["monthly_cost_gbp"]
+
+    assert run(1.0) == pytest.approx(300.0)  # parity with USD
+    assert run(2.0) == pytest.approx(600.0)  # twice as many units per dollar
+    assert run(0.5) == pytest.approx(150.0)
+
+
+@pytest.mark.parametrize(
+    "currency", ["", "pounds", "£", "US", "USDD", 42, None, ["GBP"]]
+)
+def test_run_non_interactive_rejects_a_non_currency_code(tmp_path: Path, currency):
+    # render_table prints an unrecognised code verbatim as its own symbol,
+    # so "pounds 12.34" would render happily rather than fail. The code has
+    # to be rejected at config time.
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workload": {
+                    "requests_per_day": 1000,
+                    "avg_input_tokens": 500,
+                    "avg_output_tokens": 300,
+                },
+                "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+                "pricing_file": str(pricing_path),
+                "currency": currency,
+                "static_fx_rate": 0.8,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(m.ConfigError, match="three-letter currency code"):
+        m.run_non_interactive(config_path, export_fmt=None, export_path=None)
+
+
+def test_run_non_interactive_accepts_a_currency_without_a_symbol(
+    tmp_path: Path, capsys
+):
+    # EUR has no entry in CURRENCY_SYMBOLS. render_table falls back to
+    # printing the code, which is a reasonable answer, so a valid code
+    # must not be rejected just because no symbol is defined for it.
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workload": {
+                    "requests_per_day": 1000,
+                    "avg_input_tokens": 500,
+                    "avg_output_tokens": 300,
+                },
+                "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+                "pricing_file": str(pricing_path),
+                "currency": "eur",
+                "static_fx_rate": 0.5,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert m.run_non_interactive(config_path, export_fmt=None, export_path=None) == 0
+    out = capsys.readouterr().out
+    # Lower case in the config, upper case in the table.
+    assert "EUR 150.00" in out
+
+
+def test_run_non_interactive_currency_without_static_rate_raises_config_error(
+    tmp_path: Path,
+):
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    config = {
+        "workload": {
+            "requests_per_day": 1000,
+            "avg_input_tokens": 500,
+            "avg_output_tokens": 300,
+        },
+        "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+        "pricing_file": str(pricing_path),
+        "currency": "GBP",
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(m.ConfigError, match="static_fx_rate"):
+        m.run_non_interactive(config_path, export_fmt=None, export_path=None)
+
+
+def test_run_non_interactive_defaults_to_usd_without_static_rate(
+    tmp_path: Path, capsys
+):
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    config = {
+        "workload": {
+            "requests_per_day": 1000,
+            "avg_input_tokens": 500,
+            "avg_output_tokens": 300,
+        },
+        "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+        "pricing_file": str(pricing_path),
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    exit_code = m.run_non_interactive(config_path, export_fmt=None, export_path=None)
+    assert exit_code == 0
+    assert "$" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("mode", ["own", "existing", "rent"])
 def test_run_non_interactive_rejects_zero_tokens_per_sec_in_every_mode(
     tmp_path: Path, mode
