@@ -1004,6 +1004,17 @@ def _safe_float(value: str) -> Optional[float]:
         return None
 
 
+# How long each nvidia-smi invocation is given before it is abandoned.
+NVIDIA_SMI_TIMEOUT_SECONDS = 5.0
+
+# Gap between power samples taken while a benchmark runs. One second, not
+# a half, because each sample spawns an nvidia-smi process: at 0.5s the
+# polling is a measurable share of the load it is trying to measure, and
+# the driver's own power.draw figure refreshes on roughly this timescale
+# anyway, so the extra samples are largely repeats of the same value.
+GPU_POLL_INTERVAL_SECONDS = 1.0
+
+
 def detect_nvidia_gpu(runner: Callable = subprocess.run) -> Optional[dict]:
     """Detect an NVIDIA GPU via ``nvidia-smi`` (works on Windows and Linux).
 
@@ -1020,7 +1031,7 @@ def detect_nvidia_gpu(runner: Callable = subprocess.run) -> Optional[dict]:
             ],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=NVIDIA_SMI_TIMEOUT_SECONDS,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return None
@@ -1062,7 +1073,9 @@ def average_gpu_power_w(
 
 
 def measure_gpu_power_during(
-    func: Callable, runner: Callable = subprocess.run, poll_interval: float = 1.0
+    func: Callable,
+    runner: Callable = subprocess.run,
+    poll_interval: float = GPU_POLL_INTERVAL_SECONDS,
 ) -> tuple:
     """Run ``func()`` while polling GPU power draw; return ``(result, avg_watts)``.
 
@@ -1074,6 +1087,11 @@ def measure_gpu_power_during(
     load — which is what a monthly electricity estimate actually needs,
     since real usage is however long generation actually runs, not one
     instantaneous spike.
+
+    The loop samples before it waits, so a benchmark shorter than
+    ``poll_interval`` still yields one reading rather than none. Widening
+    the interval therefore costs resolution on long runs, never the
+    measurement itself.
     """
     readings = []
     stop = threading.Event()
@@ -1091,7 +1109,12 @@ def measure_gpu_power_during(
         result = func()
     finally:
         stop.set()
-        thread.join(timeout=poll_interval * 4)
+        # stop.wait returns as soon as the event is set, so the only thing
+        # the join can be waiting on is an nvidia-smi call already in
+        # flight. Bound it by that timeout rather than by a multiple of
+        # poll_interval, which has nothing to do with how long a hung
+        # nvidia-smi takes to give up.
+        thread.join(timeout=NVIDIA_SMI_TIMEOUT_SECONDS + 1.0)
     avg_watts = sum(readings) / len(readings) if readings else None
     return result, avg_watts
 
