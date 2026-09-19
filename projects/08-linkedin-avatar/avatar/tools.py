@@ -15,6 +15,13 @@ from pathlib import Path
 
 import requests
 
+from .tool_definitions import (
+    LOOKUP_PROJECT,
+    RECORD_CONTACT,
+    RECORD_UNKNOWN_QUESTION,
+    TOOL_DEFINITIONS,
+)
+
 logger = logging.getLogger(__name__)
 
 PUSHOVER_URL = "https://api.pushover.net/1/messages.json"
@@ -23,89 +30,15 @@ GITHUB_SNAPSHOT_PATH = (
     Path(__file__).resolve().parent.parent / "knowledge" / "github.json"
 )
 
-RECORD_CONTACT = "record_contact"
-RECORD_UNKNOWN_QUESTION = "record_unknown_question"
-LOOKUP_PROJECT = "lookup_project"
-
-TOOL_DEFINITIONS = [
-    {
-        "type": "function",
-        "function": {
-            "name": RECORD_CONTACT,
-            "description": (
-                "Record that a visitor wants to be contacted. Sends a push "
-                "notification with their details; call this whenever a visitor "
-                "gives an email address or asks to be put in touch."
-            ),
-            "strict": True,
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "email": {
-                        "type": "string",
-                        "description": "The visitor's email address.",
-                    },
-                    "name": {
-                        "type": ["string", "null"],
-                        "description": "The visitor's name, if given.",
-                    },
-                    "notes": {
-                        "type": ["string", "null"],
-                        "description": "Anything relevant about why they want to talk.",
-                    },
-                },
-                "required": ["email", "name", "notes"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": RECORD_UNKNOWN_QUESTION,
-            "description": (
-                "Record a question that could not be answered from the available "
-                "knowledge. Call this instead of guessing whenever you don't know "
-                "the answer — never invent an answer about Steve's experience."
-            ),
-            "strict": True,
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "question": {
-                        "type": "string",
-                        "description": "The visitor's question, verbatim.",
-                    },
-                },
-                "required": ["question"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": LOOKUP_PROJECT,
-            "description": (
-                "Fetch the full record for one GitHub repo — description, "
-                "languages, README excerpt and any curated note. Use this when "
-                "the conversation goes into detail on a specific project named "
-                "in the GitHub index."
-            ),
-            "strict": True,
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "The repo name, as it appears in the GitHub index.",
-                    },
-                },
-                "required": ["name"],
-                "additionalProperties": False,
-            },
-        },
-    },
+__all__ = [
+    "LOOKUP_PROJECT",
+    "RECORD_CONTACT",
+    "RECORD_UNKNOWN_QUESTION",
+    "TOOL_DEFINITIONS",
+    "dispatch",
+    "lookup_project",
+    "record_contact",
+    "record_unknown_question",
 ]
 
 
@@ -197,6 +130,31 @@ def record_unknown_question(question):
     return {"recorded": result["status"] in ("sent", "logged"), **result}
 
 
+def _validated_records(records):
+    """Return only well-formed github.json records.
+
+    A record is well-formed if it is a dict with a non-empty string "name".
+    Malformed records are skipped with a warning rather than raising, so a
+    single bad entry (from the separate snapshot generator) can't take down
+    the lookup. Extra fields are preserved untouched.
+    """
+    valid = []
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            logger.warning(
+                "Skipping malformed github.json record at index %d: not an object", index
+            )
+            continue
+        name = record.get("name")
+        if not isinstance(name, str) or not name.strip():
+            logger.warning(
+                "Skipping malformed github.json record at index %d: missing 'name'", index
+            )
+            continue
+        valid.append(record)
+    return valid
+
+
 def lookup_project(name):
     """Fetch the full github.json record for one repo, fuzzy-matching the name."""
     try:
@@ -209,7 +167,16 @@ def lookup_project(name):
             "message": "the GitHub project index is unavailable right now",
         }
 
-    by_name = {record["name"].lower(): record for record in records}
+    if not isinstance(records, list):
+        logger.error(
+            "GitHub snapshot at %s is not a list of records", GITHUB_SNAPSHOT_PATH
+        )
+        return {
+            "found": False,
+            "message": "the GitHub project index is unavailable right now",
+        }
+
+    by_name = {record["name"].lower(): record for record in _validated_records(records)}
     query = name.strip().lower()
 
     if query in by_name:

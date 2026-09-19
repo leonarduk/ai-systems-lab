@@ -15,6 +15,8 @@ that provider's hosted API. Both must be explicitly configured (see
 from __future__ import annotations
 
 import json
+import os
+import re
 from typing import Any, Protocol
 
 import requests
@@ -25,6 +27,8 @@ DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6"
 DEFAULT_TIMEOUT = 60
+
+_FENCED_JSON_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
 
 
 class LLMProviderError(RuntimeError):
@@ -49,10 +53,51 @@ class LLMProvider(Protocol):
         ...
 
 
+def _extract_json_candidate(raw_text: str) -> str:
+    """Best-effort extraction of a JSON-object candidate from `raw_text`.
+
+    Handles three common LLM output shapes:
+      1. Plain JSON: `{"a": 1}`
+      2. Fenced JSON: ```json\n{"a": 1}\n``` (or bare ``` fences)
+      3. JSON embedded in prose: "Here you go: {"a": 1} — hope that helps!"
+
+    Returns the candidate substring (still a string; not yet parsed). If no
+    obvious candidate is found, returns the original text so the caller's
+    `json.loads` can produce a meaningful error.
+    """
+    text = raw_text.strip()
+    if not text:
+        return text
+
+    # 1. Try markdown code fences first (with or without a language tag).
+    fence_match = _FENCED_JSON_RE.search(text)
+    if fence_match:
+        inner = fence_match.group(1).strip()
+        if inner:
+            return inner
+
+    # 2. If the whole thing already looks like a JSON object, use it as-is.
+    if text.startswith("{") and text.endswith("}"):
+        return text
+
+    # 3. Otherwise, slice from the first `{` to the last `}` to strip prose.
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace != -1 and last_brace > first_brace:
+        return text[first_brace : last_brace + 1]
+
+    return text
+
+
 def _parse_json_object(raw_text: str, provider_name: str) -> dict[str, Any]:
-    """Parse `raw_text` as a JSON object, raising `LLMProviderError` if it isn't one."""
+    """Parse `raw_text` as a JSON object, raising `LLMProviderError` if it isn't one.
+
+    Tolerates markdown code fences and surrounding prose by extracting the
+    most likely JSON-object substring before parsing.
+    """
+    candidate = _extract_json_candidate(raw_text)
     try:
-        parsed = json.loads(raw_text.strip())
+        parsed = json.loads(candidate)
     except json.JSONDecodeError as exc:
         raise LLMProviderError(
             f"{provider_name} did not return valid JSON: {raw_text[:200]!r}"
@@ -62,6 +107,17 @@ def _parse_json_object(raw_text: str, provider_name: str) -> dict[str, Any]:
             f"{provider_name} returned JSON that isn't an object: {raw_text[:200]!r}"
         )
     return parsed
+
+
+def _resolve_api_key(config_value: Any, env_var_name: str) -> str:
+    """Return the API key from config if set, otherwise fall back to the env var.
+
+    Returns an empty string if neither source provides a value. Callers are
+    responsible for raising a clear `LLMProviderError` when the result is empty.
+    """
+    if config_value:
+        return str(config_value)
+    return os.environ.get(env_var_name, "") or ""
 
 
 class OllamaProvider:
@@ -232,20 +288,38 @@ def build_llm_provider(config: Any) -> LLMProvider:
     """Construct the configured `LLMProvider` from a `Config` object.
 
     `config.llm_provider` selects the backend: 'ollama' (default), 'deepseek',
-    or 'claude'. Raises `LLMProviderError` for an unknown provider name or
-    missing required credentials.
+    or 'claude'. API keys are read from the config object first, then fall
+    back to the corresponding environment variable (`DEEPSEEK_API_KEY` /
+    `ANTHROPIC_API_KEY`). Raises `LLMProviderError` for an unknown provider
+    name or when a required API key is missing from both sources.
     """
     provider = (config.llm_provider or "ollama").strip().lower()
+
     if provider == "ollama":
         return OllamaProvider(host=config.ollama_host, model=config.ollama_model)
+
     if provider == "deepseek":
-        return DeepSeekProvider(
-            api_key=config.deepseek_api_key, model=config.deepseek_model
+        api_key = _resolve_api_key(
+            getattr(config, "deepseek_api_key", None), "DEEPSEEK_API_KEY"
         )
+        if not api_key:
+            raise LLMProviderError(
+                "DeepSeek provider selected but no API key found. "
+                "Set DEEPSEEK_API_KEY or config.deepseek_api_key."
+            )
+        return DeepSeekProvider(api_key=api_key, model=config.deepseek_model)
+
     if provider == "claude":
-        return ClaudeProvider(
-            api_key=config.anthropic_api_key, model=config.claude_model
+        api_key = _resolve_api_key(
+            getattr(config, "anthropic_api_key", None), "ANTHROPIC_API_KEY"
         )
+        if not api_key:
+            raise LLMProviderError(
+                "Claude provider selected but no API key found. "
+                "Set ANTHROPIC_API_KEY or config.anthropic_api_key."
+            )
+        return ClaudeProvider(api_key=api_key, model=config.claude_model)
+
     raise LLMProviderError(
         f"Unknown LLM_PROVIDER '{provider}'. Expected 'ollama', 'deepseek', or 'claude'."
     )
