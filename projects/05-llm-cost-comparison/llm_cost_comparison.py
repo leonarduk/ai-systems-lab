@@ -1427,6 +1427,35 @@ def benchmark_ollama(base_url: str, model: str, num_predict: int = 200) -> float
     return eval_count / (eval_duration_ns / 1e9)
 
 
+LOOPBACK_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
+
+
+def wall_clock_benchmark_caveat(base_url: str) -> Optional[str]:
+    """Caveat to show beside an OpenAI-compatible benchmark result, if any.
+
+    ``benchmark_openai_compatible`` times the whole round-trip, so its
+    tokens/sec is not generation speed the way ``benchmark_ollama``'s
+    ``eval_duration`` figure is. How much that matters depends entirely on
+    where the endpoint is, which is the distinction the README already
+    draws: on loopback there is no real network hop and wall-clock is a
+    fair proxy, so a warning there is noise that trains the user to ignore
+    the one that matters. Returns None in that case.
+    """
+    try:
+        hostname = urllib.parse.urlsplit(base_url).hostname
+    except ValueError:
+        hostname = None
+    # urlsplit already lower-cases the host, so no fold is needed here;
+    # test_no_wall_clock_caveat_for_a_loopback_endpoint pins that.
+    if hostname in LOOPBACK_HOSTNAMES:
+        return None
+    return (
+        "Note: this is end-to-end wall-clock time, so it includes network "
+        "latency to the endpoint — not model inference speed alone, and not "
+        "directly comparable to a local model's generation-only figure."
+    )
+
+
 def benchmark_openai_compatible(
     base_url: str, model: str, api_key: Optional[str] = None, max_tokens: int = 200
 ) -> float:
@@ -1693,6 +1722,12 @@ def interactive_local_setup() -> tuple:
                     lambda: benchmark_openai_compatible(base_url, model)
                 )
             print(f"  Measured throughput: {tokens_per_sec:.1f} tokens/sec")
+            if backend != "ollama":
+                # After the number, not before it: a caveat printed ahead of
+                # the figure it qualifies reads as unrelated preamble.
+                caveat = wall_clock_benchmark_caveat(base_url)
+                if caveat:
+                    print(f"  {caveat}")
         except (
             Exception
         ) as exc:  # noqa: BLE001 - best-effort, any failure just falls back
