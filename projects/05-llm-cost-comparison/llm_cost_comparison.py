@@ -666,16 +666,33 @@ def build_local_row(
     comparison as the under-estimate, in the other direction.
 
     ``cost_per_million_tokens`` is computed against the workload's full
-    monthly total, which the fleet does deliver. It is therefore unchanged
-    by machine count for the purely variable modes (``existing``,
-    ``rent``), and rises with it for ``own`` and ``always_on``, where each
-    additional machine adds a fixed cost that more tokens have to carry.
-    That rise is the honest answer to the issue, not a defect.
+    monthly total, which the fleet does deliver. For the purely variable
+    modes (``existing``, ``rent``) it is therefore unchanged by machine
+    count. For ``own`` and ``always_on`` it is not flat, and the shape is
+    a sawtooth rather than a trend: between machine boundaries it *falls*,
+    because the same fixed cost is spread over more tokens, and it *jumps
+    up* each time another machine has to be bought. Crossing from 719 to
+    721 hours of work adds a whole second card's amortization to pay for
+    two extra hours of output. That step is the honest answer to the
+    issue — it is what makes buying hardware for a workload this size
+    look worse than the straight-line extrapolation suggested — and it is
+    the reason $/1M cannot be described as machine-count-invariant here.
 
     ``feasible`` still answers the narrower question "can a *single*
     machine keep up with this workload in real time", and infeasible rows
     are still never ranked as "cheapest" (see ``render_table``).
     """
+    if workload.monthly_total_tokens <= 0:
+        # Stated here rather than left to cost_per_million_tokens further
+        # down. ceil(0 / 720) is 0 machines, and every fixed cost is
+        # multiplied by it, so a degenerate workload would otherwise
+        # produce a plausible-looking $0 row if that helper's contract
+        # ever softened. Depending on a downstream raise for correctness
+        # here is a coupling worth not having.
+        raise ValueError(
+            "monthly_total_tokens must be > 0 to cost a local option, got "
+            f"{workload.monthly_total_tokens!r}"
+        )
     hours_needed = hours_needed_for_workload(
         workload.monthly_total_tokens, tokens_per_sec
     )

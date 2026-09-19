@@ -329,10 +329,12 @@ def test_purely_variable_modes_keep_the_same_rate_per_million(mode, kwargs):
     assert fleet.cost_per_million_tokens == pytest.approx(small.cost_per_million_tokens)
 
 
-def test_owned_mode_rate_per_million_rises_with_the_fleet():
-    # The counterpart: with a fixed cost per machine, the third card's
-    # amortization has to be carried by the tokens. A model that kept $/1M
-    # flat here would be hiding exactly what issue #52 asks to surface.
+def test_owned_mode_rate_per_million_falls_as_tokens_spread_the_fixed_cost():
+    # Named for what it asserts. An earlier version of this called the
+    # effect a rise, which the assertion below contradicts and which the
+    # docstring repeated: between machine boundaries the fixed cost is
+    # spread over more tokens, so $/1M falls. The rise happens *at* a
+    # boundary, which is the next test.
     common = dict(
         tokens_per_sec=10,
         mode="own",
@@ -350,6 +352,58 @@ def test_owned_mode_rate_per_million_rises_with_the_fleet():
     assert small.feasible is True
     assert fleet.feasible is False
     assert fleet.cost_per_million_tokens < small.cost_per_million_tokens
+
+
+def test_owned_mode_rate_per_million_jumps_at_a_machine_boundary():
+    # The sawtooth. Two extra hours of work either side of the 720-hour
+    # line cost a whole extra card's amortization, so $/1M steps up even
+    # though the workload barely grew. This is the effect issue #52 exists
+    # to surface, and it is invisible to a small-vs-large comparison,
+    # which only shows the downward trend between boundaries.
+    common = dict(
+        tokens_per_sec=10,
+        mode="own",
+        hardware_cost=3600,  # $100/month per machine
+        lifetime_years=3,
+        power_watts=1000,
+        electricity_rate_per_kwh=0.10,
+    )
+    # 179 req/day * 4800 tokens * 30 = 25,776,000 tokens -> 716 hours.
+    just_under = m.build_local_row(
+        m.Workload(requests_per_day=179, avg_input_tokens=4000, avg_output_tokens=800),
+        **common,
+    )
+    # 181 req/day -> 26,064,000 tokens -> 724 hours, so a second machine.
+    just_over = m.build_local_row(
+        m.Workload(requests_per_day=181, avg_input_tokens=4000, avg_output_tokens=800),
+        **common,
+    )
+    assert just_under.feasible is True
+    assert just_over.feasible is False
+    # 1 * $100 + $0.10 * 716 = $171.60 over 25.776M tokens
+    assert just_under.cost_per_million_tokens == pytest.approx(171.6 / 25.776)
+    # 2 * $100 + $0.10 * 724 = $272.40 over 26.064M tokens
+    assert just_over.cost_per_million_tokens == pytest.approx(272.4 / 26.064)
+    assert just_over.cost_per_million_tokens > just_under.cost_per_million_tokens
+
+
+def test_always_on_single_machine_charges_idle_once():
+    # num_machines == 1 must leave the idle term exactly as the helper
+    # computes it — the `idle_watts * num_machines` scaling has to be a
+    # no-op below the boundary, not an off-by-one.
+    w = m.Workload(requests_per_day=100, avg_input_tokens=4000, avg_output_tokens=800)
+    hours = m.hours_needed_for_workload(w.monthly_total_tokens, 10)
+    assert hours < m.HOURS_PER_MONTH
+    row = m.build_local_row(
+        w,
+        tokens_per_sec=10,
+        mode="always_on",
+        idle_watts=100,
+        extra_watts=900,
+        electricity_rate_per_kwh=0.10,
+    )
+    expected = m.local_monthly_cost_always_on(100, 900, 0.10, hours)
+    assert row.monthly_cost == pytest.approx(expected)
 
 
 def test_build_local_row_uses_one_machine_exactly_at_the_month_boundary():
@@ -385,7 +439,9 @@ def test_build_local_row_rejects_a_zero_token_workload():
     # count: a zero-token workload has no hours to cost and is rejected
     # downstream by cost_per_million_tokens. Clamping to one machine would
     # only have produced a $0 row for a workload that does not exist.
-    with pytest.raises(ValueError, match="monthly_total_tokens must be > 0"):
+    with pytest.raises(
+        ValueError, match=r"monthly_total_tokens must be > 0 to cost a local option"
+    ):
         m.build_local_row(
             m.Workload(requests_per_day=0, avg_input_tokens=0, avg_output_tokens=0),
             tokens_per_sec=10,
