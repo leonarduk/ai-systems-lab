@@ -90,6 +90,17 @@ def load_pricing(
             return json.load(f)
     except FileNotFoundError as exc:
         raise ConfigError(f"pricing file not found: {path}") from exc
+    except OSError as exc:
+        # A directory in place of the file, a permissions problem, a dead
+        # symlink. The file exists in some sense but cannot be read, which
+        # is a configuration mistake, not a bug to show a traceback for.
+        raise ConfigError(f"pricing file {path} could not be read: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        # Saved as UTF-16 or Latin-1. Not an OSError, and not a
+        # JSONDecodeError either — both are ValueError subclasses but
+        # neither catches the other, so without this the one malformed-file
+        # case the issue is about would still escape as a raw traceback.
+        raise ConfigError(f"pricing file {path} is not valid UTF-8: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise ConfigError(f"pricing file {path} is not valid JSON: {exc}") from exc
 
