@@ -51,6 +51,15 @@ try:
 except PackageNotFoundError:
     VERSION = "0.0.0+unknown"
 
+# Sent when identifying this script honestly to a public API. Derived from
+# VERSION so it cannot drift from the release: a User-Agent that misstates
+# its version is worse than none, because an operator diagnosing a client
+# looks up the wrong code. Two endpoints deliberately send "Mozilla/5.0"
+# instead (see fetch_deepseek_pricing and the Yahoo fallback in
+# fetch_fx_rate) — those scrape pages meant for browsers and are refused
+# otherwise.
+USER_AGENT = f"llm-cost-comparison/{VERSION}"
+
 DEFAULT_PRICING_PATH = Path(__file__).parent / "pricing.json"
 DEFAULT_LAST_RUN_PATH = Path(__file__).parent / ".last_run.json"
 DAYS_PER_MONTH = 30
@@ -1113,7 +1122,7 @@ def fetch_octopus_agile_rate(
     try:
         products_req = urllib.request.Request(
             OCTOPUS_PRODUCTS_URL,
-            headers={"User-Agent": "llm-cost-comparison/1.0"},
+            headers={"User-Agent": USER_AGENT},
             method="GET",
         )
         with urllib.request.urlopen(products_req, timeout=timeout) as resp:
@@ -1131,7 +1140,7 @@ def fetch_octopus_agile_rate(
         )
         rates_req = urllib.request.Request(
             rates_url,
-            headers={"User-Agent": "llm-cost-comparison/1.0"},
+            headers={"User-Agent": USER_AGENT},
             method="GET",
         )
         with urllib.request.urlopen(rates_req, timeout=timeout) as resp:
