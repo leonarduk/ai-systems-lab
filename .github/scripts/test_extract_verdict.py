@@ -257,7 +257,7 @@ class TestExtractVerdictScriptMain:
         temp_path.write_text("**APPROVE** — no issues")
 
         result = subprocess.run(
-            ["python3", ".github/scripts/extract_verdict.py", str(temp_path), "TestProvider"],
+            [sys.executable or "python3", ".github/scripts/extract_verdict.py", str(temp_path), "TestProvider"],
             cwd=str(Path(__file__).parent.parent.parent),
             capture_output=True,
             text=True,
@@ -271,7 +271,7 @@ class TestExtractVerdictScriptMain:
         temp_path.write_text("**REQUEST CHANGES** — blocking issue")
 
         result = subprocess.run(
-            ["python3", ".github/scripts/extract_verdict.py", str(temp_path), "TestProvider"],
+            [sys.executable or "python3", ".github/scripts/extract_verdict.py", str(temp_path), "TestProvider"],
             cwd=str(Path(__file__).parent.parent.parent),
             capture_output=True,
             text=True,
@@ -285,7 +285,7 @@ class TestExtractVerdictScriptMain:
         temp_path.write_text("**`APPROVE`** — no issues")
 
         result = subprocess.run(
-            ["python3", ".github/scripts/extract_verdict.py", str(temp_path), "DeepSeek"],
+            [sys.executable or "python3", ".github/scripts/extract_verdict.py", str(temp_path), "DeepSeek"],
             cwd=str(Path(__file__).parent.parent.parent),
             capture_output=True,
             text=True,
@@ -299,7 +299,7 @@ class TestExtractVerdictScriptMain:
         temp_path.write_text("Some review text without a verdict line.")
 
         result = subprocess.run(
-            ["python3", ".github/scripts/extract_verdict.py", str(temp_path), "TestProvider"],
+            [sys.executable or "python3", ".github/scripts/extract_verdict.py", str(temp_path), "TestProvider"],
             cwd=str(Path(__file__).parent.parent.parent),
             capture_output=True,
             text=True,
