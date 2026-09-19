@@ -69,6 +69,23 @@ See `example_config.json` (workload presets, hardware you already own) and
 `example_config_buying_hardware.json` (explicit workload, buying new
 hardware) for the config shapes.
 
+By default the non-interactive table and any export are in USD. Pass
+`--currency GBP` (or any other currency code) to have the whole table —
+local and hosted rows alike — converted at display time using a live
+exchange rate, matching what the interactive flow does when you choose GBP:
+
+```bash
+python llm_cost_comparison.py --non-interactive --config example_config.json \
+    --currency GBP --export json --export-path out.json
+```
+
+All cost math is still done internally in USD (hosted pricing is
+USD-denominated); the conversion is applied once to the final figures. If
+the FX lookup fails (no network, unknown currency code), the run falls back
+to USD with a warning on stderr rather than failing — the numbers are still
+correct, just in the wrong unit. `--currency` is ignored in interactive
+mode, which asks about currency as part of the local-setup flow.
+
 ### Timing notes
 
 The optional local-endpoint benchmark reports a single **wall-clock** timing

@@ -2301,7 +2301,10 @@ def _resolve_workload_scenarios(config: dict) -> list:
 
 
 def run_non_interactive(
-    config_path: Path, export_fmt: Optional[str], export_path: Optional[Path]
+    config_path: Path,
+    export_fmt: Optional[str],
+    export_path: Optional[Path],
+    currency: str = "USD",
 ) -> int:
     """Run the comparison from a JSON config instead of interactive prompts.
 
@@ -2334,6 +2337,13 @@ def run_non_interactive(
     ``pricing_file``, if relative, is resolved against ``config_path``'s
     directory (not the process's working directory) so the example config
     works regardless of where the script is invoked from.
+
+    ``currency`` selects the display currency for the rendered table and any
+    export. All cost math is done in USD (hosted pricing is USD-denominated);
+    a non-USD currency is applied at display time by fetching a live FX rate
+    and converting every row once (see ``convert_rows_currency``). If the
+    rate can't be fetched, the run falls back to USD with a warning rather
+    than failing — the numbers are still correct, just in the wrong unit.
     """
     try:
         with open(config_path, "r", encoding="utf-8") as f:
@@ -2445,6 +2455,31 @@ def run_non_interactive(
             f"local.mode must be 'own', 'existing', or 'rent', got {mode!r}"
         )
 
+    # Resolve the requested display currency once, up front: fetching the FX
+    # rate is a network call, so doing it here (rather than per-scenario)
+    # keeps a multi-scenario run to a single lookup and lets a failure fall
+    # back to USD cleanly before any rows are built.
+    display_currency = "USD"
+    usd_per_target = None
+    if currency and currency.upper() != "USD":
+        target = currency.upper()
+        # Ask for the rate in the direction convert_rows_currency wants:
+        # USD *per* target unit, so ~1.27 for GBP. fetch_fx_rate(a, b)
+        # returns b per a, so the target comes first — the same call the
+        # interactive path makes as fetch_fx_rate("GBP", "USD"). Asking
+        # for USD→GBP instead returns ~0.79, and dividing by that scales
+        # costs up by 1.27 rather than down: a $300 row printed as £380.
+        rate = fetch_fx_rate(target, "USD")
+        if rate is not None and rate > 0:
+            display_currency = target
+            usd_per_target = rate
+        else:
+            print(
+                f"Warning: could not fetch a {target}→USD exchange rate — "
+                "falling back to USD.",
+                file=sys.stderr,
+            )
+
     multiple = len(scenarios) > 1
     scenario_labels_rows = []
     scaled_scenarios = []
@@ -2457,6 +2492,8 @@ def run_non_interactive(
         rows = [build_local(effective_workload)] + build_hosted_rows(
             effective_workload, pricing, selected
         )
+        if usd_per_target is not None:
+            rows = convert_rows_currency(rows, usd_per_target)
         scenario_labels_rows.append((label, rows))
 
     if scaled_scenarios:
@@ -2472,24 +2509,28 @@ def run_non_interactive(
     if export_fmt and export_path:
         if multiple:
             if export_fmt == "csv":
-                export_combined_csv(scenario_labels_rows, export_path)
+                export_combined_csv(
+                    scenario_labels_rows, export_path, currency=display_currency
+                )
             else:
-                export_combined_json(scenario_labels_rows, export_path)
+                export_combined_json(
+                    scenario_labels_rows, export_path, currency=display_currency
+                )
         else:
             _label, rows = scenario_labels_rows[0]
             if export_fmt == "csv":
-                export_csv(rows, export_path)
+                export_csv(rows, export_path, currency=display_currency)
             else:
-                export_json(rows, export_path)
+                export_json(rows, export_path, currency=display_currency)
         print(f"Wrote {export_path}")
 
     if multiple:
         print("\n== Results (all scenarios) ==")
-        print(render_combined_table(scenario_labels_rows))
+        print(render_combined_table(scenario_labels_rows, currency=display_currency))
     else:
         label, rows = scenario_labels_rows[0]
         print(f"\n== {label} ==")
-        print(render_table(rows))
+        print(render_table(rows, currency=display_currency))
     return 0
 
 
@@ -2520,6 +2561,17 @@ def main(argv: Optional[list] = None) -> int:
         help="Skip prompts and reuse settings saved by a previous interactive run.",
     )
     parser.add_argument(
+        "--currency",
+        default="USD",
+        help=(
+            "Output currency for --non-interactive mode (e.g. USD, GBP). "
+            "Non-USD values require network access to fetch a live exchange "
+            "rate; if the lookup fails, the run falls back to USD with a "
+            "warning. Ignored in interactive mode, which asks about currency "
+            "as part of the local-setup flow."
+        ),
+    )
+    parser.add_argument(
         "--update-pricing",
         action="store_true",
         help="Fetch latest DeepSeek pricing from the official API docs and exit.",
@@ -2547,7 +2599,12 @@ def main(argv: Optional[list] = None) -> int:
         if args.export and not args.export_path:
             args.export_path = Path(f"cost_comparison.{args.export}")
         try:
-            return run_non_interactive(args.config, args.export, args.export_path)
+            return run_non_interactive(
+                args.config,
+                args.export,
+                args.export_path,
+                currency=args.currency,
+            )
         except ConfigError as exc:
             print(f"Config error: {exc}", file=sys.stderr)
             return 1
@@ -2556,6 +2613,12 @@ def main(argv: Optional[list] = None) -> int:
         print(
             "Note: --export/--export-path only apply to --non-interactive mode; "
             "interactive mode asks about exporting at the end.",
+            file=sys.stderr,
+        )
+    if args.currency and args.currency.upper() != "USD":
+        print(
+            "Note: --currency only applies to --non-interactive mode; "
+            "interactive mode asks about currency as part of the local-setup flow.",
             file=sys.stderr,
         )
 
