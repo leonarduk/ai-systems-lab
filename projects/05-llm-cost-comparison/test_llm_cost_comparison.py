@@ -700,7 +700,14 @@ def test_detect_nvidia_gpu_returns_none_on_timeout():
 
 
 def test_detect_gpu_wmi_returns_none_on_non_windows(monkeypatch):
+    # Asserting only `is None` cannot fail: on Linux the wmic fallback also
+    # returns None, because there is no wmic to run. Verified by deleting
+    # the platform guard — the test still passed. What the guard actually
+    # buys is not spawning a subprocess at all, so assert that instead.
     monkeypatch.setattr(m.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(
+        m.subprocess, "run", lambda *a, **k: pytest.fail("wmic spawned on non-Windows")
+    )
     assert m.detect_gpu_wmi() is None
 
 
@@ -738,9 +745,12 @@ def test_detect_gpu_wmi_falls_back_to_wmic_when_wmi_package_missing(monkeypatch)
 
     def fake_run(cmd, capture_output=True, text=True, timeout=None):
         assert "wmic" in cmd[0]
+        assert "/format:list" in cmd
         return _FakeCompletedProcess(
-            "Node,AdapterCompatibility,DriverVersion,Name\n"
-            "HOST,Intel Corporation,31.0.101.4502,Intel(R) UHD Graphics 770\n"
+            "AdapterCompatibility=Intel Corporation\r\n"
+            "DriverVersion=31.0.101.4502\r\n"
+            "Name=Intel(R) UHD Graphics 770\r\n"
+            "\r\n"
         )
 
     monkeypatch.setattr(m.subprocess, "run", fake_run)
@@ -768,7 +778,9 @@ def test_detect_gpu_prefers_nvidia_smi_when_available(monkeypatch):
         return _FakeCompletedProcess("NVIDIA GeForce RTX 4090, 24564, 210.5, 450\n")
 
     # WMI must not be consulted when nvidia-smi succeeds.
-    monkeypatch.setattr(m, "detect_gpu_wmi", lambda: (_ for _ in ()).throw(AssertionError()))
+    monkeypatch.setattr(
+        m, "detect_gpu_wmi", lambda: (_ for _ in ()).throw(AssertionError())
+    )
     info = m.detect_gpu(runner=fake_runner)
     assert info["name"] == "NVIDIA GeForce RTX 4090"
 
@@ -1804,7 +1816,7 @@ def _stub_gpu_info(name="NVIDIA GeForce RTX 3090"):
 _LOCAL_SETUP_ANSWERS = {
     # Not skipped, so GPU detection and the benchmark question are both asked.
     "Skip benchmark": "n",
-    "auto-detect an NVIDIA GPU": "y",
+    "auto-detect your GPU": "y",
     "benchmark a running local model endpoint": "n",
     "Measured or estimated tokens/sec": "40",
     "Hardware mode": "existing",
@@ -1846,6 +1858,138 @@ def _local_setup(monkeypatch, gpu_info):
 
     monkeypatch.setattr("builtins.input", fake_input)
     return m.interactive_local_setup()
+
+
+def _local_setup_with_gpu_source(monkeypatch, nvidia, wmi):
+    """interactive_local_setup with both detection paths stubbed."""
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: nvidia)
+    monkeypatch.setattr(m, "detect_gpu_wmi", lambda: wmi)
+    monkeypatch.setattr(
+        m, "average_gpu_power_w", lambda *a, **k: pytest.fail("nvidia-smi polled")
+    )
+    monkeypatch.setattr(
+        m, "fetch_octopus_agile_rate", lambda *a, **k: pytest.fail("network call")
+    )
+    monkeypatch.setattr(m, "fetch_fx_rate", lambda *a, **k: pytest.fail("network call"))
+
+    def fake_input(prompt: str = "") -> str:
+        for fragment, answer in _LOCAL_SETUP_ANSWERS.items():
+            if fragment in prompt:
+                return answer
+        pytest.fail(f"unscripted prompt: {prompt!r}")
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    return m.interactive_local_setup()
+
+
+def test_interactive_setup_uses_a_wmi_detected_card(monkeypatch, capsys):
+    # The point of issue #62. detect_gpu existed but nothing called it, so
+    # an AMD card on Windows was still invisible to the only code path a
+    # user reaches. Stub nvidia-smi as absent and WMI as present.
+    amd = {
+        "name": "AMD Radeon RX 7900 XTX",
+        "vendor": "Advanced Micro Devices, Inc.",
+        "driver_version": "31.0.24027.1012",
+    }
+    _local_setup_with_gpu_source(monkeypatch, nvidia=None, wmi=amd)
+    out = capsys.readouterr().out
+    assert "AMD Radeon RX 7900 XTX" in out
+    assert "No GPU detected" not in out
+
+
+def test_wmi_detected_card_does_not_trigger_nvidia_smi_power_polling(
+    monkeypatch, capsys
+):
+    # average_gpu_power_w shells out to nvidia-smi. A WMI card has no power
+    # telemetry to average, so polling would spawn a binary that is not
+    # there. The stub above fails the test if it is called at all.
+    _local_setup_with_gpu_source(
+        monkeypatch,
+        nvidia=None,
+        wmi={"name": "Intel Arc A770", "vendor": "Intel", "driver_version": "1.0"},
+    )
+    # Reaching here means average_gpu_power_w was never called. The card is
+    # still reported, with the fields WMI cannot supply marked unknown.
+    out = capsys.readouterr().out
+    assert "Intel Arc A770" in out
+    assert "VRAM unknown" in out
+    assert "power draw unknown" in out
+
+
+def test_no_gpu_message_names_both_detection_paths(monkeypatch, capsys):
+    _local_setup_with_gpu_source(monkeypatch, nvidia=None, wmi=None)
+    out = capsys.readouterr().out
+    assert "nvidia-smi and WMI both returned nothing" in out
+
+
+def test_detect_gpu_wmi_handles_commas_inside_wmic_fields(monkeypatch):
+    # AdapterCompatibility for an AMD card is "Advanced Micro Devices,
+    # Inc." — and wmic does not quote it. A CSV row therefore has more
+    # commas than columns, and no split recovers the fields: splitting
+    # unlimited mis-assigns them, splitting with a limit hands the leftover
+    # to the last column. /format:list sidesteps it entirely.
+    monkeypatch.setattr(m.platform, "system", lambda: "Windows")
+    monkeypatch.setitem(sys.modules, "wmi", None)
+
+    class _Result:
+        returncode = 0
+        stdout = (
+            "\r\n"
+            "AdapterCompatibility=Advanced Micro Devices, Inc.\r\n"
+            "DriverVersion=31.0.24027.1012\r\n"
+            "Name=AMD Radeon RX 7900 XTX\r\n"
+            "\r\n"
+        )
+
+    monkeypatch.setattr(m.subprocess, "run", lambda *a, **k: _Result())
+    assert m.detect_gpu_wmi() == {
+        "name": "AMD Radeon RX 7900 XTX",
+        "vendor": "Advanced Micro Devices, Inc.",
+        "driver_version": "31.0.24027.1012",
+    }
+
+
+def test_detect_gpu_wmi_returns_the_first_named_adapter(monkeypatch):
+    # A laptop typically lists the integrated chip and the discrete card.
+    monkeypatch.setattr(m.platform, "system", lambda: "Windows")
+    monkeypatch.setitem(sys.modules, "wmi", None)
+
+    class _Result:
+        returncode = 0
+        stdout = (
+            "AdapterCompatibility=Intel Corporation\r\n"
+            "DriverVersion=31.0.101\r\n"
+            "Name=Intel(R) UHD Graphics\r\n"
+            "\r\n"
+            "AdapterCompatibility=Advanced Micro Devices, Inc.\r\n"
+            "DriverVersion=31.0.24027\r\n"
+            "Name=AMD Radeon RX 7900 XTX\r\n"
+            "\r\n"
+        )
+
+    monkeypatch.setattr(m.subprocess, "run", lambda *a, **k: _Result())
+    assert m.detect_gpu_wmi()["name"] == "Intel(R) UHD Graphics"
+
+
+def test_detect_gpu_wmi_returns_none_when_wmic_names_nothing(monkeypatch):
+    monkeypatch.setattr(m.platform, "system", lambda: "Windows")
+    monkeypatch.setitem(sys.modules, "wmi", None)
+
+    class _Result:
+        returncode = 0
+        stdout = "AdapterCompatibility=Intel\r\nDriverVersion=1.0\r\n\r\n"
+
+    monkeypatch.setattr(m.subprocess, "run", lambda *a, **k: _Result())
+    assert m.detect_gpu_wmi() is None
+
+
+def test_gpu_detection_prompt_matches_what_detect_gpu_tries():
+    # The prompt said "an NVIDIA GPU via nvidia-smi" while a WMI fallback
+    # was added underneath it, which would have told Windows AMD users the
+    # question did not apply to them.
+    assert "nvidia-smi" in m.GPU_DETECTION_PROMPT
+    assert "WMI" in m.GPU_DETECTION_PROMPT
+    assert "an NVIDIA GPU" not in m.GPU_DETECTION_PROMPT
 
 
 def test_interactive_local_setup_existing_hardware_branch(monkeypatch, capsys):
@@ -2322,7 +2466,7 @@ _ACCEPT_DEFAULT = {
 # Answers shared by every interactive test: skip all hardware probing and
 # supply the electricity rate by hand so nothing touches the network.
 _OFFLINE_ANSWERS = {
-    "auto-detect an NVIDIA GPU": "n",
+    "auto-detect your GPU": "n",
     "benchmark a running local model endpoint": "n",
     "Look up your current unit rate live": "n",
     # Declining the Octopus lookup still leaves the currency as GBP, which
