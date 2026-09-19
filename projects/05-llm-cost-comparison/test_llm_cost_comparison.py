@@ -269,6 +269,94 @@ def test_build_hosted_rows_all_and_filtered(tmp_path):
     assert haiku_cost < opus_cost
 
 
+_WARN_PRICING = {
+    "providers": {
+        "claude": {
+            "models": {
+                "opus-5": {
+                    "display_name": "Claude Opus 5",
+                    "input_per_million": 5.0,
+                    "output_per_million": 25.0,
+                }
+            }
+        }
+    }
+}
+
+
+def test_warn_unknown_model_keys_reports_to_stderr(capsys):
+    unknown = m.warn_unknown_model_keys(
+        _WARN_PRICING, {"claude/opus-5", "claude/typo-model"}
+    )
+    assert unknown == ["claude/typo-model"]
+    captured = capsys.readouterr()
+    assert "Warning: unknown model key" in captured.err
+    assert "claude/typo-model" in captured.err
+    # stdout carries the comparison table; a warning there would corrupt
+    # anything parsing it.
+    assert captured.out == ""
+    # The valid keys are listed, so the user can see what they meant to
+    # type rather than being told only that they were wrong.
+    assert "claude/opus-5" in captured.err
+
+
+def test_warn_unknown_model_keys_is_silent_when_all_keys_are_known(capsys):
+    assert m.warn_unknown_model_keys(_WARN_PRICING, {"claude/opus-5"}) == []
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("selected", [None, set()])
+def test_warn_unknown_model_keys_is_silent_without_a_selection(capsys, selected):
+    # None means "compare against everything"; an empty set means "local
+    # only". Neither is a mistake.
+    assert m.warn_unknown_model_keys(_WARN_PRICING, selected) == []
+    assert capsys.readouterr().err == ""
+
+
+def test_build_hosted_rows_still_drops_unknown_keys_without_printing(capsys):
+    # The row builder keeps its behaviour — unknown keys simply match
+    # nothing — but no longer prints. Both callers invoke it inside a
+    # per-scenario loop, so warning here repeated the same message once
+    # per scenario, and a row builder that writes to stderr cannot be
+    # reused by a caller formatting its own output.
+    rows = m.build_hosted_rows(
+        m.Workload(1000, 500, 300),
+        _WARN_PRICING,
+        selected={"claude/opus-5", "claude/typo-model"},
+    )
+    assert [r.name for r in rows] == ["Claude Opus 5"]
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out == ""
+
+
+def test_unknown_key_warns_once_for_a_multi_scenario_run(tmp_path: Path, capsys):
+    # The regression the move exists to prevent: three presets must not
+    # produce three copies of the same warning.
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workload_presets": ["casual", "coding_agent", "team_tool"],
+                "local": {
+                    "mode": "existing",
+                    "tokens_per_sec": 40,
+                    "power_watts": 450,
+                    "electricity_rate_per_kwh": 0.15,
+                },
+                "pricing_file": str(pricing_path),
+                "selected_models": ["claude/opus-5", "claude/typo-model"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert m.run_non_interactive(config_path, export_fmt=None, export_path=None) == 0
+    err = capsys.readouterr().err
+    assert err.count("claude/typo-model") == 1
+
+
 def test_build_hosted_rows_raises_config_error_on_malformed_pricing():
     pricing = {
         "providers": {
