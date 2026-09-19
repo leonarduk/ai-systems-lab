@@ -353,35 +353,114 @@ def test_build_hosted_rows_direct_call_rejects_invalid_output_price():
 # --------------------------------------------------------------------------
 
 
-def test_no_function_local_imports():
-    # Issue #76 asks for `import re` to be hoisted. Hoisting the one the
-    # issue names leaves the pattern in place, so this pins the rule
-    # instead of the instance: a deferred stdlib import costs nothing at
-    # module scope and hides a dependency from anyone reading the imports.
-    #
-    # Structural rather than textual — a grep for "    import " misses
-    # `from x import y` and matches it inside strings and docstrings.
+# A function-local import may be deliberate — an optional dependency, or
+# breaking an import cycle. Two escape hatches, both of which make the
+# reason visible at the import site rather than leaving a reader to guess:
+DEFERRED_IMPORT_MARKER = "deferred-import:"
+
+
+def _function_local_imports(source: str) -> list:
+    """Every import inside a function, minus the deliberately deferred ones.
+
+    Exempt if the import sits under a ``try`` whose handlers catch
+    ``ImportError`` (the optional-dependency idiom), or if its line
+    carries a ``# deferred-import: <reason>`` comment.
+    """
     import ast
 
-    source = Path(m.__file__).read_text(encoding="utf-8")
     tree = ast.parse(source)
+    lines = source.splitlines()
+
+    exempt_lines = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        catches_import_error = any(
+            (handler.type is None)
+            or (isinstance(handler.type, ast.Name) and "Error" in handler.type.id)
+            or (
+                isinstance(handler.type, ast.Tuple)
+                and any(
+                    isinstance(e, ast.Name) and e.id == "ImportError"
+                    for e in handler.type.elts
+                )
+            )
+            for handler in node.handlers
+        )
+        if not catches_import_error:
+            continue
+        for stmt in node.body:
+            for inner in ast.walk(stmt):
+                if isinstance(inner, (ast.Import, ast.ImportFrom)):
+                    exempt_lines.add(inner.lineno)
+
     offenders = []
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         for inner in ast.walk(node):
-            if isinstance(inner, (ast.Import, ast.ImportFrom)):
-                names = ", ".join(a.name for a in inner.names)
-                offenders.append(f"{node.name}() line {inner.lineno}: {names}")
-    assert offenders == [], "function-local imports: " + "; ".join(offenders)
+            if not isinstance(inner, (ast.Import, ast.ImportFrom)):
+                continue
+            if inner.lineno in exempt_lines:
+                continue
+            if DEFERRED_IMPORT_MARKER in lines[inner.lineno - 1]:
+                continue
+            names = ", ".join(a.name for a in inner.names)
+            offenders.append(f"{node.name}() line {inner.lineno}: {names}")
+    return offenders
+
+
+def test_no_undeclared_function_local_imports():
+    # Issue #76 asks for `import re` to be hoisted. Hoisting only the one
+    # the issue names leaves the pattern in place — there were three — so
+    # this pins the rule rather than the instance.
+    #
+    # It is not an absolute ban. A deferred import is sometimes right, so
+    # the rule is "say why": an optional dependency guarded by
+    # try/except ImportError passes untouched, and anything else passes
+    # with a `# deferred-import: <reason>` comment. What it stops is the
+    # unexplained one, which is what all three of these were.
+    #
+    # Structural rather than textual: a grep for "    import " misses
+    # `from x import y` and matches inside the docstrings of this very
+    # module, which discuss imports.
+    source = Path(m.__file__).read_text(encoding="utf-8")
+    offenders = _function_local_imports(source)
+    assert offenders == [], "undeclared function-local imports: " + "; ".join(offenders)
+
+
+def test_the_deferred_import_escape_hatches_work():
+    # A guard nobody can satisfy gets deleted the first time it is
+    # inconvenient. Prove both exits are real, against synthetic source,
+    # so the rule above is enforceable rather than absolute.
+    banned = "def f():\n    import json\n"
+    assert _function_local_imports(banned)
+
+    marked = "def f():\n    import json  # deferred-import: breaks a cycle\n"
+    assert _function_local_imports(marked) == []
+
+    optional = (
+        "def f():\n"
+        "    try:\n"
+        "        import tomllib\n"
+        "    except ImportError:\n"
+        "        tomllib = None\n"
+    )
+    assert _function_local_imports(optional) == []
 
 
 def test_hoisted_modules_are_actually_used():
-    # The counterpart: hoisting is only an improvement if the name is
-    # still needed. An unused module-level import is what flake8's F401
-    # would catch, but F401 is not in the blocking CI selection
-    # (E9,F63,F7,F82), so nothing else here would notice.
+    # The counterpart: hoisting only helps if the name is still needed.
+    # An unused module-level import is F401, and CI's blocking flake8
+    # selection is E9,F63,F7,F82, so nothing else here would notice.
+    #
+    # A name can be referenced in ways the AST does not surface as a Name
+    # node — a string annotation, an __all__ entry — so a bare AST check
+    # could fail on an import that is genuinely used. Requiring the name
+    # to be absent textually as well makes a false positive much harder,
+    # at the cost of missing an import mentioned only in a comment.
     import ast
+    import re as _re
 
     source = Path(m.__file__).read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -396,7 +475,17 @@ def test_hoisted_modules_are_actually_used():
         for n in ast.walk(tree)
         if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
     }
-    assert imported - used == set()
+    body_without_imports = "\n".join(
+        line
+        for line in source.splitlines()
+        if not _re.match(r"\s*(import|from)\s", line)
+    )
+    unused = [
+        name
+        for name in sorted(imported - used)
+        if not _re.search(rf"\b{_re.escape(name)}\b", body_without_imports)
+    ]
+    assert unused == []
 
 
 def test_load_shipped_pricing_file_is_well_formed():
