@@ -372,6 +372,28 @@ def test_load_pricing_raises_config_error_on_invalid_json(tmp_path: Path):
         m.load_pricing(bad_path)
 
 
+@pytest.mark.parametrize("encoding", ["utf-16", "latin-1"])
+def test_load_pricing_raises_config_error_on_non_utf8_file(tmp_path: Path, encoding):
+    # The file is opened as UTF-8, so any other encoding raises
+    # UnicodeDecodeError. It is a ValueError like JSONDecodeError but not a
+    # subclass of it, so the JSON handler does not cover it and the file
+    # escaped as a raw traceback — the exact outcome issue #61 is about.
+    path = tmp_path / "pricing.json"
+    path.write_bytes('{"as_of": "caf\u00e9"}'.encode(encoding))
+    with pytest.raises(m.ConfigError, match="is not valid UTF-8"):
+        m.load_pricing(path)
+
+
+def test_load_pricing_raises_config_error_when_path_is_a_directory(tmp_path: Path):
+    # IsADirectoryError is an OSError but not a FileNotFoundError, so
+    # pointing pricing_file at a directory produced a traceback rather than
+    # the "pricing file not found" message users would expect to see.
+    directory = tmp_path / "pricing.json"
+    directory.mkdir()
+    with pytest.raises(m.ConfigError, match="could not be read"):
+        m.load_pricing(directory)
+
+
 def test_load_pricing_raises_config_error_on_missing_file(tmp_path: Path):
     with pytest.raises(m.ConfigError, match="pricing file not found"):
         m.load_pricing(tmp_path / "missing-pricing.json")
