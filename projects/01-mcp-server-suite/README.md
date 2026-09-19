@@ -97,6 +97,26 @@ See [ADR-001](./docs/adr-001-multi-server-architecture.md) for detailed decision
 
 [Documentation](./servers/prize-draw-mcp-server/README.md)
 
+## Requirements
+
+### MCP Version Pin
+
+Every server's `requirements.txt` under `projects/01-mcp-server-suite/servers/*/requirements.txt` **must** include a line pinning the MCP SDK to the 1.x line:
+
+```
+mcp<2.0.0
+```
+
+The upper bound is deliberate: the 2.x line of the `mcp` package introduces breaking API changes that these servers have not been migrated to, so an open range (e.g. `mcp` or `mcp>=1.0`) would pull in incompatible versions at install time. Pin the upper bound explicitly rather than relying on transitive constraints.
+
+CI enforces this. The Python workflow at [`.github/workflows/python-ci.yml`](../../.github/workflows/python-ci.yml) iterates over each `projects/01-mcp-server-suite/servers/*/requirements.txt` and fails the build if the pin is missing, with:
+
+```
+::error::FAIL: <file> does not pin mcp<2.0.0
+```
+
+If you add a new server under `projects/01-mcp-server-suite/servers/`, add the `mcp<2.0.0` line to its `requirements.txt` before opening a PR. Do not loosen or remove the pin to make CI pass — the check is intentional.
+
 ## Quick Start
 
 ### Try It Out (5 Minutes)
@@ -227,7 +247,7 @@ bandit -r servers/
 - **Framework:** MCP Protocol (Model Context Protocol)
 - **APIs:** GitHub REST API, Brave Search API, SMTP
 - **Libraries:** 
-  - `mcp` - MCP protocol implementation
+  - `mcp` - MCP protocol implementation (pinned to `<2.0.0`, see [Requirements](#mcp-version-pin))
   - `requests` - HTTP client
   - `pandas`, `openpyxl` - Data processing
   - `beautifulsoup4` - HTML parsing
