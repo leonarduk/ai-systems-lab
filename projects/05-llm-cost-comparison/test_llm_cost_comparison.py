@@ -1115,17 +1115,50 @@ def test_resolve_fx_rate_provider_order_honours_env_override(monkeypatch):
     )
 
 
-def test_resolve_fx_rate_provider_order_drops_unknown_keys(monkeypatch):
+def test_resolve_fx_rate_provider_order_drops_unknown_keys(monkeypatch, capsys):
     monkeypatch.setenv(
         "FX_RATE_PROVIDER_ORDER", "not_a_provider,frankfurter_app,also_bogus"
     )
     assert m._resolve_fx_rate_provider_order() == ("frankfurter_app",)
+    err = capsys.readouterr().err
+    # Dropping a key silently is the wrong outcome: someone setting this
+    # is reacting to a provider that is already failing them, and would
+    # otherwise watch the same failures with no hint their override was
+    # partly ignored. The message names both the typos and the valid keys.
+    assert "not_a_provider" in err and "also_bogus" in err
+    assert "frankfurter_dev" in err
 
 
-def test_resolve_fx_rate_provider_order_falls_back_when_all_keys_unknown(monkeypatch):
-    # A typo shouldn't silently disable FX lookups — fall back to the default.
+def test_resolve_fx_rate_provider_order_deduplicates(monkeypatch, capsys):
+    # A repeated key would otherwise cost a second timeout against a
+    # provider that has already failed once.
+    monkeypatch.setenv(
+        "FX_RATE_PROVIDER_ORDER",
+        "exchangerate_host,frankfurter_dev,exchangerate_host",
+    )
+    assert m._resolve_fx_rate_provider_order() == (
+        "exchangerate_host",
+        "frankfurter_dev",
+    )
+    assert capsys.readouterr().err == ""
+
+
+def test_default_provider_order_covers_every_provider():
+    # A provider added to FX_RATE_PROVIDERS but left out of the default
+    # order is unreachable unless the user sets an env var naming it —
+    # dead config that nothing else would fail on.
+    assert set(m.DEFAULT_FX_RATE_PROVIDER_ORDER) == set(m.FX_RATE_PROVIDERS)
+    assert len(m.DEFAULT_FX_RATE_PROVIDER_ORDER) == len(m.FX_RATE_PROVIDERS)
+
+
+def test_resolve_fx_rate_provider_order_falls_back_when_all_keys_unknown(
+    monkeypatch, capsys
+):
+    # A typo must not disable FX lookups — but falling back is not the
+    # same as accepting the override, so it says so.
     monkeypatch.setenv("FX_RATE_PROVIDER_ORDER", "bogus_a,bogus_b")
     assert m._resolve_fx_rate_provider_order() == m.DEFAULT_FX_RATE_PROVIDER_ORDER
+    assert "using the default order" in capsys.readouterr().err
 
 
 def test_fetch_fx_rate_respects_env_provider_order(monkeypatch):

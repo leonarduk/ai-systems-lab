@@ -1187,8 +1187,33 @@ def _resolve_fx_rate_provider_order() -> tuple:
     if not raw:
         return DEFAULT_FX_RATE_PROVIDER_ORDER
     requested = [key.strip() for key in raw.split(",") if key.strip()]
-    valid = tuple(key for key in requested if key in FX_RATE_PROVIDERS)
-    return valid or DEFAULT_FX_RATE_PROVIDER_ORDER
+    # dict.fromkeys de-duplicates while keeping first-seen order, so
+    # "a,b,a" tries a once rather than making a failing provider cost two
+    # timeouts.
+    seen = list(dict.fromkeys(requested))
+    valid = tuple(key for key in seen if key in FX_RATE_PROVIDERS)
+    unknown = [key for key in seen if key not in FX_RATE_PROVIDERS]
+    if unknown:
+        # Never silent. Someone setting this variable is reacting to a
+        # provider that is already failing them, and the one outcome worse
+        # than the wrong order is quietly getting the order they did not
+        # ask for while they watch the same failures.
+        print(
+            "Warning: FX_RATE_PROVIDER_ORDER lists unknown provider(s) "
+            + ", ".join(repr(key) for key in unknown)
+            + "; known providers are "
+            + ", ".join(sorted(FX_RATE_PROVIDERS))
+            + ".",
+            file=sys.stderr,
+        )
+    if not valid:
+        print(
+            "Warning: FX_RATE_PROVIDER_ORDER named no known provider; "
+            "using the default order.",
+            file=sys.stderr,
+        )
+        return DEFAULT_FX_RATE_PROVIDER_ORDER
+    return valid
 
 
 def _fetch_yahoo_fx_rate(from_currency: str, to_currency: str, timeout: float) -> float:
