@@ -1243,7 +1243,11 @@ def load_gpu_defaults(path: Path = DEFAULT_GPU_DEFAULTS_PATH) -> tuple:
             data = json.load(f)
     except FileNotFoundError:
         return _FALLBACK_GPU_COST_POWER_DEFAULTS
-    except (json.JSONDecodeError, OSError) as exc:
+    except (ValueError, OSError) as exc:
+        # ValueError covers both json.JSONDecodeError and UnicodeDecodeError;
+        # the latter is not an OSError, so a file saved as UTF-16 or Latin-1
+        # would otherwise escape as a traceback rather than warn and fall
+        # back like every other unusable file.
         return _warn_bad_gpu_defaults(path, f"could not be read ({exc})")
     if not isinstance(data, dict):
         return _warn_bad_gpu_defaults(

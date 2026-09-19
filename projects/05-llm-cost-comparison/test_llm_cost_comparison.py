@@ -1936,6 +1936,23 @@ def test_load_gpu_defaults_falls_back_on_invalid_json(tmp_path: Path, capsys):
     assert "using built-in GPU defaults" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("encoding", ["utf-16", "latin-1"])
+def test_load_gpu_defaults_falls_back_on_non_utf8_file(
+    tmp_path: Path, capsys, encoding
+):
+    # The file is opened as UTF-8, so any other encoding raises
+    # UnicodeDecodeError — a ValueError, not an OSError, and therefore not
+    # caught by the obvious `except (json.JSONDecodeError, OSError)`.
+    # "Present but unusable" must warn and fall back, not traceback.
+    path = tmp_path / "gpu_power_defaults.json"
+    path.write_bytes(
+        '{"gpus": [{"label": "RTX 4090", "cost_usd": 1600.0, "power_watts": 450.0}]}'
+        "\n// caf\u00e9".encode(encoding)
+    )
+    assert m.load_gpu_defaults(path) == m._FALLBACK_GPU_COST_POWER_DEFAULTS
+    assert "could not be read" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     "contents, expected_problem",
     [
