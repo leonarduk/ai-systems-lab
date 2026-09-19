@@ -1040,6 +1040,21 @@ def test_fetch_octopus_agile_rate_returns_none_when_no_agile_product(monkeypatch
     assert m.fetch_octopus_agile_rate("C") is None
 
 
+@pytest.fixture(autouse=True)
+def _clear_fx_rate_provider_order_cache():
+    """Clear the cached FX provider order before and after every test.
+
+    ``_resolve_fx_rate_provider_order()`` is ``lru_cache``-decorated so the
+    env var is only read once per process. Any test that mutates
+    ``FX_RATE_PROVIDER_ORDER`` (or that relies on the default order) needs a
+    fresh resolution, so this fixture clears the cache around each test to
+    avoid cross-test contamination.
+    """
+    m._resolve_fx_rate_provider_order.cache_clear()
+    yield
+    m._resolve_fx_rate_provider_order.cache_clear()
+
+
 def test_fetch_fx_rate_parses_response(monkeypatch):
     body = json.dumps(
         {"amount": 1, "base": "GBP", "date": "2026-07-28", "rates": {"USD": 1.27}}
@@ -1100,6 +1115,94 @@ def test_fetch_fx_rate_returns_none_when_yahoo_also_fails(monkeypatch):
 
     monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
     assert m.fetch_fx_rate("GBP", "USD") is None
+
+
+# --------------------------------------------------------------------------
+# _resolve_fx_rate_provider_order (env override + caching)
+# --------------------------------------------------------------------------
+
+
+def test_resolve_fx_rate_provider_order_defaults_when_env_unset(monkeypatch):
+    monkeypatch.delenv("FX_RATE_PROVIDER_ORDER", raising=False)
+    m._resolve_fx_rate_provider_order.cache_clear()
+    assert (
+        m._resolve_fx_rate_provider_order() == m.DEFAULT_FX_RATE_PROVIDER_ORDER
+    )
+
+
+def test_resolve_fx_rate_provider_order_honours_env_override(monkeypatch):
+    monkeypatch.setenv(
+        "FX_RATE_PROVIDER_ORDER", "exchangerate.host,frankfurter.dev"
+    )
+    m._resolve_fx_rate_provider_order.cache_clear()
+    assert m._resolve_fx_rate_provider_order() == (
+        "exchangerate.host",
+        "frankfurter.dev",
+    )
+
+
+def test_resolve_fx_rate_provider_order_drops_unknown_keys(monkeypatch):
+    monkeypatch.setenv(
+        "FX_RATE_PROVIDER_ORDER", "not-a-real-provider,frankfurter.app"
+    )
+    m._resolve_fx_rate_provider_order.cache_clear()
+    assert m._resolve_fx_rate_provider_order() == ("frankfurter.app",)
+
+
+def test_resolve_fx_rate_provider_order_falls_back_when_all_keys_unknown(
+    monkeypatch,
+):
+    monkeypatch.setenv("FX_RATE_PROVIDER_ORDER", "typo1,typo2")
+    m._resolve_fx_rate_provider_order.cache_clear()
+    assert (
+        m._resolve_fx_rate_provider_order() == m.DEFAULT_FX_RATE_PROVIDER_ORDER
+    )
+
+
+def test_resolve_fx_rate_provider_order_falls_back_when_env_empty(monkeypatch):
+    monkeypatch.setenv("FX_RATE_PROVIDER_ORDER", "")
+    m._resolve_fx_rate_provider_order.cache_clear()
+    assert (
+        m._resolve_fx_rate_provider_order() == m.DEFAULT_FX_RATE_PROVIDER_ORDER
+    )
+
+
+def test_resolve_fx_rate_provider_order_is_cached(monkeypatch):
+    # First call resolves and caches; a subsequent env mutation without
+    # clearing the cache must not change the returned order.
+    monkeypatch.setenv("FX_RATE_PROVIDER_ORDER", "frankfurter.dev")
+    m._resolve_fx_rate_provider_order.cache_clear()
+    first = m._resolve_fx_rate_provider_order()
+    assert first == ("frankfurter.dev",)
+
+    monkeypatch.setenv("FX_RATE_PROVIDER_ORDER", "exchangerate.host")
+    second = m._resolve_fx_rate_provider_order()
+    assert second == first  # cached — env change ignored until cache_clear()
+
+    info = m._resolve_fx_rate_provider_order.cache_info()
+    assert info.hits >= 1
+
+
+def test_fetch_fx_rate_uses_env_override_order(monkeypatch):
+    # With the env override set, only the named provider should be tried
+    # before falling through to Yahoo.
+    monkeypatch.setenv("FX_RATE_PROVIDER_ORDER", "exchangerate.host")
+    m._resolve_fx_rate_provider_order.cache_clear()
+
+    body = json.dumps({"rates": {"USD": 1.42}}).encode("utf-8")
+    calls = []
+
+    def fake_urlopen(req, timeout=None):
+        url = req if isinstance(req, str) else req.full_url
+        calls.append(url)
+        if "exchangerate.host" in url:
+            return _FakeHTTPResponse(body)
+        raise OSError("should not be called")
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
+    assert m.fetch_fx_rate("GBP", "USD") == pytest.approx(1.42)
+    assert len(calls) == 1
+    assert "exchangerate.host" in calls[0]
 
 
 # --------------------------------------------------------------------------
