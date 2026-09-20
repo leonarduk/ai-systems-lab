@@ -1522,10 +1522,7 @@ def prompt_float(
     """
     suffix = f" [{default}]" if default is not None else ""
     while True:
-        try:
-            raw = input(f"{prompt}{suffix}: ").strip()
-        except EOFError:
-            raise
+        raw = input(f"{prompt}{suffix}: ").strip()
         if not raw and default is not None:
             return default
         try:
@@ -1565,10 +1562,7 @@ def prompt_choice(prompt: str, choices: list, default: Optional[str] = None) -> 
             )
         normalized_choices[key] = c
     while True:
-        try:
-            raw = input(f"{prompt} ({choice_str}){suffix}: ").strip().casefold()
-        except EOFError:
-            raise
+        raw = input(f"{prompt} ({choice_str}){suffix}: ").strip().casefold()
         if not raw and default:
             return default
         if raw in normalized_choices:
@@ -1582,10 +1576,7 @@ def prompt_yes_no(prompt: str, default: bool = True) -> bool:
     Raises ``EOFError`` if stdin is exhausted — see ``prompt_float``.
     """
     suffix = " [Y/n]" if default else " [y/N]"
-    try:
-        raw = input(f"{prompt}{suffix}: ").strip().lower()
-    except EOFError:
-        raise
+    raw = input(f"{prompt}{suffix}: ").strip().lower()
     if not raw:
         return default
     return raw.startswith("y")
@@ -2154,9 +2145,13 @@ def run_interactive(use_defaults: bool = False) -> int:
     else:
         try:
             scenarios = interactive_workload()
-            local_row_builder, display_currency, usd_per_gbp, tokens_per_sec, settings = (
-                interactive_local_setup()
-            )
+            (
+                local_row_builder,
+                display_currency,
+                usd_per_gbp,
+                tokens_per_sec,
+                settings,
+            ) = interactive_local_setup()
             selected = interactive_provider_selection(pricing)
         except EOFError:
             print(
