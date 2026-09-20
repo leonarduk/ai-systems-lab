@@ -108,6 +108,34 @@ class TestBuildSystemPrompt:
         # Should not raise: the explicit argument wins over the env var.
         context.build_system_prompt(max_tokens=40000, knowledge_dir=knowledge_dir)
 
+    def test_non_integer_env_var_raises_clear_error(self, knowledge_dir, monkeypatch):
+        monkeypatch.setenv("AVATAR_MAX_CONTEXT_TOKENS", "abc")
+
+        with pytest.raises(ValueError) as exc_info:
+            context.build_system_prompt(knowledge_dir=knowledge_dir)
+
+        message = str(exc_info.value)
+        assert "AVATAR_MAX_CONTEXT_TOKENS" in message
+        assert "abc" in message
+        assert "positive integer" in message
+
+    def test_non_positive_env_var_raises_clear_error(self, knowledge_dir, monkeypatch):
+        monkeypatch.setenv("AVATAR_MAX_CONTEXT_TOKENS", "0")
+
+        with pytest.raises(ValueError) as exc_info:
+            context.build_system_prompt(knowledge_dir=knowledge_dir)
+
+        message = str(exc_info.value)
+        assert "AVATAR_MAX_CONTEXT_TOKENS" in message
+        assert "0" in message
+        assert "positive integer" in message
+
+    def test_valid_integer_env_var_still_works(self, knowledge_dir, monkeypatch):
+        monkeypatch.setenv("AVATAR_MAX_CONTEXT_TOKENS", "40000")
+
+        # Should not raise: a valid positive integer is accepted as before.
+        context.build_system_prompt(knowledge_dir=knowledge_dir)
+
     def test_no_volatile_timestamp_content(self, knowledge_dir):
         prompt = context.build_system_prompt(knowledge_dir=knowledge_dir)
         # A static pushed_at date (YYYY-MM-DD) is legitimate committed data;
@@ -120,6 +148,71 @@ class TestBuildSystemPrompt:
 
         message = str(exc_info.value)
         assert "5" in message
+
+    def test_prompt_fits_exactly_at_max_tokens(self, tmp_path):
+        # build_system_prompt derives the GitHub section's budget from
+        # max_tokens (max_tokens - static sections - rules), so the assembled
+        # prompt is NOT invariant to the budget. Measuring it once at a
+        # generous budget and reusing that number can therefore land on a
+        # different, smaller prompt and miss the boundary entirely.
+        #
+        # Instead, walk the budget down to one that is genuinely
+        # self-consistent — the prompt it produces is exactly that many tokens
+        # — and require the GitHub section to have been trimmed to get there,
+        # which is the scenario issue #154 asks for. Each demotion drops the
+        # prompt by a large step, so this settles within a few dozen budgets.
+        (tmp_path / "summary.txt").write_text(
+            "I'm a senior engineer with 20 years of experience.", encoding="utf-8"
+        )
+        (tmp_path / "profile.md").write_text(
+            "## Experience\nSenior Software Engineer at Acme.", encoding="utf-8"
+        )
+        repos = [
+            make_repo(f"repo-{i}", f"2026-{i % 9 + 1:02d}-10", readme_len=200 + 40 * i)
+            for i in range(6)
+        ]
+        (tmp_path / "github.json").write_text(json.dumps(repos), encoding="utf-8")
+
+        def kept_in_full(prompt):
+            # A full record is rendered as "### name"; a demoted one as
+            # "- name: description".
+            return [r["name"] for r in repos if f"### {r['name']}" in prompt]
+
+        untrimmed = context.build_system_prompt(
+            max_tokens=40000, knowledge_dir=tmp_path
+        )
+        assert len(kept_in_full(untrimmed)) == len(repos)
+
+        exact = None
+        for budget in range(context.estimate_tokens(untrimmed) - 1, 0, -1):
+            try:
+                candidate = context.build_system_prompt(
+                    max_tokens=budget, knowledge_dir=tmp_path
+                )
+            except context.PromptTooLargeError:
+                continue
+            if context.estimate_tokens(candidate) == budget and 0 < len(
+                kept_in_full(candidate)
+            ) < len(repos):
+                exact = budget
+                break
+        assert exact is not None, "no exact-fit budget with a trimmed GitHub section"
+
+        prompt = context.build_system_prompt(max_tokens=exact, knowledge_dir=tmp_path)
+
+        # The boundary itself: an exact fit is allowed because the budget check
+        # is `>` and not `>=`. This assertion is the one that fails if that
+        # comparison is ever tightened.
+        assert context.estimate_tokens(prompt) == exact
+
+        # ...and the GitHub section really was trimmed to reach it, rather than
+        # the static sections happening to fill the budget on their own.
+        assert "## GitHub projects" in prompt
+        assert 0 < len(kept_in_full(prompt)) < len(repos)
+
+        # One token less genuinely does not fit.
+        with pytest.raises(context.PromptTooLargeError):
+            context.build_system_prompt(max_tokens=exact - 1, knowledge_dir=tmp_path)
 
 
 class TestGithubSectionTrimming:
@@ -257,3 +350,106 @@ class TestRulesBlock:
     ):
         prompt = context.build_system_prompt(knowledge_dir=knowledge_dir)
         assert prompt.rstrip().endswith(context.RULES_BLOCK.rstrip())
+
+    @staticmethod
+    def _unbounded_budget(knowledge_dir):
+        """A budget that cannot bind, derived from the inputs rather than guessed.
+
+        estimate_tokens is ceil(len/CHARS_PER_TOKEN_ESTIMATE), so the character
+        count of every input is always an upper bound on the token count. Using
+        it avoids a magic constant that silently stops being "large enough" as
+        the static text grows.
+        """
+        chars = len(context.ROLE_BLOCK) + len(context.RULES_BLOCK)
+        for name in ("summary.txt", "profile.md", "github.json"):
+            path = knowledge_dir / name
+            if path.exists():
+                chars += len(path.read_text(encoding="utf-8"))
+        return chars + 1
+
+    def test_raises_when_budget_is_below_the_static_floor(self, tmp_path):
+        # The role block, summary, profile and rules block are all appended
+        # unconditionally, so their combined size is a floor no amount of
+        # GitHub trimming can get under. A budget below it is unsatisfiable and
+        # must surface as PromptTooLargeError naming both numbers, rather than
+        # a silently truncated prompt.
+        (tmp_path / "summary.txt").write_text(
+            "I'm a senior engineer with 20 years of experience.", encoding="utf-8"
+        )
+        (tmp_path / "profile.md").write_text(
+            "## Experience\nSenior Software Engineer at Acme.", encoding="utf-8"
+        )
+        # No github.json: this prompt is exactly the unconditional floor.
+        floor = context.estimate_tokens(
+            context.build_system_prompt(
+                max_tokens=self._unbounded_budget(tmp_path), knowledge_dir=tmp_path
+            )
+        )
+
+        # At the floor it still builds...
+        assert (
+            context.estimate_tokens(
+                context.build_system_prompt(max_tokens=floor, knowledge_dir=tmp_path)
+            )
+            == floor
+        )
+
+        # ...and one token under it cannot.
+        with pytest.raises(context.PromptTooLargeError) as exc_info:
+            context.build_system_prompt(max_tokens=floor - 1, knowledge_dir=tmp_path)
+
+        message = str(exc_info.value)
+        assert str(floor) in message
+        assert str(floor - 1) in message
+
+    def test_github_section_never_receives_a_negative_budget(
+        self, monkeypatch, knowledge_dir
+    ):
+        # build_system_prompt computes budget_for_github as
+        # max_tokens - static - rules, which goes negative once the budget is
+        # below the static floor, and clamps it with max(..., 0).
+        #
+        # Note the clamp can only ever be observed from inside: a negative
+        # budget_for_github requires max_tokens below static + rules, while
+        # returning a prompt requires max_tokens at or above the assembled
+        # floor, which is strictly larger. Those ranges do not overlap, so
+        # there is no budget for which the clamp is active *and* a prompt
+        # comes back — the section's budget has to be inspected directly.
+        seen = []
+        real_github_section = context._github_section
+
+        def spy(records, section_budget):
+            seen.append(section_budget)
+            return real_github_section(records, section_budget)
+
+        monkeypatch.setattr(context, "_github_section", spy)
+
+        with pytest.raises(context.PromptTooLargeError):
+            context.build_system_prompt(max_tokens=1, knowledge_dir=knowledge_dir)
+
+        assert seen == [0], "negative GitHub budget reached _github_section"
+
+    def test_rules_block_survives_a_fully_trimmed_github_section(self, knowledge_dir):
+        # Under maximum budget pressure — the smallest budget that still builds
+        # — the GitHub section has been trimmed as far as it goes, but the rules
+        # block is appended unconditionally and must still be there. This is
+        # what would fail if the rules block were ever made budget-dependent.
+        budget = context.estimate_tokens(
+            context.build_system_prompt(
+                max_tokens=self._unbounded_budget(knowledge_dir),
+                knowledge_dir=knowledge_dir,
+            )
+        )
+        smallest = None
+        while True:
+            try:
+                smallest = context.build_system_prompt(
+                    max_tokens=budget, knowledge_dir=knowledge_dir
+                )
+            except context.PromptTooLargeError:
+                break
+            budget -= 1
+
+        assert smallest is not None
+        assert context.RULES_BLOCK.rstrip() in smallest
+        assert smallest.strip()
