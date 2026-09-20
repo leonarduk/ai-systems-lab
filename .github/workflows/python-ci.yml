@@ -165,8 +165,18 @@ jobs:
         pip install -r requirements-dev.txt
 
     - name: Run bandit security scan
+      # --exit-zero downgrades findings (bandit's own exit 1) to a
+      # non-blocking pass, while a real execution failure (bad flags,
+      # a missing/unreadable config, bandit itself missing) still exits
+      # non-zero and fails this step — the previous `|| echo` fallback
+      # swallowed both cases identically, masking genuine execution
+      # failures as a false "security issues found" pass. Verified
+      # directly: --exit-zero has no effect on bandit's own argparse
+      # usage-error exit code (2) or its config-load-error exit code (2);
+      # those still propagate. Findings are still printed to the log by
+      # bandit itself, just without failing the job.
       run: |
-        bandit -r projects/ -ll || echo "Security issues found"
+        bandit -r projects/ -ll --exit-zero
 
     - name: Check for known vulnerabilities
       run: |
