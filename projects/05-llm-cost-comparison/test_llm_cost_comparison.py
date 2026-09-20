@@ -1475,9 +1475,7 @@ def test_run_non_interactive_own_mode_rejects_non_numeric_field(tmp_path: Path):
 
 
 @pytest.mark.parametrize("bad_value", [0, -5, "fast", True, 0.0009, 0.0001])
-def test_run_non_interactive_rejects_nonpositive_tokens_per_sec(
-    tmp_path: Path, bad_value
-):
+def test_run_non_interactive_rejects_invalid_tokens_per_sec(tmp_path: Path, bad_value):
     pricing_path = tmp_path / "pricing.json"
     _write_pricing(pricing_path)
     config_path = tmp_path / "config.json"
