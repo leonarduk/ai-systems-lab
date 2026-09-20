@@ -10,8 +10,8 @@
   Update these two before publishing (see docs/design.md §9, §11):
   - og:url / twitter card URLs below assume GitHub Pages serves this repo
     from its root on the main branch; adjust if #132 configures it differently.
-  - The Render app URL is set once, on the CTA button's data-render-url
-    attribute below — see the comment there.
+  - The Render app URL is set once, as the CTA button's href below — see
+    the comment there.
 -->
 <meta property="og:type" content="website">
 <meta property="og:title" content="Steve Leonard — AI Twin">
@@ -188,15 +188,12 @@
     <li>"How do I get in touch with him?"</li>
   </ul>
 
-  <!-- The Render app URL is defined ONCE, in the data-render-url attribute
-       below — that is the single source of truth. The href is the real,
-       working fallback for JavaScript disabled; the script below reads the
-       URL from data-render-url to prewarm the app and to keep href in sync.
-       Update the URL in both the href and data-render-url together (they
-       must match). -->
-  <a id="start-chat-btn" class="cta"
-     href="https://ai-systems-lab-s8gy.onrender.com"
-     data-render-url="https://ai-systems-lab-s8gy.onrender.com">
+  <!-- The Render app URL is defined ONCE, as this href — that is the single
+       source of truth. It's the real, working fallback for JavaScript
+       disabled; the script below reads the URL straight from this same
+       attribute to prewarm the app, so there is nothing else to keep in
+       sync when the URL changes. -->
+  <a id="start-chat-btn" class="cta" href="https://ai-systems-lab-s8gy.onrender.com">
     <span class="cta-label">Start chatting</span>
   </a>
 
@@ -210,17 +207,14 @@
 </main>
 
 <script>
-  // The Render app URL is read from the CTA button's data-render-url
-  // attribute — that attribute is the single source of truth. The button's
-  // href is the real fallback for JavaScript disabled; we only re-assign it
-  // here to keep JS-enabled visitors in sync if only one of the two ever
-  // gets updated.
-  var btn = document.querySelector("[data-render-url]");
-  var renderAppUrl = btn && btn.dataset ? btn.dataset.renderUrl : null;
+  // The Render app URL lives only in the CTA button's href — that's the
+  // single source of truth, read here via getAttribute (not .href, which
+  // the browser resolves to an absolute URL) so the prewarm fetch targets
+  // exactly what's written in the markup.
+  var btn = document.getElementById("start-chat-btn");
+  var renderAppUrl = btn ? btn.getAttribute("href") : null;
 
   if (btn && renderAppUrl) {
-    btn.href = renderAppUrl;
-
     try {
       // no-cors: we don't need to read the response, only trigger the wake —
       // and a sleeping/unreachable instance must never surface a console
