@@ -155,7 +155,17 @@ def _default_max_tokens():
     raw = os.environ.get("AVATAR_MAX_CONTEXT_TOKENS")
     if raw is None:
         return DEFAULT_MAX_CONTEXT_TOKENS
-    return int(raw)
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(
+            f"AVATAR_MAX_CONTEXT_TOKENS must be a positive integer, got {raw!r}"
+        ) from None
+    if value <= 0:
+        raise ValueError(
+            f"AVATAR_MAX_CONTEXT_TOKENS must be a positive integer, got {raw!r}"
+        )
+    return value
 
 
 def build_system_prompt(max_tokens=None, knowledge_dir=None):
