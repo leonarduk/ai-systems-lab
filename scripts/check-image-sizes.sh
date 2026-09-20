@@ -38,10 +38,20 @@ if ! git rev-parse --verify --quiet "${BASE_REF}" >/dev/null; then
 fi
 
 # Collect added/modified files (A=added, M=modified) between BASE_REF and HEAD.
-# Use -z to safely handle filenames with spaces/newlines.
-mapfile -d '' -t CHANGED_FILES < <(
-  git diff --name-only --diff-filter=AM -z "${BASE_REF}...HEAD" || true
-)
+# Use -z to safely handle filenames with spaces/newlines. Written to a temp
+# file rather than piped through process substitution: `set -e` cannot see
+# failures inside a `< <(...)` subshell (a well-known bash limitation), so a
+# genuinely broken `git diff` would otherwise silently look like "no files
+# changed" and pass — the opposite of this script's fail-loud design.
+diff_output_file="$(mktemp)"
+trap 'rm -f "${diff_output_file}"' EXIT
+
+if ! git diff --name-only --diff-filter=AM -z "${BASE_REF}...HEAD" > "${diff_output_file}"; then
+  echo "ERROR: git diff failed comparing '${BASE_REF}' to HEAD." >&2
+  exit 2
+fi
+
+mapfile -d '' -t CHANGED_FILES < "${diff_output_file}"
 
 if [ "${#CHANGED_FILES[@]}" -eq 0 ]; then
   echo "No added or modified files in diff. Nothing to check."
