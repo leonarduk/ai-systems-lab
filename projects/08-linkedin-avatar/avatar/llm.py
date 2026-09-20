@@ -13,6 +13,7 @@ import os
 from openai import APIConnectionError, APIStatusError, OpenAI, RateLimitError
 
 from avatar import tools
+from avatar.tool_definitions import TOOL_DEFINITIONS
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,7 @@ def send_message(conversation, system_prompt, api_key=None, client=None):
             response = client.chat.completions.create(
                 model=model,
                 messages=messages,
-                tools=tools.TOOL_DEFINITIONS,
+                tools=TOOL_DEFINITIONS,
                 max_tokens=MAX_REPLY_TOKENS,
             )
         except RateLimitError:
