@@ -2,12 +2,20 @@
 """Post-deploy smoke test for the LinkedIn Avatar app.
 
 Hits the deployed public URL and verifies:
-  1. Required environment variables are present (cross-checked against what
-     ``app.py`` and its dependencies actually read).
-  2. The root URL responds with HTTP 200.
+  1. Required environment variables are present (checked against a hardcoded
+     list kept in sync with what ``app.py`` and its dependencies read).
+  2. The root URL responds with HTTP 200 and the page is actually the avatar
+     app, not just any 200 (e.g. a Render "waking up" placeholder).
   3. The chat endpoint returns a non-empty, plausible answer to a test question.
-  4. The contact-capture flow accepts a request and (unless ``--dry-run``)
-     a Pushover notification is actually delivered.
+  4. The contact-capture flow accepts a request and, unless ``--dry-run``,
+     PUSHOVER_USER/PUSHOVER_TOKEN are confirmed able to deliver a
+     notification. This does NOT prove the deployed app's own
+     contact-capture code called Pushover for this conversation — there is
+     no way to observe that from outside the app without adding
+     instrumentation to it (see issue #182's review discussion). It only
+     confirms two necessary preconditions: the chat flow accepts and
+     replies to a contact-shaped message, and the configured credentials
+     work.
 
 Exits non-zero on the first failure with a clear, actionable message.
 
@@ -27,6 +35,10 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from avatar.styles import TITLE as EXPECTED_ROOT_MARKER  # noqa: E402
 
 DEFAULT_BASE_URL = "https://ai-systems-lab-s8gy.onrender.com"
 
@@ -119,7 +131,20 @@ def check_root(base_url: str) -> None:
         )
     if not body:
         raise SmokeTestError(f"Root URL {base_url} returned an empty body.")
-    _log(f"[ok] root URL responded 200 ({len(body)} bytes)")
+    # A bare 200 isn't enough — a Render "service unavailable" placeholder,
+    # a proxy error page, or an unrelated app on the same host would also
+    # return 200. Require the app's own page title (set via
+    # gr.Blocks(title=styles.TITLE) in app.py) to actually be present.
+    text = body.decode("utf-8", errors="replace")
+    if EXPECTED_ROOT_MARKER not in text:
+        raise SmokeTestError(
+            f"Root URL {base_url} returned HTTP 200 but the page doesn't "
+            f"look like the avatar app — expected to find {EXPECTED_ROOT_MARKER!r} "
+            "in the response body."
+        )
+    _log(
+        f"[ok] root URL responded 200 with the expected app content ({len(body)} bytes)"
+    )
 
 
 def _gradio_chat(base_url: str, message: str) -> str:
@@ -188,6 +213,17 @@ def check_chat(base_url: str) -> None:
 
 
 def check_contact_capture(base_url: str, dry_run: bool) -> None:
+    """Drive the contact-capture conversation flow and, unless dry-run,
+    confirm PUSHOVER_USER/PUSHOVER_TOKEN can deliver a notification.
+
+    This does not prove the deployed app's own contact-capture code called
+    Pushover for this conversation — there's no way to observe that from
+    outside the app without adding instrumentation to it. It only confirms
+    two necessary preconditions: the chat flow accepts and replies to a
+    contact-shaped message, and the configured credentials actually work.
+    A broken server-side notification call (e.g. a stale token set only on
+    the deployed instance) would not be caught by this check.
+    """
     reply = _gradio_chat(base_url, CONTACT_MESSAGE)
     if not reply or not reply.strip():
         raise SmokeTestError("Contact-capture flow returned an empty reply.")
@@ -202,10 +238,14 @@ def check_contact_capture(base_url: str, dry_run: bool) -> None:
     if not user or not token:
         _log(
             "[skip] PUSHOVER_USER/PUSHOVER_TOKEN not set — cannot verify "
-            "Pushover delivery. Re-run with credentials to check end-to-end."
+            "the credentials work. Re-run with them set to check."
         )
         return
 
+    # NOTE: this calls Pushover directly with these credentials — it proves
+    # they can deliver a notification, not that the deployed app's own
+    # contact-capture path fired one for this conversation (see the
+    # docstring above).
     # Send a clearly-labelled test notification so it's obvious in the app.
     payload = urllib.parse.urlencode(
         {
@@ -236,7 +276,11 @@ def check_contact_capture(base_url: str, dry_run: bool) -> None:
         raise SmokeTestError(
             f"Pushover API returned HTTP {status}: {body[:200]!r}"
         )
-    _log("[ok] Pushover accepted the test notification")
+    _log(
+        "[ok] Pushover credentials work (a real notification was sent — "
+        "this confirms the credentials, not that the app's own "
+        "contact-capture path triggered a send)"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

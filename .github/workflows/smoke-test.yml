@@ -34,10 +34,17 @@ jobs:
           PUSHOVER_TOKEN: ${{ secrets.PUSHOVER_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # workflow_dispatch inputs are user-controlled; pass them through env
+          # vars rather than interpolating ${{ }} directly into the shell
+          # script below, which would let a crafted input inject commands
+          # (see GitHub's own script-injection hardening guide).
+          INPUT_BASE_URL: ${{ github.event.inputs.base_url }}
+          INPUT_DRY_RUN: ${{ github.event.inputs.dry_run }}
+          IS_SCHEDULED_RUN: ${{ github.event_name == 'schedule' }}
         run: |
-          BASE_URL="${{ github.event.inputs.base_url || 'https://ai-systems-lab-s8gy.onrender.com' }}"
+          BASE_URL="${INPUT_BASE_URL:-https://ai-systems-lab-s8gy.onrender.com}"
           DRY_RUN_FLAG=""
-          if [ "${{ github.event.inputs.dry_run }}" = "true" ] || [ "${{ github.event_name }}" = "schedule" ]; then
+          if [ "${INPUT_DRY_RUN}" = "true" ] || [ "${IS_SCHEDULED_RUN}" = "true" ]; then
             DRY_RUN_FLAG="--dry-run"
           fi
           python projects/08-linkedin-avatar/scripts/smoke_test.py \
