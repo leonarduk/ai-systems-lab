@@ -115,6 +115,8 @@ state.
 
 If the problem is a specific leaked or compromised secret rather than "take the whole thing
 down", rotating that one key (below) is faster than suspending and doesn't interrupt the app.
+For a suspected secret leak, an active abuse incident, or anything needing credentials revoked
+as well as traffic stopped, use the full **Emergency shutdown** procedure below instead.
 
 ### Rotating a key
 
@@ -135,7 +137,10 @@ the shutdown actually took effect.
 1. **Stop the Render web service.**
    - **Dashboard (preferred):** [dashboard.render.com](https://dashboard.render.com) → the
      `08-linkedin-avatar` service → **Suspend**. This halts traffic immediately and is reversible
-     with one click. Use **Delete** only if the service should not come back.
+     with one click. Use **Delete** only if the service should not come back — deleting also
+     destroys the service's configuration (environment variables, build settings), so a later
+     restore means recreating the service and re-entering every env var from scratch, not just
+     un-suspending it.
    - **CLI (if you have it configured):** `render services suspend <service-id>` (or
      `render services delete <service-id>` for permanent removal). Confirm the service ID in the
      dashboard first — do not guess it.
@@ -164,8 +169,12 @@ the shutdown actually took effect.
      `curl -i https://<service-name>.onrender.com/` — expect a connection failure or a Render
      "service unavailable" response, **not** a Gradio page. A 200 with the chat UI means it is
      still up; go back to step 1.
-   - If Telegram or Pushover were configured, confirm the revoked tokens no longer work (e.g.
-     `curl https://api.telegram.org/bot<old-token>/getMe` should return `401 Unauthorized`).
+   - If Telegram or Pushover were configured, confirm the revoked tokens no longer work. For
+     Telegram, check the **JSON body**, not just the HTTP status — the Bot API can report an
+     invalid token with `"ok": false` even when the transport-level status looks like success:
+     `curl -s https://api.telegram.org/bot<old-token>/getMe` should return a body containing
+     `"ok":false` (e.g. `{"ok":false,"error_code":401,"description":"Unauthorized"}`). A body with
+     `"ok":true` means the token is still live; go back to step 2.
 
 4. **Document the incident.** Record what happened, when the service was suspended, which
    credentials were revoked and when, and who was notified. Link the incident note from the
