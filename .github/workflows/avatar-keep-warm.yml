@@ -36,13 +36,28 @@ jobs:
         run: |
           set -uo pipefail
           url="https://ai-systems-lab-s8gy.onrender.com"
-          attempt() { curl -sSf --max-time 60 "$url" -o /dev/null; }
 
-          if attempt; then
-            echo "Ping succeeded"
-          elif attempt; then
-            echo "Retry succeeded"
+          # Capture the HTTP status code from the last attempt so the failure
+          # warning can report *why* the ping failed (404 vs 500 vs 503 vs a
+          # network timeout). `-s` silences progress, `-o /dev/null` discards
+          # the body, and `-w "%{http_code}"` prints the status code. We do
+          # NOT use `-f` here so curl exits 0 even on 4xx/5xx and we can read
+          # the code; the caller decides success by comparing to "200".
+          HTTP_CODE=""
+          attempt() {
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 "$url" || echo "000")
+          }
+
+          attempt
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "Ping succeeded (HTTP $HTTP_CODE)"
           else
-            echo "::warning::Both keep-warm pings failed — app may be down or slow to wake"
+            first_code="$HTTP_CODE"
+            attempt
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "Retry succeeded (HTTP $HTTP_CODE)"
+            else
+              echo "::warning::Both keep-warm pings failed — app may be down or slow to wake (first attempt: HTTP $first_code, last attempt: HTTP $HTTP_CODE)"
+            fi
           fi
         shell: bash
