@@ -165,6 +165,33 @@ class TestSendMessageHappyPath:
         assert "error" in payload
         assert "lookup_project" in payload["error"]
 
+    def test_dispatch_exception_message_is_not_leaked_to_llm(self, monkeypatch):
+        """tools.py documents that tool implementations never raise; reaching
+        this handler means one broke that contract, so its exception is
+        unvetted and may embed secrets (e.g. tools._telegram_notify's own
+        comment: the Telegram API URL carries the bot token). The raw
+        exception text must never reach the tool result fed back to the LLM."""
+
+        def boom(name, arguments):
+            raise RuntimeError("secret-token-abc123 in the request URL")
+
+        monkeypatch.setattr(llm.tools, "dispatch", boom)
+
+        tool_call = make_tool_call("call_boom", "lookup_project", {"name": "x"})
+        client = FakeClient(
+            [
+                make_response(tool_calls=[tool_call]),
+                make_response(content="recovered"),
+            ]
+        )
+
+        llm.send_message([{"role": "user", "content": "hi"}], "system", client=client)
+
+        tool_message = next(
+            m for m in client.calls[1]["messages"] if m["role"] == "tool"
+        )
+        assert "secret-token-abc123" not in tool_message["content"]
+
 
 class TestUsageAccounting:
     def test_usage_accumulated_across_rounds(self):
