@@ -12,6 +12,7 @@ on:
     paths:
       - "projects/08-linkedin-avatar/knowledge/profile.md"
       - "scripts/validate_profile.py"
+      - "scripts/test_validate_profile.py"
       - ".github/workflows/validate-profile.yml"
   workflow_dispatch:
 
@@ -30,6 +31,15 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: Install pytest
+        run: python -m pip install --quiet pytest
+
+      - name: Test the profile validator itself
+        # Unlike the advisory run below, the validator's own correctness is
+        # not advisory — a broken heuristic should fail CI, not just the
+        # profile content it's checking.
+        run: python -m pytest scripts/test_validate_profile.py -v
 
       - name: Run profile validator (advisory)
         # `continue-on-error: true` keeps this job non-blocking. The

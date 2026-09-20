@@ -56,7 +56,7 @@ Based in London.
 JPMorgan Chase & Co.
 4 years 7 months
 Lead Software Engineer VP
-September 2022 - May 2026 (3 years 9 months)
+September 2022 - May 2026 (3 years 9 months)
 
 Greater London
 • Querying risk data required users to learn a complex Sybase IQ schema.
@@ -88,4 +88,87 @@ and eliminating a redundant microservice saving $10,000/year.
 tooling, incrementally updating repos as part of regular development work to
 reduce accumulated technical debt.
 • Led a year-long AWS proof of concept to evaluate replacing a legacy
-batch processing system; delivered
+batch processing system; delivered a production-ready architecture with full
+architectural approval and resolved the majority of long-standing technical debt
+blockers.
+Lead Python Developer VP
+November 2021 - August 2022 (10 months)
+London
+• Inherited a buggy, undocumented Python data access library — a former
+side project — with an aggressive AWS deployment deadline, no design spec,
+and two junior developers focused on BAU. Redesigned the architecture so
+a single pip-installable wheel ran across AWS, private cloud and Windows
+client environments, adapting behaviour by deployment context while sharing
+
+a common codebase. The resulting service was nominated for the 2022
+American Financial Technology Awards "Best Analytics" Initiative.
+Credit Suisse
+Application Architect & Developer (VP)
+December 2019 - October 2021 (1 year 11 months)
+London Area, United Kingdom
+• Diagnosed and resolved a critical processing bottleneck in a Java-based
+risk system, reducing portfolio processing time from over an hour to several
+minutes and unblocking a delayed migration project
+• Seconded informally to support a Python data engineering team after they
+lost their specialist; optimised a risk data extraction and reporting pipeline
+using async processing, halving server usage and cutting runtime from 6 hours
+to 30 minutes
+Morgan Stanley
+Developer
+September 2018 - November 2019 (1 year 3 months)
+London, United Kingdom
+• Introduced remote debugging tooling for Linux-based C++ systems,
+significantly accelerating development velocity; added gcov code coverage
+and built unit tests increasing C++ coverage from 20% to 32%
+• Created extensive developer documentation including system architecture
+diagrams, adopted as reference material across the team
+Standard Chartered Bank
+Consulting Java Developer
+April 2016 - September 2018 (2 years 6 months)
+London, United Kingdom
+• Developed Java 8 RESTful web services for enterprise risk and margin
+calculation systems, with automated Python regression testing
+• Nominated Most Active Contributor in the bank-wide Business Efficiency
+ideas forum
+Credit Suisse
+Consulting Java Developer and Scrum Master
+April 2014 - February 2016 (1 year 11 months)
+London Area, United Kingdom
+• Developed trade migration from legacy to strategic global trade store and
+Fidessa in a geographically dispersed Agile team, acting as Scrum Master
+
+•Reduced development time for field mapping changes from days  to minutes
+by simplifying code logic; replaced manual deployment confirmation process
+with a self-service web tool
+Swiss Re
+Consulting Analyst Developer within Risk Technology
+September 2007 - December 2013 (6 years 4 months)
+London Area, United Kingdom
+• Senior software engineer on credit and market risk reporting systems for a
+global team across 4 time zones,  eliciting requirements from non-technical risk
+managers in Zurich and New York
+• Replaced legacy Java VaR feeder application with a simpler Perl-based
+solution, reducing development time from weeks to days
+• Automated Engineer-to-Engineer UAT for a key Murex migration, cutting the
+test cycle from 2 days to 5 hours
+HBOS Treasury Services
+Consulting Credit Risk Developer
+June 2006 - June 2007 (1 year 1 month)
+Nomura International
+System Developer
+July 2004 - June 2006 (2 years)
+Lehman Brothers
+Risk Developer
+June 2001 - June 2004 (3 years 1 month)
+Intuwave
+Software Engineer
+December 2000 - June 2001 (7 months)
+Standard Chartered Bank
+Analyst Programmer
+November 1999 - December 2000 (1 year 2 months)
+## Education
+City University London
+MSc (Part-time), Businesss Systems Analysis & Design · (2005 - 2008)
+
+The University of Edinburgh
+BSc, Physics · (1993 - 1997)

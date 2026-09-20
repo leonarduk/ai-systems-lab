@@ -108,11 +108,9 @@ PRODUCTION_CLAIM_PATTERNS = [
     r"\bin\s+production\b",
     r"\bproduction[- ]ready\b",
     r"\bproduction\s+experience\b",
-    r"\bshipped\b",
-    r"\bdelivered\b",
-    r"\bbuilt\b",
-    r"\bdesigned\s+and\s+built\b",
-    r"\bdeployed\b",
+    r"\brunning\s+in\s+production\b",
+    r"\blive\s+in\s+production\b",
+    r"\bshipped\s+to\s+production\b",
 ]
 
 
@@ -137,6 +135,7 @@ def has_production_claim(text: str) -> bool:
 # ---------------------------------------------------------------------------
 # Consistency rules
 # ---------------------------------------------------------------------------
+
 
 class Mismatch:
     def __init__(self, kind: str, message: str) -> None:
@@ -232,7 +231,8 @@ def check_production_claims(summary: str, experience: str) -> list[Mismatch]:
                 "production-claim-unsupported",
                 "Summary claims production/hands-on experience but the "
                 "Experience section contains no matching production "
-                "language (e.g. 'in production', 'delivered', 'built').",
+                "language (e.g. 'in production', 'production-ready', "
+                "'shipped to production').",
             )
         )
     return mismatches
@@ -241,6 +241,7 @@ def check_production_claims(summary: str, experience: str) -> list[Mismatch]:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def validate(profile_text: str) -> tuple[list[Mismatch], list[Mismatch]]:
     """Return (errors, warnings) for the given profile text."""
@@ -253,13 +254,9 @@ def validate(profile_text: str) -> tuple[list[Mismatch], list[Mismatch]]:
     warnings: list[Mismatch] = []
 
     if not summary:
-        errors.append(
-            Mismatch("missing-section", "No '## Summary' section found.")
-        )
+        errors.append(Mismatch("missing-section", "No '## Summary' section found."))
     if not experience:
-        errors.append(
-            Mismatch("missing-section", "No '## Experience' section found.")
-        )
+        errors.append(Mismatch("missing-section", "No '## Experience' section found."))
     if errors:
         return errors, warnings
 
@@ -270,9 +267,7 @@ def validate(profile_text: str) -> tuple[list[Mismatch], list[Mismatch]]:
     errors.extend(check_production_claims(summary, experience))
 
     warnings.extend(
-        check_technologies_in_experience_reflected_in_summary(
-            summary, experience
-        )
+        check_technologies_in_experience_reflected_in_summary(summary, experience)
     )
 
     return errors, warnings
