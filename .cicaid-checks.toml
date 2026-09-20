@@ -5,7 +5,8 @@
 # script, mypy over a `backend/` package, etc.) — none of which exist in this
 # repo. That fallback was causing every issue-worm-pro run against this repo
 # to fail on an unrelated, nonexistent script before ever reaching real
-# verification. These checks mirror .github/workflows/python-ci.yml instead.
+# verification. These checks mirror the `lint` and `security` jobs of
+# .github/workflows/python-ci.yml (not the full workflow).
 #
 # .github/scripts/test_extract_verdict.py shells out to a hardcoded
 # `python3`, which isn't on PATH on Windows, so it's excluded (along with
@@ -22,7 +23,7 @@ commands = [
     # found a real bug in it) -- a broken verifier script silently
     # skipping projects is exactly the failure mode this check exists to
     # close.
-    "pytest .github/scripts/test_run_project_tests.py -q",
+    "python -m pytest .github/scripts/test_run_project_tests.py -q",
     "python .github/scripts/run_project_tests.py",
 ]
 
