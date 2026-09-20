@@ -33,13 +33,23 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import Callable, Optional
 
-VERSION = "0.1.0"
+# Resolved from installed package metadata so pyproject.toml is the single
+# source of truth for the version. Falls back to an obviously-not-a-release
+# sentinel when running from a source checkout where the package isn't
+# installed (e.g. `python llm_cost_comparison.py --version`).
+try:
+    VERSION = _pkg_version("llm-cost-comparison")
+except PackageNotFoundError:
+    VERSION = "0.0.0+unknown"
 
 DEFAULT_PRICING_PATH = Path(__file__).parent / "pricing.json"
 DEFAULT_LAST_RUN_PATH = Path(__file__).parent / ".last_run.json"
@@ -683,6 +693,33 @@ def build_local_row(
     return ComparisonRow(name, monthly_cost, per_million, notes, feasible=feasible)
 
 
+def _validate_pricing_model(model_info: dict, full_key: str) -> None:
+    """Validate a single pricing model's per-million-token fields.
+
+    Shared by ``load_pricing`` (via ``_validate_pricing``) and
+    ``build_hosted_rows`` so both paths enforce identical semantics and
+    raise the same ``ConfigError`` message. A field must be a real number
+    (not a ``bool``, which is an ``int`` subclass), finite, and strictly
+    positive — a zero or negative price would silently produce a
+    nonsensical cost, and ``NaN``/``inf`` would poison every downstream
+    figure.
+    """
+    import math
+
+    for field in ("input_per_million", "output_per_million"):
+        value = model_info.get(field)
+        ok = (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and value > 0
+        )
+        if not ok:
+            raise ConfigError(
+                f"pricing model {full_key!r} is missing a numeric {field}"
+            )
+
+
 def build_hosted_rows(
     workload: Workload, pricing: dict, selected: Optional[set] = None
 ) -> list:
@@ -690,17 +727,21 @@ def build_hosted_rows(
 
     ``selected`` is an optional set of ``"provider/model"`` keys to restrict
     the comparison to; if None, every model in the pricing file is included.
+
+    Pricing values are validated here (via ``_validate_pricing_model``)
+    rather than assumed pre-validated, so a hand-constructed ``pricing``
+    dict that bypassed ``load_pricing`` still fails loudly with a
+    ``ConfigError`` instead of silently computing costs from a missing,
+    zero, negative, non-numeric, ``NaN``, or ``inf`` price. The check is
+    cheap (two field lookups per model) and reuses the same helper as
+    ``load_pricing``, so error messages and semantics stay identical.
     """
     rows = []
     for provider_key, model_key, model_info in iter_models(pricing):
         full_key = f"{provider_key}/{model_key}"
         if selected is not None and full_key not in selected:
             continue
-        for field in ("input_per_million", "output_per_million"):
-            if not isinstance(model_info.get(field), (int, float)):
-                raise ConfigError(
-                    f"pricing model {full_key!r} is missing a numeric {field}"
-                )
+        _validate_pricing_model(model_info, full_key)
         monthly_cost = hosted_monthly_cost(
             workload, model_info["input_per_million"], model_info["output_per_million"]
         )
@@ -1196,6 +1237,23 @@ def lookup_gpu_defaults(gpu_name: str) -> Optional[tuple]:
 DESKTOP_REST_OF_SYSTEM_W = 100.0
 LAPTOP_REST_OF_SYSTEM_W = 30.0
 
+# User-facing prompt text for the two power-draw questions in
+# ``interactive_local_setup``. Hoisted to module scope so the wording lives
+# in one discoverable place (and can be localized later) instead of being
+# buried inline in the function body.
+EXTRA_POWER_DRAW_PROMPT = (
+    "Extra power draw while generating — GPU/CPU load above idle (W), "
+    "for when the machine is already on for other reasons "
+    "(the additional watts the GPU/CPU pull when active, on top of "
+    "the idle system draw)"
+)
+TOTAL_SYSTEM_DRAW_PROMPT = (
+    "Total system power draw while running — GPU plus the rest of the PC "
+    "(W), for when it's only powered on to run this "
+    "(the entire system's power consumption while the GPU is under load, "
+    "including the extra draw above)"
+)
+
 
 def rest_of_system_allowance_w(gpu_info: Optional[dict]) -> float:
     """Rough default allowance (W) for everything except the GPU itself —
@@ -1237,7 +1295,7 @@ def format_gpu_summary(gpu_info: dict) -> str:
 
 def list_ollama_models(base_url: str) -> list:
     """List every model pulled into the local Ollama install (``GET /api/tags``)."""
-    _validate_http_url(base_url)
+    base_url = _validate_http_url(base_url)
     req = urllib.request.Request(f"{base_url.rstrip('/')}/api/tags", method="GET")
     with urllib.request.urlopen(req, timeout=10) as resp:
         data = json.loads(resp.read().decode("utf-8"))
@@ -1251,7 +1309,7 @@ def list_running_ollama_models(base_url: str) -> list:
     benchmark request will hit — a better default than the full installed
     list from ``list_ollama_models`` when both are available.
     """
-    _validate_http_url(base_url)
+    base_url = _validate_http_url(base_url)
     req = urllib.request.Request(f"{base_url.rstrip('/')}/api/ps", method="GET")
     with urllib.request.urlopen(req, timeout=10) as resp:
         data = json.loads(resp.read().decode("utf-8"))
@@ -1260,7 +1318,7 @@ def list_running_ollama_models(base_url: str) -> list:
 
 def list_openai_compatible_models(base_url: str, api_key: Optional[str] = None) -> list:
     """List models an OpenAI-compatible server reports as available (``GET /v1/models``)."""
-    _validate_http_url(base_url)
+    base_url = _validate_http_url(base_url)
     headers = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -1300,18 +1358,40 @@ BENCHMARK_PROMPT = (
 )
 
 
-def _validate_http_url(base_url: str) -> None:
-    """Reject non-http(s) base URLs before building a request from them.
+def _validate_http_url(base_url: str) -> str:
+    """Normalize and validate a base URL before building a request from it.
 
-    ``base_url`` comes straight from free-form user input; without this, a
-    ``file://`` or other custom scheme would be passed through to
-    ``urllib.request`` unchecked.
+    ``base_url`` comes straight from free-form user input. Users commonly
+    type a bare ``host[:port]`` (e.g. ``localhost:11434``) without a scheme,
+    so a missing scheme is silently filled in with ``http://`` — the tool
+    only ever makes HTTP requests to local endpoints, so that's the right
+    default. Any other scheme (``file://``, ``ftp://``, etc.) is still
+    rejected, since passing those through to ``urllib.request`` unchecked
+    would be unsafe.
+
+    Returns the normalized URL so callers can use the scheme-prefixed form.
     """
-    scheme = base_url.split("://", 1)[0].lower() if "://" in base_url else ""
+    import re
+
+    url = base_url.strip()
+    # urlsplit can't be used to detect the scheme here: it reads the "host" of
+    # a bare "localhost:11434" as a scheme, which is exactly the input this
+    # normalizes. Check for an explicit "<scheme>://" prefix instead.
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", url):
+        url = "http://" + url
+    scheme = url.split("://", 1)[0].lower()
     if scheme not in ("http", "https"):
         raise ValueError(
             f"base_url must start with http:// or https:// (got {base_url!r})"
         )
+    # Without this, empty or whitespace-only input normalizes to a bare
+    # "http://" and is accepted, then fails much later inside urllib with a
+    # confusing URLError. Reject it here with a clear message instead. This
+    # also catches malformed input like "://x", which normalizes to
+    # "http://://x" (netloc ":", no host).
+    if not urllib.parse.urlsplit(url).hostname:
+        raise ValueError(f"base_url must include a host (got {base_url!r})")
+    return url
 
 
 def benchmark_ollama(base_url: str, model: str, num_predict: int = 200) -> float:
@@ -1323,7 +1403,7 @@ def benchmark_ollama(base_url: str, model: str, num_predict: int = 200) -> float
     ``benchmark_openai_compatible``'s wall-clock measurement (see its
     docstring).
     """
-    _validate_http_url(base_url)
+    base_url = _validate_http_url(base_url)
     payload = json.dumps(
         {
             "model": model,
@@ -1358,7 +1438,7 @@ def benchmark_openai_compatible(
     Both make this systematically lower and not directly comparable to
     ``benchmark_ollama``'s generation-only ``eval_duration`` measurement.
     """
-    _validate_http_url(base_url)
+    base_url = _validate_http_url(base_url)
     payload = json.dumps(
         {
             "model": model,
@@ -1457,7 +1537,21 @@ def prompt_choice(prompt: str, choices: list, default: Optional[str] = None) -> 
     # Normalize choices for case-insensitive comparison while preserving the
     # original casing for display. A future mixed-case entry (e.g. "Claude")
     # would otherwise be silently rejected when the user types "claude".
-    normalized_choices = {c.casefold(): c for c in choices}
+    #
+    # Build the lookup explicitly rather than via a dict comprehension so a
+    # casefold collision (e.g. ["Claude", "claude"]) fails loudly instead of
+    # silently dropping one entry — the dropped choice would otherwise be
+    # unreachable even though it was explicitly offered. This is a no-op for
+    # the current all-lowercase-ASCII callers, where casefold is identity.
+    normalized_choices = {}
+    for c in choices:
+        key = c.casefold()
+        if key in normalized_choices:
+            raise ValueError(
+                f"choices contain casefold-collision: "
+                f"{normalized_choices[key]!r} and {c!r} both normalize to {key!r}"
+            )
+        normalized_choices[key] = c
     while True:
         raw = input(f"{prompt} ({choice_str}){suffix}: ").strip().casefold()
         if not raw and default:
@@ -1708,10 +1802,7 @@ def interactive_local_setup() -> tuple:
             "  machine is on — you don't have to pick one up front.\n"
         )
         power_watts_extra = prompt_float(
-            "Extra power draw while generating — GPU/CPU load above idle (W), "
-            "for when the machine is already on for other reasons "
-            "(the additional watts the GPU/CPU pull when active, on top of "
-            "the idle system draw)",
+            EXTRA_POWER_DRAW_PROMPT,
             default=extra_default,
             minimum=0,
         )
@@ -1733,10 +1824,7 @@ def interactive_local_setup() -> tuple:
             "for a desktop) — override below if yours differs."
         )
         power_watts_total = prompt_float(
-            "Total system power draw while running — GPU plus the rest of the PC "
-            "(W), for when it's only powered on to run this "
-            "(the entire system's power consumption while the GPU is under load, "
-            "including the extra draw above)",
+            TOTAL_SYSTEM_DRAW_PROMPT,
             default=power_watts_extra + rest_of_system_w,
             minimum=0,
         )
@@ -1854,6 +1942,24 @@ def interactive_local_setup() -> tuple:
 
 
 def interactive_provider_selection(pricing: dict) -> Optional[set]:
+    """Prompt the user to choose which hosted models to compare against.
+
+    Returns ``None`` to mean "compare against every model in ``pricing``",
+    a (possibly empty) set of canonical keys to restrict the comparison to
+    those models, or an empty set for "local only".
+
+    ``all_keys`` is the set of canonical keys accepted by this prompt. It
+    contains full ``provider/model`` keys only (e.g. ``"claude/opus-5"``,
+    ``"deepseek/deepseek-v3"``) — provider-only input such as ``"claude"``
+    is *not* a member of ``all_keys`` and is therefore treated as unknown.
+
+    User input is matched case-insensitively via ``canonical_by_lower``
+    (a ``{lowercased_key: canonical_key}`` mapping), so ``"Claude/Opus-5"``
+    resolves to the canonical ``"claude/opus-5"``. Any input that does not
+    match a canonical key after case-folding is treated as unknown and
+    routed through the warning/re-prompt flow rather than being silently
+    dropped or accepted.
+    """
     print("\n== Hosted providers ==")
     print("Available models:")
     all_keys = []
@@ -2249,6 +2355,13 @@ def run_non_interactive(
     pricing_path = Path(config.get("pricing_file", DEFAULT_PRICING_PATH))
     if not pricing_path.is_absolute():
         pricing_path = config_path.parent / pricing_path
+    # load_pricing raises ConfigError (wrapping FileNotFoundError for a
+    # missing file, or JSONDecodeError for invalid JSON) with a clear
+    # message. Let it propagate rather than swallowing it here: main()
+    # already catches ConfigError, prints "Config error: <message>" to
+    # stderr (no raw traceback), and exits non-zero, so callers that
+    # invoke run_non_interactive directly (e.g. tests, other tooling)
+    # still get the exception to handle as they see fit.
     pricing = load_pricing(pricing_path)
     selected = set(config["selected_models"]) if "selected_models" in config else None
 
