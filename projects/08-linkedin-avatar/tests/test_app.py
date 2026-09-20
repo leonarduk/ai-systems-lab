@@ -115,3 +115,21 @@ class TestHealthEndpoint:
         response = client.get("/health")
         assert response.status_code == 200
         assert response.json() == {"status": "ok"}
+
+    def test_health_is_still_reachable_when_mounted_with_the_chat_ui(self):
+        # The realistic failure mode: build_health_app() passes in isolation
+        # but the route silently disappears once actually combined with the
+        # Gradio demo for a real run. demo.launch(app_kwargs={"app": ...})
+        # looked plausible but silently drops the custom app entirely — this
+        # was only caught by launching it and hitting both routes for real.
+        # gr.mount_gradio_app is what actually merges the two correctly.
+        client = TestClient(app.build_app())
+        response = client.get("/health")
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
+
+    def test_chat_ui_still_serves_at_root_when_health_app_is_mounted(self):
+        client = TestClient(app.build_app())
+        response = client.get("/")
+        assert response.status_code == 200
+        assert "text/html" in response.headers["content-type"]

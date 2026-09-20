@@ -81,11 +81,27 @@ def build_health_app():
     return health_app
 
 
+def build_app():
+    """Combine the chat UI and the health endpoint into one FastAPI app.
+
+    demo.launch()'s app_kwargs is for keyword arguments to Gradio's own
+    FastAPI constructor (e.g. docs_url) — passing a second app instance
+    under the "app" key there is silently accepted and silently does
+    nothing; /health returns 404 (confirmed by launching it and hitting
+    both routes — see issue #194's review discussion). gr.mount_gradio_app
+    is the actual documented way to serve a custom FastAPI app's routes
+    alongside a Gradio Blocks demo.
+    """
+    return gr.mount_gradio_app(
+        build_health_app(), build_demo(), path="/", css=styles.CSS
+    )
+
+
 if __name__ == "__main__":
-    port = os.environ.get("GRADIO_SERVER_PORT")
-    build_demo().launch(
-        server_name=os.environ.get("GRADIO_SERVER_NAME"),
-        server_port=int(port) if port else None,
-        css=styles.CSS,
-        app_kwargs={"app": build_health_app()},
+    import uvicorn
+
+    uvicorn.run(
+        build_app(),
+        host=os.environ.get("GRADIO_SERVER_NAME", "127.0.0.1"),
+        port=int(os.environ.get("GRADIO_SERVER_PORT", "7860")),
     )
