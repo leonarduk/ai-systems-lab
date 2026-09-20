@@ -30,8 +30,17 @@ Python SDK's `ClientSession.call_tool`. `StdioMCPToolClient` is a real
 implementation using that SDK (see `requirements.txt`); it has not been
 exercised against a live server since none existed yet. Once issue #22's
 server is available, set `MCP_SERVER_COMMAND` / `MCP_SERVER_ARGS` to launch
-it and this client should work unmodified. All tests mock the protocol via
-`tests/fakes.py::FakeMCPToolClient`, so they never depend on a live server.
+it and this client should work unmodified. Most tests mock the protocol via
+`tests/fakes.py::FakeMCPToolClient`, so they never depend on a live server;
+`tests/test_stdio_mcp_tool_client.py` additionally drives the real client
+against a mock server subprocess.
+
+Every call is bounded: `StdioMCPToolClient` takes a `connect_timeout`
+(default 10s, for the MCP handshake) and a `call_timeout` (default 60s, for
+the tool itself, which fetches and parses pages). Both raise `MCPToolError`
+when they expire, as do handshake and startup failures. Without the connect
+timeout a server that writes unparseable output and holds its pipe open
+blocks the orchestrator forever — no error, no log line, the poll just stops.
 
 ## How it works
 
