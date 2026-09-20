@@ -9,6 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import avatar.tool_definitions as tool_definitions  # noqa: E402
 import avatar.tools as tools  # noqa: E402
 
 
@@ -159,7 +160,9 @@ class TestTelegramNotify:
         monkeypatch.setattr(
             tools.requests,
             "post",
-            lambda *a, **k: (_ for _ in ()).throw(tools.requests.ConnectionError("no network")),
+            lambda *a, **k: (_ for _ in ()).throw(
+                tools.requests.ConnectionError("no network")
+            ),
         )
 
         with caplog.at_level(logging.ERROR):
@@ -197,6 +200,112 @@ class TestNotifyFanOut:
         result = tools._notify("title", "message")
 
         assert result["status"] == "failed"
+
+    def _configure_both_channels(self, monkeypatch):
+        monkeypatch.setenv("PUSHOVER_USER", "u")
+        monkeypatch.setenv("PUSHOVER_TOKEN", "t")
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "cid")
+
+    def test_partial_failure_still_counts_as_sent(self, monkeypatch):
+        # Both channels configured; Pushover succeeds, Telegram returns 500.
+        # _notify is documented as "sent if any channel sent": the notification
+        # did reach me, so a transient outage on one channel must not report the
+        # whole fan-out as failed. The per-channel statuses still record what
+        # happened. Issue #191 originally specified "failed" here; its AC was
+        # amended to match this contract rather than change _notify, which the
+        # issue itself puts out of scope.
+        self._configure_both_channels(monkeypatch)
+
+        def fake_post(url, data, timeout):
+            if url == tools.PUSHOVER_URL:
+                return FakeResponse(200)
+            return FakeResponse(500)
+
+        monkeypatch.setattr(tools.requests, "post", fake_post)
+
+        result = tools._notify("title", "message")
+
+        assert result["status"] == "sent"
+        assert result["channels"]["pushover"]["status"] == "sent"
+        assert result["channels"]["telegram"]["status"] == "failed"
+        assert result["channels"]["telegram"]["detail"]
+
+    def test_partial_failure_by_exception_still_counts_as_sent(self, monkeypatch):
+        # Same, but the failing channel raises rather than returning an error
+        # status — _notify is documented never to raise.
+        self._configure_both_channels(monkeypatch)
+
+        def fake_post(url, data, timeout):
+            if url == tools.PUSHOVER_URL:
+                return FakeResponse(200)
+            raise tools.requests.ConnectionError("no network")
+
+        monkeypatch.setattr(tools.requests, "post", fake_post)
+
+        result = tools._notify("title", "message")
+
+        assert result["status"] == "sent"
+        assert result["channels"]["pushover"]["status"] == "sent"
+        assert result["channels"]["telegram"]["status"] == "failed"
+
+    def test_partial_failure_is_reported_as_recorded(self, monkeypatch):
+        # This is why "sent" is the right overall status: the caller must not
+        # tell a visitor their contact request was lost when one of two
+        # channels delivered it.
+        self._configure_both_channels(monkeypatch)
+
+        def fake_post(url, data, timeout):
+            if url == tools.PUSHOVER_URL:
+                return FakeResponse(200)
+            return FakeResponse(500)
+
+        monkeypatch.setattr(tools.requests, "post", fake_post)
+
+        assert tools.record_contact("visitor@example.com")["recorded"] is True
+
+    def test_every_configured_channel_failing_is_a_failure(self, monkeypatch):
+        # The other side of the same rule: with nothing getting through, the
+        # fan-out is a failure rather than a partial success.
+        self._configure_both_channels(monkeypatch)
+        monkeypatch.setattr(
+            tools.requests, "post", lambda url, data, timeout: FakeResponse(500)
+        )
+
+        result = tools._notify("title", "message")
+
+        assert result["status"] == "failed"
+        assert tools.record_contact("visitor@example.com")["recorded"] is False
+
+    def test_telegram_failure_does_not_leak_the_bot_token(self, monkeypatch, caplog):
+        # Telegram's URL embeds the bot token, so the failure path logs only a
+        # status code and never the exception or URL. A regression to
+        # logger.exception here would write the token into the logs.
+        self._configure_both_channels(monkeypatch)
+
+        def fake_post(url, data, timeout):
+            if url == tools.PUSHOVER_URL:
+                return FakeResponse(200)
+            # requests puts the failing URL in the exception message, which is
+            # how the token would reach the log. Reproduce that faithfully —
+            # a bare exception would make this test pass either way.
+            exc = tools.requests.HTTPError(
+                f"500 Server Error for url: "
+                f"{tools.TELEGRAM_API_URL.format(token='tok')}"
+            )
+            exc.response = FakeResponse(500)
+            raise exc
+
+        monkeypatch.setattr(tools.requests, "post", fake_post)
+
+        with caplog.at_level(logging.DEBUG):
+            tools._notify("title", "message")
+
+        # The failure path definitely ran (and logged the status code)...
+        assert "Telegram notification failed" in caplog.text
+        assert "500" in caplog.text
+        # ...without the token reaching the log.
+        assert "tok" not in caplog.text
 
 
 class TestRecordContact:
@@ -305,6 +414,50 @@ class TestLookupProject:
         assert result["found"] is False
         assert "message" in result
 
+    def test_record_missing_name_is_skipped(self, tmp_path, monkeypatch):
+        records = [
+            {"description": "no name here", "url": "https://example.com/broken"},
+            {
+                "name": "issue-worm",
+                "description": "Multi-agent coder",
+                "url": "https://github.com/leonarduk/issue-worm",
+            },
+        ]
+        path = tmp_path / "github.json"
+        path.write_text(json.dumps(records), encoding="utf-8")
+        monkeypatch.setattr(tools, "GITHUB_SNAPSHOT_PATH", path)
+
+        result = tools.lookup_project(name="issue-worm")
+
+        assert result["found"] is True
+        assert result["project"]["name"] == "issue-worm"
+
+    def test_all_records_malformed_does_not_raise(self, tmp_path, monkeypatch):
+        records = [
+            {"description": "no name"},
+            "not-a-dict",
+            {"name": ""},
+            {"name": None},
+        ]
+        path = tmp_path / "github.json"
+        path.write_text(json.dumps(records), encoding="utf-8")
+        monkeypatch.setattr(tools, "GITHUB_SNAPSHOT_PATH", path)
+
+        result = tools.lookup_project(name="issue-worm")
+
+        assert result["found"] is False
+        assert "message" in result
+
+    def test_snapshot_not_a_list_does_not_raise(self, tmp_path, monkeypatch):
+        path = tmp_path / "github.json"
+        path.write_text(json.dumps({"not": "a list"}), encoding="utf-8")
+        monkeypatch.setattr(tools, "GITHUB_SNAPSHOT_PATH", path)
+
+        result = tools.lookup_project(name="issue-worm")
+
+        assert result["found"] is False
+        assert "message" in result
+
 
 class TestDispatch:
     def test_dispatches_known_tool(self):
@@ -321,8 +474,11 @@ class TestDispatch:
 
 
 class TestToolDefinitions:
+    def test_reexported_from_tools_module(self):
+        assert tools.TOOL_DEFINITIONS is tool_definitions.TOOL_DEFINITIONS
+
     def test_every_definition_is_strict_and_closed(self):
-        for tool in tools.TOOL_DEFINITIONS:
+        for tool in tool_definitions.TOOL_DEFINITIONS:
             function = tool["function"]
             assert function["strict"] is True
             params = function["parameters"]
