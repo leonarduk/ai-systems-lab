@@ -1555,27 +1555,35 @@ def test_run_non_interactive_rejects_zero_total_workload_tokens(tmp_path: Path):
 
 
 @pytest.mark.parametrize("bad_value", [-1, "many"])
-def test_run_non_interactive_rejects_bad_workload_field(tmp_path: Path, bad_value):
+@pytest.mark.parametrize(
+    "field_name", ["requests_per_day", "avg_input_tokens", "avg_output_tokens"]
+)
+def test_run_non_interactive_rejects_bad_workload_field(
+    tmp_path: Path, field_name, bad_value
+):
     pricing_path = tmp_path / "pricing.json"
     _write_pricing(pricing_path)
     config_path = tmp_path / "config.json"
+    workload = {
+        "requests_per_day": 1000,
+        "avg_input_tokens": 500,
+        "avg_output_tokens": 300,
+    }
+    workload[field_name] = bad_value
     config = {
-        "workload": {
-            "requests_per_day": bad_value,
-            "avg_input_tokens": 500,
-            "avg_output_tokens": 300,
-        },
+        "workload": workload,
         "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
         "pricing_file": str(pricing_path),
     }
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
     # Per-field wording (no "workload." prefix) — pins the exact message
-    # shape, including the offending value, so the format can't silently
-    # drift back to a prefixed or value-less variant.
+    # shape, including the field name and the offending value, so the
+    # format can't silently drift back to a prefixed or value-less variant
+    # for any of the three fields, not just the one originally exercised.
     with pytest.raises(
         m.ConfigError,
-        match=rf"^requests_per_day must be a non-negative number, got {bad_value!r}$",
+        match=rf"^{field_name} must be a non-negative number, got {bad_value!r}$",
     ):
         m.run_non_interactive(config_path, export_fmt=None, export_path=None)
 
