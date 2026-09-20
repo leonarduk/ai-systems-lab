@@ -5,6 +5,10 @@ on:
     branches: [ main, develop ]
   pull_request:
     branches: [ main ]
+  schedule:
+    # Run weekly on Mondays at 06:00 UTC so staleness that develops while a
+    # branch is idle is still caught (a PR-only check would miss it).
+    - cron: '0 6 * * 1'
   workflow_dispatch:
 
 jobs:
@@ -169,13 +173,16 @@ jobs:
         set -euo pipefail
 
         # Build a throwaway root that mimics the real layout but whose
-        # requirements.txt deliberately omits the mcp<2.0.0 pin.
+        # requirements.txt deliberately omits the mcp<2.0.0 pin. The
+        # comment below must not itself contain the pin string, or the
+        # check's own grep will match the comment and this self-test
+        # will always fail (found by actually running it).
         fixture_root="$(mktemp -d)"
         trap 'rm -rf "$fixture_root"' EXIT
 
         mkdir -p "$fixture_root/projects/01-mcp-server-suite/servers/bad-server"
         cat > "$fixture_root/projects/01-mcp-server-suite/servers/bad-server/requirements.txt" <<'EOF'
-        # intentionally missing the mcp<2.0.0 pin
+        # this file does not declare the required mcp dependency pin
         requests>=2.31.0
         EOF
 
@@ -220,3 +227,27 @@ jobs:
         fi
 
         echo "Self-test OK: check_mcp_pin.sh correctly failed when no requirements files were found."
+
+  pricing-staleness:
+    name: Check pricing.json staleness
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    # Non-blocking by default (mode=warn) per the AI review's suggestion.
+    # To make this a hard failure, set STALENESS_MODE=fail below or in the
+    # repository's Actions variables. The threshold is configurable via
+    # STALENESS_THRESHOLD_MONTHS without editing the script's logic.
+    - name: Check pricing.json as_of freshness
+      env:
+        STALENESS_THRESHOLD_MONTHS: '6'
+        STALENESS_MODE: 'warn'
+      run: |
+        python projects/05-llm-cost-comparison/scripts/check_pricing_staleness.py

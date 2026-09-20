@@ -36,7 +36,10 @@ fi
 
 status=0
 for req in "${requirements_files[@]}"; do
-  if grep -q 'mcp<2\.0\.0' "$req"; then
+  # Anchored to the start of the line so a comment merely mentioning
+  # "mcp<2.0.0" (e.g. explaining why the line below needs it) can't
+  # satisfy the check — only an actual requirement line can.
+  if grep -qE '^mcp.*<2\.0\.0' "$req"; then
     echo "OK: $req pins mcp<2.0.0"
   else
     echo "::error::FAIL: $req is missing the mcp<2.0.0 pin"
