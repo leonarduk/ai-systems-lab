@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-cost-comparison"
+version = "0.1.0"
+description = "Interactive LLM cost comparison: local inference vs. hosted APIs."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "llm-cost-comparison contributors" }]
+keywords = ["llm", "cost", "pricing", "ollama", "deepseek", "claude", "bedrock"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Utilities",
+]
+# No runtime dependencies: the script is stdlib-only by design so it runs on
+# a plain Windows Python install with no `pip install` step.
+dependencies = []
+
+[project.scripts]
+llm-cost-comparison = "llm_cost_comparison:main"
+
+[tool.setuptools]
+py-modules = ["llm_cost_comparison"]
+
+[tool.setuptools.package-data]
+"*" = ["pricing.json"]
