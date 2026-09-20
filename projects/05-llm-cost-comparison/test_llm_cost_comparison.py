@@ -1125,15 +1125,11 @@ def test_fetch_fx_rate_returns_none_when_yahoo_also_fails(monkeypatch):
 def test_resolve_fx_rate_provider_order_defaults_when_env_unset(monkeypatch):
     monkeypatch.delenv("FX_RATE_PROVIDER_ORDER", raising=False)
     m._resolve_fx_rate_provider_order.cache_clear()
-    assert (
-        m._resolve_fx_rate_provider_order() == m.DEFAULT_FX_RATE_PROVIDER_ORDER
-    )
+    assert m._resolve_fx_rate_provider_order() == m.DEFAULT_FX_RATE_PROVIDER_ORDER
 
 
 def test_resolve_fx_rate_provider_order_honours_env_override(monkeypatch):
-    monkeypatch.setenv(
-        "FX_RATE_PROVIDER_ORDER", "exchangerate.host,frankfurter.dev"
-    )
+    monkeypatch.setenv("FX_RATE_PROVIDER_ORDER", "exchangerate.host,frankfurter.dev")
     m._resolve_fx_rate_provider_order.cache_clear()
     assert m._resolve_fx_rate_provider_order() == (
         "exchangerate.host",
@@ -1142,9 +1138,7 @@ def test_resolve_fx_rate_provider_order_honours_env_override(monkeypatch):
 
 
 def test_resolve_fx_rate_provider_order_drops_unknown_keys(monkeypatch):
-    monkeypatch.setenv(
-        "FX_RATE_PROVIDER_ORDER", "not-a-real-provider,frankfurter.app"
-    )
+    monkeypatch.setenv("FX_RATE_PROVIDER_ORDER", "not-a-real-provider,frankfurter.app")
     m._resolve_fx_rate_provider_order.cache_clear()
     assert m._resolve_fx_rate_provider_order() == ("frankfurter.app",)
 
@@ -1154,17 +1148,13 @@ def test_resolve_fx_rate_provider_order_falls_back_when_all_keys_unknown(
 ):
     monkeypatch.setenv("FX_RATE_PROVIDER_ORDER", "typo1,typo2")
     m._resolve_fx_rate_provider_order.cache_clear()
-    assert (
-        m._resolve_fx_rate_provider_order() == m.DEFAULT_FX_RATE_PROVIDER_ORDER
-    )
+    assert m._resolve_fx_rate_provider_order() == m.DEFAULT_FX_RATE_PROVIDER_ORDER
 
 
 def test_resolve_fx_rate_provider_order_falls_back_when_env_empty(monkeypatch):
     monkeypatch.setenv("FX_RATE_PROVIDER_ORDER", "")
     m._resolve_fx_rate_provider_order.cache_clear()
-    assert (
-        m._resolve_fx_rate_provider_order() == m.DEFAULT_FX_RATE_PROVIDER_ORDER
-    )
+    assert m._resolve_fx_rate_provider_order() == m.DEFAULT_FX_RATE_PROVIDER_ORDER
 
 
 def test_resolve_fx_rate_provider_order_is_cached(monkeypatch):
@@ -1203,6 +1193,46 @@ def test_fetch_fx_rate_uses_env_override_order(monkeypatch):
     assert m.fetch_fx_rate("GBP", "USD") == pytest.approx(1.42)
     assert len(calls) == 1
     assert "exchangerate.host" in calls[0]
+
+
+def test_default_provider_order_matches_url_templates_order():
+    """Locks in the "no-env behaviour must remain byte-identical" constraint:
+    the no-env default must resolve providers in the same order as the
+    original ``FX_RATE_URL_TEMPLATES`` tuple, so a future reorder of one
+    without the other doesn't silently change which provider is tried first.
+    """
+    assert m.DEFAULT_FX_RATE_PROVIDER_ORDER == tuple(
+        m.FX_RATE_PROVIDER_TEMPLATES.keys()
+    )
+    for key, url_template in zip(
+        m.DEFAULT_FX_RATE_PROVIDER_ORDER, m.FX_RATE_URL_TEMPLATES
+    ):
+        assert m.FX_RATE_PROVIDER_TEMPLATES[key] == url_template
+
+
+def test_fetch_fx_rate_tries_yahoo_after_env_override_provider_fails(monkeypatch):
+    # With the env override set to a single provider that fails, Yahoo must
+    # still be tried — the override must not skip the Yahoo last resort.
+    monkeypatch.setenv("FX_RATE_PROVIDER_ORDER", "exchangerate.host")
+    m._resolve_fx_rate_provider_order.cache_clear()
+
+    body = json.dumps(
+        {"chart": {"result": [{"meta": {"regularMarketPrice": 1.31}}]}}
+    ).encode("utf-8")
+    calls = []
+
+    def fake_urlopen(req, timeout=None):
+        url = req if isinstance(req, str) else req.full_url
+        calls.append(url)
+        if "yahoo" in url:
+            return _FakeHTTPResponse(body)
+        raise OSError("blocked")
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
+    assert m.fetch_fx_rate("GBP", "USD") == pytest.approx(1.31)
+    assert len(calls) == 2
+    assert "exchangerate.host" in calls[0]
+    assert "yahoo" in calls[1]
 
 
 # --------------------------------------------------------------------------

@@ -29,6 +29,7 @@ import argparse
 import csv
 import functools
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -1194,13 +1195,9 @@ def _resolve_fx_rate_provider_order() -> tuple:
     ``FX_RATE_PROVIDER_ORDER`` between cases must call
     ``_resolve_fx_rate_provider_order.cache_clear()`` to see the new value.
     """
-    import os
-
     raw = os.environ.get("FX_RATE_PROVIDER_ORDER", "")
     requested = [key.strip().lower() for key in raw.split(",") if key.strip()]
-    resolved = tuple(
-        key for key in requested if key in FX_RATE_PROVIDER_TEMPLATES
-    )
+    resolved = tuple(key for key in requested if key in FX_RATE_PROVIDER_TEMPLATES)
     return resolved or DEFAULT_FX_RATE_PROVIDER_ORDER
 
 
