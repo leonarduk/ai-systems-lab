@@ -41,6 +41,23 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
 
+      - name: Install per-project requirements
+        # .cicaid-checks.toml's "test" check runs
+        # .github/scripts/run_project_tests.py directly, which only
+        # discovers and runs each project's tests — unlike
+        # python-ci.yml's own "test" job, it never installs a project's
+        # own requirements.txt first. Without this step, any project
+        # with real dependencies (e.g. 04-gmail-inbox-labeler's
+        # google-auth packages) fails at test collection on a fresh
+        # runner. Confirmed by running `cicaid run-ci-checks --all`
+        # locally with only requirements-dev.txt installed.
+        run: |
+          find projects -name "requirements.txt" -print0 | while IFS= read -r -d '' req; do
+            echo "::group::Installing $req"
+            python -m pip install -r "$req"
+            echo "::endgroup::"
+          done
+
       - name: Verify required tools are on PATH
         run: |
           python --version
