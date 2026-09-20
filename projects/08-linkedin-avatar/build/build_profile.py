@@ -215,8 +215,15 @@ def main(argv=None):
     )
     parser.add_argument(
         "--check",
+        nargs="?",
+        const=True,
+        default=None,
         metavar="PROFILE_MD",
-        help="Re-run redaction detection over an existing profile.md and exit 1 on any leak",
+        help=(
+            "Re-run redaction detection and exit 1 on any leak. Takes a path to "
+            "check an existing profile.md; combine with --dry-run (no path) to "
+            "check the not-yet-written output instead."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -225,7 +232,12 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
-    if args.check:
+    if args.check and not args.dry_run:
+        if args.check is True:
+            parser.error(
+                "--check requires a path (e.g. --check knowledge/profile.md) "
+                "unless combined with --dry-run"
+            )
         check_path = Path(args.check)
         text = check_path.read_text(encoding="utf-8")
         leaks = find_contact_leaks(text)
