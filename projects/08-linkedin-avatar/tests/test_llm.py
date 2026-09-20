@@ -325,3 +325,15 @@ class TestBuildClient:
 
     def test_missing_api_key_raises(self, monkeypatch):
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        with pytest.raises(KeyError):
+            llm._build_client()
+
+
+class TestModelSelection:
+    def test_defaults_to_deepseek_v4_flash(self, monkeypatch):
+        monkeypatch.delenv("AVATAR_MODEL", raising=False)
+        assert llm._model() == llm.DEFAULT_MODEL
+
+    def test_reads_avatar_model_env_var(self, monkeypatch):
+        monkeypatch.setenv("AVATAR_MODEL", "deepseek-v4-pro")
+        assert llm._model() == "deepseek-v4-pro"
