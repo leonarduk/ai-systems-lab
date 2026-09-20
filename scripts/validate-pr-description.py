@@ -17,7 +17,6 @@ import re
 import sys
 from pathlib import Path
 
-
 HEADING_RE = re.compile(
     r"^\s{0,3}#{1,6}\s*files?\s+affected\s*:?\s*$",
     re.IGNORECASE,
@@ -39,8 +38,13 @@ def read_description() -> str:
     return os.environ.get("PR_DESCRIPTION", "")
 
 
-def extract_files_affected(description: str) -> list[str]:
-    """Return the list of file paths listed under the Files Affected heading."""
+def extract_files_affected(description: str) -> list[str] | None:
+    """Return the file paths listed under the Files Affected heading.
+
+    Returns None (not an empty list) when no such heading exists at all, so
+    callers can tell "the section is there but empty" apart from "there is
+    no section" — the two mean very different things (see main()).
+    """
     lines = description.splitlines()
     start = None
     for idx, line in enumerate(lines):
@@ -49,7 +53,7 @@ def extract_files_affected(description: str) -> list[str]:
             break
 
     if start is None:
-        return []
+        return None
 
     collected: list[str] = []
     for line in lines[start:]:
@@ -75,7 +79,16 @@ def extract_files_affected(description: str) -> list[str]:
 
 def normalize(path: str) -> str:
     p = path.strip().strip("`").strip()
-    p = p.lstrip("./")
+    # A literal "./" prefix, not a leading run of '.' and '/' characters:
+    # str.lstrip("./") strips the character *set* {'.', '/'}, so a real repo
+    # path like ".github/workflows/foo.yml" loses its leading dot too,
+    # becoming "github/workflows/foo.yml". That happens to cancel out here
+    # because both the listed path and the actual changed-file path go
+    # through the same normalize(), but it's a landmine for any caller that
+    # compares a normalized path against something that didn't go through
+    # this function — strip only an actual "./" prefix instead.
+    while p.startswith("./"):
+        p = p[2:]
     return p
 
 
@@ -94,27 +107,51 @@ def main() -> int:
         print("No changed workflow files detected; nothing to validate.")
         return 0
 
-    if not description.strip():
-        print("::warning::PR description is empty; cannot validate Files Affected section.")
-        print("Missing from Files Affected section:")
-        for f in changed:
-            print(f"  - {f}")
-        return 1
-
     listed_raw = extract_files_affected(description)
-    listed = {normalize(p) for p in listed_raw}
 
+    if listed_raw is None:
+        # No "Files Affected" heading at all — which, checked against every
+        # real PR in this repo's history (including #89, the incident this
+        # check exists for), is not an exception: no PR here has ever used
+        # this heading. issue-worm's own generated PRs write "## What" as
+        # prose describing the change, not a parseable file list. Treating
+        # "doesn't use an optional heading nobody uses" as a documentation
+        # violation would fire ::warning:: on every single workflow-touching
+        # PR from here on, forever, with no way to distinguish a genuinely
+        # undocumented change from an ordinarily-written one — the exact
+        # kind of unfixable, un-actionable noise that trains reviewers to
+        # ignore every warning this check ever produces. So this is
+        # informational only, and does not fail the check.
+        print(
+            "PR description has no 'Files Affected' section — nothing to "
+            "cross-check. (Add one to get this check's real value: it "
+            "verifies the section against the diff once you opt in.)"
+        )
+        return 0
+
+    listed = {normalize(p) for p in listed_raw}
     missing = [f for f in changed if normalize(f) not in listed]
 
     if not missing:
         print("All changed workflow files are listed in the Files Affected section.")
         return 0
 
-    print("::warning::The following changed workflow files are not listed in the PR description's 'Files Affected' section:")
+    # Here, unlike the no-heading case above, there IS a real drift: the
+    # author opted into a Files Affected section and then missed a file —
+    # the same species of mistake as PR #89 (which had no Files Affected
+    # section; the omission there was from its "## What" bullet list
+    # instead, so this check wouldn't actually have caught #89 itself, but
+    # it catches the identical failure mode for anyone who does use this
+    # heading). This is worth a real warning.
+    print(
+        "::warning::The following changed workflow files are not listed in the PR description's 'Files Affected' section:"
+    )
     for f in missing:
         print(f"  - {f}")
     print()
-    print("Please update the PR description to include these files under '## Files Affected'.")
+    print(
+        "Please update the PR description to include these files under '## Files Affected'."
+    )
     print("(This check is informational and does not block merge.)")
     return 1
 

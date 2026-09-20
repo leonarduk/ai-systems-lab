@@ -85,3 +85,28 @@ jobs:
         if: steps.changed.outputs.files == ''
         run: echo "No workflow files changed in this PR; skipping Files Affected validation."
         shell: bash
+
+  test-pr-description-validator:
+    # Deliberately a separate job from pr-description-files-affected above,
+    # and without that job's continue-on-error: true. Whether a given PR's
+    # description happens to list every changed file is advisory — that job
+    # is right to never block on it — but whether the validator script
+    # itself is correct is not advisory, it's a real bug/no-bug question,
+    # and scripts/ sits outside the discovery scope of both
+    # .github/scripts/run_project_tests.py and python-ci.yml's `test` job
+    # (both walk projects/ only), so without a job like this the tests in
+    # scripts/test_validate_pr_description.py would never run anywhere.
+    # Not gated on whether this PR touched a workflow file: a change to
+    # the validator itself needs checking even without one.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Run scripts/ test suite
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pytest
+          python3 -m pytest scripts/ -v
+        shell: bash
