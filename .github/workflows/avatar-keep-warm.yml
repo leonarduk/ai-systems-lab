@@ -26,23 +26,47 @@ permissions:
 jobs:
   ping:
     runs-on: ubuntu-latest
+    # Bound the whole job, not just each curl call. Two attempts at
+    # --max-time 60 plus runner overhead fit comfortably in 5 minutes, while
+    # still preventing a runaway job from consuming free-tier minutes if
+    # curl or the runner misbehaves.
+    timeout-minutes: 5
     steps:
       - name: Ping the app (retry once, never fail the run on a transient miss)
         run: |
           set -uo pipefail
           url="https://ai-systems-lab-s8gy.onrender.com"
-          attempt() { curl -sSf --max-time 60 "$url" -o /dev/null; }
 
-          if attempt; then
-            echo "Ping succeeded"
+          # Capture the HTTP status code from the last attempt so the failure
+          # warning can report *why* the ping failed (404 vs 500 vs 503 vs a
+          # network timeout). `-s` silences progress, `-o /dev/null` discards
+          # the body, and `-w "%{http_code}"` prints the status code. We do
+          # NOT use `-f` here so curl exits 0 even on 4xx/5xx and we can read
+          # the code; the caller decides success by comparing to "200".
+          # curl's -w "%{http_code}" always prints "000" itself on any
+          # failure to get a response (connection refused, DNS failure, a
+          # malformed URL, timeout) — confirmed across all of those cases.
+          # An `|| echo "000"` fallback here would double up on that,
+          # producing "000000" whenever curl's own exit code is also
+          # non-zero (which it is exactly when it already printed "000").
+          HTTP_CODE=""
+          attempt() {
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 "$url")
+          }
+
+          attempt
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "Ping succeeded (HTTP $HTTP_CODE)"
           else
+            first_code="$HTTP_CODE"
             # Render cold starts can take 30-60s; give the app a moment to
             # finish booting before retrying so the retry is meaningful.
             sleep 5
-            if attempt; then
-              echo "Retry succeeded"
+            attempt
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "Retry succeeded (HTTP $HTTP_CODE)"
             else
-              echo "::warning::Both keep-warm pings failed — app may be down or slow to wake"
+              echo "::warning::Both keep-warm pings failed — app may be down or slow to wake (first attempt: HTTP $first_code, last attempt: HTTP $HTTP_CODE)"
             fi
           fi
         shell: bash
