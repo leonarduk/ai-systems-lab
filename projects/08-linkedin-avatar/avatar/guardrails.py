@@ -26,6 +26,13 @@ DEFAULT_MODEL_FOR_PRICING = "deepseek-v4-flash"
 
 _UNIT_SECONDS = {"hour": 3600, "day": 86400}
 
+# Cleanup tuning for _SlidingWindowLimiter. When the number of tracked keys
+# exceeds _CLEANUP_KEY_THRESHOLD, we sweep out keys whose most recent event is
+# older than the window (they can no longer affect any decision). The sweep is
+# amortised: it only runs when the map has grown past the threshold, so the
+# hot path stays cheap for normal traffic.
+_CLEANUP_KEY_THRESHOLD = 1000
+
 # Verified against api-docs.deepseek.com/quick_start/pricing on 2026-08-30.
 # USD per 1M tokens, using the more expensive **peak** rate as the
 # conservative default (off-peak is half these figures) — prices move, so
@@ -89,14 +96,38 @@ def estimate_cost_usd(usage, model=None):
 
 
 class _SlidingWindowLimiter:
-    """Thread-safe sliding-window rate limiter, held in process memory."""
+    """Thread-safe sliding-window rate limiter, held in process memory.
 
-    def __init__(self, max_events, window_seconds, clock=time.time):
+    Stale keys (sessions/IPs that have not been seen within the window) are
+    swept out opportunistically once the tracked-key count crosses
+    `_CLEANUP_KEY_THRESHOLD`, so a long-running process does not accumulate
+    one permanent entry per unique visitor.
+    """
+
+    def __init__(
+        self,
+        max_events,
+        window_seconds,
+        clock=time.time,
+        cleanup_threshold=_CLEANUP_KEY_THRESHOLD,
+    ):
         self.max_events = max_events
         self.window_seconds = window_seconds
         self._clock = clock
+        self._cleanup_threshold = cleanup_threshold
         self._events = {}
         self._lock = threading.Lock()
+
+    def _prune_stale_keys(self, cutoff):
+        """Drop keys whose most recent event is older than `cutoff`.
+
+        Caller must hold `self._lock`. A key is only removed when *all* of
+        its recorded events are outside the active window, so a key that is
+        still rate-limiting cannot be reset by cleanup.
+        """
+        stale = [key for key, events in self._events.items() if not events or events[-1] < cutoff]
+        for key in stale:
+            del self._events[key]
 
     def allow(self, key):
         now = self._clock()
@@ -108,6 +139,10 @@ class _SlidingWindowLimiter:
                 return False
             events.append(now)
             self._events[key] = events
+
+            if len(self._events) > self._cleanup_threshold:
+                self._prune_stale_keys(cutoff)
+
             return True
 
 
