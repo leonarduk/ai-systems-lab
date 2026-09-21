@@ -103,7 +103,7 @@ def load_pricing(
         fetch_bedrock_pricing(path)
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
     except FileNotFoundError as exc:
         raise ConfigError(f"pricing file not found: {path}") from exc
     except OSError as exc:
@@ -119,6 +119,37 @@ def load_pricing(
         raise ConfigError(f"pricing file {path} is not valid UTF-8: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise ConfigError(f"pricing file {path} is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError(
+            f"pricing file {path} must contain a JSON object at the top level, "
+            f"got {type(data).__name__}"
+        )
+    # `providers` is load-bearing: iter_models reads pricing["providers"],
+    # so without it every hosted row silently disappears and the user gets
+    # a "comparison" against nothing. That is worth refusing outright.
+    if "providers" not in data:
+        raise ConfigError(
+            f"pricing file {path} is missing the required top-level key " "'providers'"
+        )
+    if not isinstance(data["providers"], dict):
+        raise ConfigError(
+            f"pricing file {path} has a 'providers' that is not an object, "
+            f"got {type(data['providers']).__name__}"
+        )
+    # `as_of` is not. The summary line reads it as
+    # pricing.get("as_of", "unknown date"), a deliberate accommodation, and
+    # a date is a staleness signal rather than something the arithmetic
+    # needs. Refusing to run over a missing one would block a hand-written
+    # minimal pricing file for a metadata string — but going quiet about
+    # it would hide that the user cannot tell how old these prices are, so
+    # it warns.
+    if "as_of" not in data:
+        print(
+            f"Warning: pricing file {path} has no 'as_of' date — "
+            "there is no way to tell how stale these prices are.",
+            file=sys.stderr,
+        )
+    return data
 
 
 def iter_models(pricing: dict):

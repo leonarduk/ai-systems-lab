@@ -431,6 +431,91 @@ def test_load_pricing_tolerates_extra_top_level_keys(tmp_path: Path):
     assert "claude" in pricing["providers"]
 
 
+def test_load_pricing_warns_but_loads_when_as_of_missing(tmp_path: Path, capsys):
+    # as_of is a staleness signal, not an input to the arithmetic, and the
+    # summary line already reads it as .get("as_of", "unknown date"). A
+    # hard failure would block a hand-written minimal pricing file over a
+    # metadata string, so this warns and proceeds.
+    path = tmp_path / "pricing.json"
+    path.write_text(
+        json.dumps({"providers": {"claude": {"models": {}}}}), encoding="utf-8"
+    )
+    assert m.load_pricing(path) == {"providers": {"claude": {"models": {}}}}
+    assert "no 'as_of' date" in capsys.readouterr().err
+
+
+def test_load_pricing_is_quiet_when_as_of_is_present(tmp_path: Path, capsys):
+    path = tmp_path / "pricing.json"
+    path.write_text(
+        json.dumps({"as_of": "2026-01-01", "providers": {}}), encoding="utf-8"
+    )
+    m.load_pricing(path)
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("providers", ["a string", ["a", "list"], 42, None])
+def test_load_pricing_rejects_a_non_object_providers(tmp_path: Path, providers):
+    # iter_models calls .items() on it, so anything else is an
+    # AttributeError several frames away from the file that caused it.
+    path = tmp_path / "pricing.json"
+    path.write_text(
+        json.dumps({"as_of": "2026-01-01", "providers": providers}), encoding="utf-8"
+    )
+    with pytest.raises(m.ConfigError, match="'providers' that is not an object"):
+        m.load_pricing(path)
+
+
+def test_load_pricing_raises_config_error_when_providers_missing(tmp_path: Path):
+    path = tmp_path / "pricing.json"
+    path.write_text(json.dumps({"as_of": "2026-01-01"}), encoding="utf-8")
+    with pytest.raises(m.ConfigError, match="providers"):
+        m.load_pricing(path)
+
+
+def test_load_pricing_error_names_the_file(tmp_path: Path):
+    # The path matters more than the key list: in a non-interactive run the
+    # user may not know which pricing file was picked up.
+    path = tmp_path / "pricing.json"
+    path.write_text(json.dumps({"as_of": "2026-01-01"}), encoding="utf-8")
+    with pytest.raises(m.ConfigError, match=str(path)):
+        m.load_pricing(path)
+
+
+def test_load_pricing_raises_config_error_when_top_level_is_not_object(
+    tmp_path: Path,
+):
+    path = tmp_path / "pricing.json"
+    path.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+    with pytest.raises(m.ConfigError, match="JSON object"):
+        m.load_pricing(path)
+
+
+def test_load_pricing_accepts_file_with_required_keys(tmp_path: Path):
+    path = tmp_path / "pricing.json"
+    path.write_text(
+        json.dumps(
+            {
+                "as_of": "2026-01-01",
+                "providers": {
+                    "claude": {
+                        "models": {
+                            "opus-5": {
+                                "display_name": "Claude Opus 5",
+                                "input_per_million": 5.0,
+                                "output_per_million": 25.0,
+                            }
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    data = m.load_pricing(path)
+    assert data["as_of"] == "2026-01-01"
+    assert "claude" in data["providers"]
+
+
 # --------------------------------------------------------------------------
 # Rendering / export
 # --------------------------------------------------------------------------
@@ -1393,6 +1478,8 @@ def _write_pricing(path: Path) -> None:
     path.write_text(
         json.dumps(
             {
+                # Mirrors the shipped pricing.json, which carries as_of.
+                "as_of": "2026-01-01",
                 "providers": {
                     "claude": {
                         "models": {
@@ -1403,7 +1490,7 @@ def _write_pricing(path: Path) -> None:
                             }
                         }
                     }
-                }
+                },
             }
         ),
         encoding="utf-8",
