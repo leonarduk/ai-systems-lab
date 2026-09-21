@@ -2142,6 +2142,163 @@ def test_lookup_gpu_defaults_case_insensitive():
     assert m.lookup_gpu_defaults("nvidia geforce rtx 4090") is not None
 
 
+def test_load_gpu_defaults_reads_shipped_json_file():
+    defaults = m.load_gpu_defaults()
+    assert len(defaults) > 0
+    labels = [label for label, _cost, _power in defaults]
+    assert "RTX 4090" in labels
+    for label, cost, power in defaults:
+        assert isinstance(label, str) and label
+        assert cost > 0
+        assert power > 0
+
+
+def test_load_gpu_defaults_falls_back_when_file_missing(tmp_path: Path, capsys):
+    defaults = m.load_gpu_defaults(tmp_path / "does_not_exist.json")
+    assert defaults == m._FALLBACK_GPU_COST_POWER_DEFAULTS
+    # An absent file is the out-of-the-box state, not a user mistake, so it
+    # must stay silent — unlike every other unusable-file case below.
+    assert capsys.readouterr().err == ""
+
+
+def test_load_gpu_defaults_falls_back_on_invalid_json(tmp_path: Path, capsys):
+    bad_path = tmp_path / "gpu_power_defaults.json"
+    bad_path.write_text("{not valid json", encoding="utf-8")
+    assert m.load_gpu_defaults(bad_path) == m._FALLBACK_GPU_COST_POWER_DEFAULTS
+    assert "using built-in GPU defaults" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("encoding", ["utf-16", "latin-1"])
+def test_load_gpu_defaults_falls_back_on_non_utf8_file(
+    tmp_path: Path, capsys, encoding
+):
+    # The file is opened as UTF-8, so any other encoding raises
+    # UnicodeDecodeError — a ValueError, not an OSError, and therefore not
+    # caught by the obvious `except (json.JSONDecodeError, OSError)`.
+    # "Present but unusable" must warn and fall back, not traceback.
+    path = tmp_path / "gpu_power_defaults.json"
+    path.write_bytes(
+        '{"gpus": [{"label": "RTX 4090", "cost_usd": 1600.0, "power_watts": 450.0}]}'
+        "\n// caf\u00e9".encode(encoding)
+    )
+    assert m.load_gpu_defaults(path) == m._FALLBACK_GPU_COST_POWER_DEFAULTS
+    assert "could not be read" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "contents, expected_problem",
+    [
+        # Valid JSON, but not a JSON object. The original code called
+        # ``.get`` on the parsed value, so these raised AttributeError
+        # instead of falling back as the docstring promised.
+        ("[1, 2, 3]", "must contain a JSON object, got list"),
+        ('"hello"', "must contain a JSON object, got str"),
+        ("42", "must contain a JSON object, got int"),
+        ("null", "must contain a JSON object, got NoneType"),
+        # Object, but "gpus" is not a list.
+        ('{"gpus": {"label": "RTX 4090"}}', '"gpus" must be a list, got dict'),
+        # Object with no usable entries at all.
+        ('{"gpus": []}', "listed no usable GPU entries"),
+    ],
+)
+def test_load_gpu_defaults_falls_back_on_wrong_shape(
+    tmp_path: Path, capsys, contents, expected_problem
+):
+    path = tmp_path / "gpu_power_defaults.json"
+    path.write_text(contents, encoding="utf-8")
+    assert m.load_gpu_defaults(path) == m._FALLBACK_GPU_COST_POWER_DEFAULTS
+    assert expected_problem in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"cost_usd": 100.0, "power_watts": 50.0},  # no label
+        {"label": "X", "power_watts": 50.0},  # no cost
+        {"label": "X", "cost_usd": 100.0},  # no power
+        {"label": "   ", "cost_usd": 100.0, "power_watts": 50.0},  # blank label
+        {"label": "X", "cost_usd": "not a number", "power_watts": 50.0},
+        {"label": "X", "cost_usd": None, "power_watts": 50.0},
+        {"label": "X", "cost_usd": True, "power_watts": 50.0},  # bool is not 1.0
+        {"label": "X", "cost_usd": 0, "power_watts": 50.0},  # free GPU
+        {"label": "X", "cost_usd": -100.0, "power_watts": 50.0},
+        {"label": "X", "cost_usd": 100.0, "power_watts": 0},  # zero draw
+        {"label": "X", "cost_usd": 100.0, "power_watts": -50.0},
+        "not an object",
+    ],
+)
+def test_load_gpu_defaults_skips_bad_entry_but_keeps_the_rest(
+    tmp_path: Path, capsys, entry
+):
+    path = tmp_path / "gpu_power_defaults.json"
+    good = {"label": "GOOD CARD", "cost_usd": 200.0, "power_watts": 60.0}
+    path.write_text(json.dumps({"gpus": [entry, good]}), encoding="utf-8")
+
+    # The rest of the file survives — one typo does not discard the user's
+    # whole customisation — but the skip is reported, so they are never
+    # left wondering why their card stopped matching.
+    assert m.load_gpu_defaults(path) == (("GOOD CARD", 200.0, 60.0),)
+    assert "skipping gpus[0]" in capsys.readouterr().err
+
+
+def test_load_gpu_defaults_upper_cases_user_supplied_labels(tmp_path: Path):
+    # lookup_gpu_defaults upper-cases the detected card name, so a
+    # lower-case label in the user's file could never match before. The
+    # README documents this matching as case-insensitive.
+    path = tmp_path / "gpu_power_defaults.json"
+    path.write_text(
+        json.dumps(
+            {"gpus": [{"label": "rtx 5090", "cost_usd": 2.0, "power_watts": 3.0}]}
+        ),
+        encoding="utf-8",
+    )
+    defaults = m.load_gpu_defaults(path)
+    assert defaults == (("RTX 5090", 2.0, 3.0),)
+    assert m.lookup_gpu_defaults("NVIDIA GeForce RTX 5090", defaults=defaults) == (
+        2.0,
+        3.0,
+    )
+
+
+def test_fallback_gpu_defaults_match_shipped_json():
+    # The fallback tuple duplicates the shipped JSON so the script still
+    # works if the file goes missing. Duplication is only safe while the
+    # two agree, so this asserts they do.
+    assert m.load_gpu_defaults() == m._FALLBACK_GPU_COST_POWER_DEFAULTS
+
+
+def test_gpu_cost_power_defaults_constant_reflects_shipped_json():
+    # The public constant kept its name across the move to a config file,
+    # and now carries what the file says rather than a hardcoded copy.
+    assert m.GPU_COST_POWER_DEFAULTS == m.load_gpu_defaults()
+    assert m.lookup_gpu_defaults("NVIDIA GeForce RTX 4090") == (1600.0, 450.0)
+
+
+def test_load_gpu_defaults_reads_custom_file(tmp_path: Path):
+    custom_path = tmp_path / "gpu_power_defaults.json"
+    custom_path.write_text(
+        json.dumps(
+            {
+                "as_of": "2026-07-28",
+                "note": "custom",
+                "gpus": [
+                    {"label": "MY CUSTOM GPU", "cost_usd": 123.0, "power_watts": 45.0}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    defaults = m.load_gpu_defaults(custom_path)
+    assert defaults == (("MY CUSTOM GPU", 123.0, 45.0),)
+    assert m.lookup_gpu_defaults("my custom gpu", defaults=defaults) == (123.0, 45.0)
+
+
+def test_lookup_gpu_defaults_accepts_explicit_defaults_tuple():
+    custom = (("FAKE CARD", 999.0, 111.0),)
+    assert m.lookup_gpu_defaults("Fake Card 9000", defaults=custom) == (999.0, 111.0)
+    assert m.lookup_gpu_defaults("Something Else", defaults=custom) is None
+
+
 # --------------------------------------------------------------------------
 # Rest-of-system power allowance (laptop vs desktop)
 # --------------------------------------------------------------------------
