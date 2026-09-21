@@ -34,27 +34,27 @@ London, England, United Kingdom
 Senior software engineer with 20+ years in financial services,
 primarily building Java-based systems — distributed services, risk
 platforms, and high-throughput data processing — with growing
-depth in applied AI and LLM integration.Most recently at JPMorgan,
+depth in applied AI and LLM integration. Most recently at JPMorgan,
 I designed and built a natural-language query system over
 financial databases end to end: an LLM-powered internal chatbot with
 enterprise authentication, backed by a three-tool MCP server I built
 for discovery, context retrieval and auditable SQL generation against
 a Sybase IQ warehouse — the kind of work where solid backend
 engineering and modern AI capabilities reinforce each other, rather
-than AI being bolted on.My
+than AI being bolted on. My
 background spans Swiss Re, Credit Suisse, Morgan Stanley, and
 JPMorgan across risk platforms, distributed services, and cloud
 infrastructure — mostly Java, with Python where it's the right tool for
 data pipelines and tooling. I hold an FRM alongside AWS Solutions
 Architect Professional, Security Specialty, Developer Associate, and
 Data Engineer Associate certifications — a combination that gives
-me both engineering depth and financial-domain intuition.I'm looking
+me both engineering depth and financial-domain intuition. I'm looking
 for a senior Java engineering role in financial services or a related
 regulated environment — Python-led roles are fine too, and I'd lean
 toward a polyglot environment over a single-language shop where
 possible. My background means I think carefully about auditability,
 observability and guardrails — which matters more in production AI
-systems than most job specs acknowledge.Dual UK/Irish citizen.
+systems than most job specs acknowledge. Dual UK/Irish citizen.
 Based in London.
 ## Experience
 JPMorgan Chase & Co.
