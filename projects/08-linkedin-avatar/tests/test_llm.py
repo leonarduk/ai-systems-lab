@@ -296,6 +296,72 @@ class TestToolLoopTermination:
         assert len(client.calls) == llm.MAX_TOOL_LOOP_ITERATIONS
 
 
+class TestEmptyContentWarning:
+    def test_warns_when_content_none_and_no_tool_calls(self, caplog):
+        client = FakeClient([make_response(content=None)])
+
+        with caplog.at_level("WARNING", logger="avatar.llm"):
+            reply, usage = llm.send_message(
+                [{"role": "user", "content": "hi"}], "system", client=client
+            )
+
+        assert reply == ""
+        assert any(
+            "empty content with no tool calls" in record.message
+            for record in caplog.records
+        )
+
+    def test_warns_when_content_empty_string_and_no_tool_calls(self, caplog):
+        client = FakeClient([make_response(content="")])
+
+        with caplog.at_level("WARNING", logger="avatar.llm"):
+            reply, usage = llm.send_message(
+                [{"role": "user", "content": "hi"}], "system", client=client
+            )
+
+        assert reply == ""
+        assert any(
+            "empty content with no tool calls" in record.message
+            for record in caplog.records
+        )
+
+    def test_no_warning_when_tool_calls_present(self, caplog):
+        tool_call = make_tool_call(
+            "call_1", "record_unknown_question", {"question": "q"}
+        )
+        client = FakeClient(
+            [
+                make_response(content=None, tool_calls=[tool_call]),
+                make_response(content="done"),
+            ]
+        )
+
+        with caplog.at_level("WARNING", logger="avatar.llm"):
+            reply, usage = llm.send_message(
+                [{"role": "user", "content": "hi"}], "system", client=client
+            )
+
+        assert reply == "done"
+        assert not any(
+            "empty content with no tool calls" in record.message
+            for record in caplog.records
+        )
+
+    def test_no_warning_when_content_present(self, caplog):
+        client = FakeClient([make_response(content="Hello there.")])
+
+        with caplog.at_level("WARNING", logger="avatar.llm"):
+            reply, usage = llm.send_message(
+                [{"role": "user", "content": "hi"}], "system", client=client
+            )
+
+        assert reply == "Hello there."
+        assert not any(
+            "empty content with no tool calls" in record.message
+            for record in caplog.records
+        )
+
+
 class TestBuildClient:
     def test_reads_api_key_from_env_only(self, monkeypatch):
         monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key-123")

@@ -155,6 +155,8 @@ def send_message(conversation, system_prompt, api_key=None, client=None):
         tool_calls = getattr(message, "tool_calls", None)
 
         if not tool_calls:
+            if not message.content:
+                logger.warning("Model returned empty content with no tool calls")
             return message.content or "", usage_totals
 
         messages.append(_tool_call_message(message, tool_calls))
