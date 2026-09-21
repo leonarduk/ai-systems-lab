@@ -67,6 +67,15 @@ jobs:
       run: |
         black --check projects/ || echo "Code formatting issues found. Run 'black projects/' to fix."
 
+    - name: Check profile.md length
+      run: python scripts/check_profile_length.py
+
+    - name: Test the profile-length checker itself
+      # scripts/ (top-level) sits outside the "Run Tests" job's discovery,
+      # which only walks projects/ — so this script's own tests need an
+      # explicit step, same as scripts/test_validate_pr_description.py's.
+      run: python -m pytest scripts/test_check_profile_length.py -v
+
   test:
     name: Run Tests
     runs-on: ubuntu-latest
