@@ -1536,6 +1536,9 @@ def test_run_non_interactive_rejects_zero_tokens_per_sec_in_every_mode(
 
 
 def test_run_non_interactive_rejects_zero_total_workload_tokens(tmp_path: Path):
+    # A workload with no input and no output used to surface as the vague
+    # "zero total tokens" error. It is now caught by the per-field rule, which
+    # names the offending field (issue #36).
     pricing_path = tmp_path / "pricing.json"
     _write_pricing(pricing_path)
     config_path = tmp_path / "config.json"
@@ -1550,7 +1553,103 @@ def test_run_non_interactive_rejects_zero_total_workload_tokens(tmp_path: Path):
     }
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
-    with pytest.raises(m.ConfigError, match="zero total tokens"):
+    with pytest.raises(
+        m.ConfigError, match=r"workload\.avg_input_tokens must be a positive number"
+    ):
+        m.run_non_interactive(config_path, export_fmt=None, export_path=None)
+
+
+@pytest.mark.parametrize(
+    "field, bad_value",
+    [
+        ("requests_per_day", 0),
+        ("requests_per_day", -1),
+        ("avg_input_tokens", 0),
+        ("avg_input_tokens", -5),
+        # avg_output_tokens == 0 is deliberately NOT included here — it's a
+        # legitimate value (classification-only workload), covered by
+        # test_run_non_interactive_allows_zero_output_tokens_for_input_only_workload
+        # below. Only a negative value is invalid.
+        ("avg_output_tokens", -3),
+    ],
+)
+def test_run_non_interactive_rejects_nonpositive_workload_field(
+    tmp_path: Path, field, bad_value
+):
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    workload = {
+        "requests_per_day": 1000,
+        "avg_input_tokens": 500,
+        "avg_output_tokens": 300,
+    }
+    workload[field] = bad_value
+    config = {
+        "workload": workload,
+        "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+        "pricing_file": str(pricing_path),
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    expected = "non-negative" if field == "avg_output_tokens" else "positive"
+    with pytest.raises(
+        m.ConfigError, match=rf"workload\.{field} must be a {expected} number"
+    ):
+        m.run_non_interactive(config_path, export_fmt=None, export_path=None)
+
+
+def test_all_shipped_presets_pass_validation():
+    # The positivity rules apply to preset shapes too, so a shipped preset with
+    # a zero/negative field would start failing at config-resolution time.
+    for preset in m.WORKLOAD_PRESETS:
+        m._validate_workload(preset.to_workload())
+
+
+@pytest.mark.parametrize("shape", ["workload_preset", "workload_presets"])
+def test_resolve_workload_scenarios_validates_preset_shapes(monkeypatch, shape):
+    # The reason validation lives in _resolve_workload_scenarios rather than
+    # run_non_interactive is that it then covers the preset shapes as well.
+    bad = m.WorkloadPreset(
+        key="broken",
+        label="Broken",
+        description="Preset with no input tokens.",
+        requests_per_day=100,
+        avg_input_tokens=0,
+        avg_output_tokens=300,
+    )
+    monkeypatch.setattr(m, "WORKLOAD_PRESETS", (bad,))
+    config = {shape: "broken" if shape == "workload_preset" else ["broken"]}
+
+    with pytest.raises(
+        m.ConfigError, match=r"workload\.avg_input_tokens must be a positive number"
+    ):
+        m._resolve_workload_scenarios(config)
+
+
+@pytest.mark.parametrize(
+    "field", ["requests_per_day", "avg_input_tokens", "avg_output_tokens"]
+)
+def test_run_non_interactive_rejects_bool_workload_field(tmp_path: Path, field):
+    # bool is a subclass of int, so True/False would otherwise pass the numeric
+    # type check and be silently treated as 1/0.
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    workload = {
+        "requests_per_day": 1000,
+        "avg_input_tokens": 500,
+        "avg_output_tokens": 300,
+    }
+    workload[field] = True
+    config = {
+        "workload": workload,
+        "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+        "pricing_file": str(pricing_path),
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(m.ConfigError, match=rf"workload\.{field} must be a number"):
         m.run_non_interactive(config_path, export_fmt=None, export_path=None)
 
 
