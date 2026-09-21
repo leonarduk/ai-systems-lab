@@ -2020,6 +2020,21 @@ def interactive_local_setup() -> tuple:
     ``save_last_run()`` so the next run can reuse them as defaults.
     """
     print("\n== Local setup ==")
+    # There is no "skip local setup entirely" concept in this tool: comparing
+    # local vs hosted costs (this script's whole purpose) always needs local
+    # setup input, so there is nothing to opt into and no gate to check here.
+    # Traced the full call chain to confirm: interactive_local_setup() has
+    # exactly one caller, run_interactive() (called unconditionally from
+    # main() whenever --non-interactive isn't passed), which itself calls
+    # this function unconditionally as one of the three fixed steps of the
+    # interactive flow (workload, then local setup, then provider
+    # selection) — see run_interactive()'s own docstring. So the combined
+    # prompt below is meant to be the first thing every interactive user
+    # sees for local configuration, exactly matching the pre-PR #222
+    # behavior where the GPU detection prompt was also unconditional and
+    # first. If a future caller ever wants an optional "skip local setup"
+    # path, that caller must add its own gate before calling this function.
+    #
     # A single combined prompt replaces the previous two separate yes/no
     # questions (GPU detection, then throughput benchmark). Answering "y"
     # skips both steps; "n" or Enter falls through to the original
