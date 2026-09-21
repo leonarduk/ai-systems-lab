@@ -1,0 +1,45 @@
+name: issue-worm
+# Opened as a pull request by the monitoring UI's Issues tab (#1668).
+# Everything below is committed as it stands, except the job's `runs-on:`,
+# which the dashboard fills in with the runner this repo can actually reach.
+#
+# Before this workflow can do anything you need, in this repo's
+# Settings -> Secrets and variables -> Actions:
+#   WORM_PAT  - a personal access token with the `repo` scope. Not the
+#               default GITHUB_TOKEN: a push made with that token does not
+#               trigger other workflows, so the PR issue-worm opens would
+#               never get a CI run.
+#
+# Read back by the dashboard's GitHub Actions section (actions_runs.py),
+# which links a run to its issue only when the title starts with exactly
+# "issue #<n>:" - keep that prefix if you reword this.
+run-name: "issue #${{ github.event.issue.number }}: ${{ github.event.issue.title }}"
+
+# Labelling an issue `issue-worm` is what starts a build.
+on:
+  issues:
+    types: [labeled]
+
+# One build per issue at a time; a second label event waits rather than
+# racing the first for the same branch.
+concurrency:
+  group: issue-worm-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # Load-bearing, not cosmetic: issue-worm labels the issue as it works
+    # (in-progress, pr-opened), and those labels are themselves `issues:
+    # labeled` events. Without this gate the workflow retriggers itself.
+    if: github.event.label.name == 'issue-worm'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # @v1 floats to each newest release of the action, so fixes arrive
+      # without editing this file. It only becomes v2 for a breaking change
+      # to the action's inputs.
+      - uses: leonarduk/issue-worm@v1
+        with:
+          issue: ${{ github.event.issue.number }}
+          github-token: ${{ secrets.WORM_PAT }}
