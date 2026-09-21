@@ -1,0 +1,18 @@
+{
+  "as_of": "2026-07-28",
+  "note": "Rough street price (USD) and typical power draw under load (W) for common GPUs, matched by substring against a detected card's name. These are ballpark figures meant to prefill a realistic starting point instead of a one-size-fits-all guess — the interactive prompt still lets you override either value if yours differs. Edit this file to add or adjust entries for your own hardware.",
+  "gpus": [
+    {"label": "RTX 4090", "cost_usd": 1600.0, "power_watts": 450.0},
+    {"label": "RTX 4080 SUPER", "cost_usd": 1000.0, "power_watts": 320.0},
+    {"label": "RTX 4080", "cost_usd": 1000.0, "power_watts": 320.0},
+    {"label": "RTX 4070 TI SUPER", "cost_usd": 800.0, "power_watts": 285.0},
+    {"label": "RTX 4070", "cost_usd": 550.0, "power_watts": 200.0},
+    {"label": "RTX 3090 TI", "cost_usd": 900.0, "power_watts": 450.0},
+    {"label": "RTX 3090", "cost_usd": 800.0, "power_watts": 350.0},
+    {"label": "RTX 3080", "cost_usd": 500.0, "power_watts": 320.0},
+    {"label": "RTX 3070", "cost_usd": 400.0, "power_watts": 220.0},
+    {"label": "RTX 6000 ADA", "cost_usd": 6800.0, "power_watts": 300.0},
+    {"label": "A100", "cost_usd": 10000.0, "power_watts": 400.0},
+    {"label": "H100", "cost_usd": 25000.0, "power_watts": 700.0}
+  ]
+}
