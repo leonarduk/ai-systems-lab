@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import functools
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -52,7 +54,12 @@ except PackageNotFoundError:
     VERSION = "0.0.0+unknown"
 
 DEFAULT_PRICING_PATH = Path(__file__).parent / "pricing.json"
+DEFAULT_GPU_DEFAULTS_PATH = Path(__file__).parent / "gpu_power_defaults.json"
 DEFAULT_LAST_RUN_PATH = Path(__file__).parent / ".last_run.json"
+# Shipped fallback for the UK electricity rate, offered whenever the user is
+# asked to type one in GBP — including the re-prompt after they decline the
+# confirmation summary.
+DEFAULT_GBP_ELECTRICITY_RATE = 0.2483
 DAYS_PER_MONTH = 30
 HOURS_PER_MONTH = DAYS_PER_MONTH * 24
 
@@ -1154,6 +1161,50 @@ FX_RATE_URL_TEMPLATES: tuple = (
     "https://api.exchangerate.host/latest?base={from_currency}&symbols={to_currency}",
 )
 
+# Default provider order used when FX_RATE_PROVIDER_ORDER is unset, empty, or
+# contains only unknown keys. Kept as a module-level tuple so tests and callers
+# can reference the canonical default without re-deriving it.
+DEFAULT_FX_RATE_PROVIDER_ORDER: tuple = (
+    "frankfurter.dev",
+    "frankfurter.app",
+    "exchangerate.host",
+)
+
+# Maps the short, user-facing provider keys accepted in
+# FX_RATE_PROVIDER_ORDER to the URL template they select. Keeping this as an
+# explicit mapping (rather than positional indexing into
+# FX_RATE_URL_TEMPLATES) means the env var can name providers in any order,
+# omit ones the user doesn't want, and stay readable if the template list is
+# ever reordered.
+FX_RATE_PROVIDER_TEMPLATES: dict = {
+    "frankfurter.dev": FX_RATE_URL_TEMPLATES[0],
+    "frankfurter.app": FX_RATE_URL_TEMPLATES[1],
+    "exchangerate.host": FX_RATE_URL_TEMPLATES[2],
+}
+
+
+@functools.lru_cache(maxsize=None)
+def _resolve_fx_rate_provider_order() -> tuple:
+    """Resolve the ordered tuple of FX provider keys to try, from the env.
+
+    Reads ``FX_RATE_PROVIDER_ORDER`` (a comma-separated list of provider keys
+    such as ``"exchangerate.host,frankfurter.dev"``) and returns the matching
+    subset of ``DEFAULT_FX_RATE_PROVIDER_ORDER`` in the requested order.
+    Unknown keys are silently dropped; if the result is empty (unset env,
+    empty string, or only typos), the full default order is returned so
+    behaviour is unchanged from before this env var existed.
+
+    The result is cached for the lifetime of the process (``lru_cache`` with
+    no arguments), so repeated ``fetch_fx_rate()`` calls don't re-read and
+    re-parse the environment on every invocation. Tests that mutate
+    ``FX_RATE_PROVIDER_ORDER`` between cases must call
+    ``_resolve_fx_rate_provider_order.cache_clear()`` to see the new value.
+    """
+    raw = os.environ.get("FX_RATE_PROVIDER_ORDER", "")
+    requested = [key.strip().lower() for key in raw.split(",") if key.strip()]
+    resolved = tuple(key for key in requested if key in FX_RATE_PROVIDER_TEMPLATES)
+    return resolved or DEFAULT_FX_RATE_PROVIDER_ORDER
+
 
 def _fetch_yahoo_fx_rate(from_currency: str, to_currency: str, timeout: float) -> float:
     """Last-resort fallback via Yahoo Finance's unofficial chart endpoint.
@@ -1176,14 +1227,20 @@ def _fetch_yahoo_fx_rate(from_currency: str, to_currency: str, timeout: float) -
 def fetch_fx_rate(
     from_currency: str, to_currency: str, timeout: float = 5.0
 ) -> Optional[float]:
-    """Best-effort live exchange rate, trying each ``FX_RATE_URL_TEMPLATES``
-    provider and finally Yahoo Finance.
+    """Best-effort live exchange rate, trying each configured provider and
+    finally Yahoo Finance.
+
+    The provider order comes from ``_resolve_fx_rate_provider_order()`` (which
+    honours the ``FX_RATE_PROVIDER_ORDER`` env var and is cached for the
+    process lifetime). Yahoo is always tried last, after every configured
+    provider has failed.
 
     Returns None only if every provider fails (network, unknown currency,
     parsing) so callers fall back to manual entry rather than hardcoding a
     rate that goes stale.
     """
-    for template in FX_RATE_URL_TEMPLATES:
+    for provider_key in _resolve_fx_rate_provider_order():
+        template = FX_RATE_PROVIDER_TEMPLATES[provider_key]
         url = template.format(from_currency=from_currency, to_currency=to_currency)
         try:
             with urllib.request.urlopen(url, timeout=timeout) as resp:
@@ -1197,12 +1254,12 @@ def fetch_fx_rate(
         return None
 
 
-# Rough street price (USD) and typical power draw under load (W) for common
-# GPUs, matched by substring against a detected card's name. These are
-# ballpark figures meant to prefill a realistic starting point instead of a
-# one-size-fits-all guess — the interactive prompt still lets the user
-# override either value if theirs differs.
-GPU_COST_POWER_DEFAULTS: tuple = (
+# Fallback used only if ``gpu_power_defaults.json`` cannot be read, so the
+# script still prefills sensible figures out of the box. The shipped JSON
+# file is the source of truth users are expected to edit; this mirrors its
+# contents, and ``test_fallback_gpu_defaults_match_shipped_json`` fails if
+# the two ever drift apart.
+_FALLBACK_GPU_COST_POWER_DEFAULTS: tuple = (
     ("RTX 4090", 1600.0, 450.0),
     ("RTX 4080 SUPER", 1000.0, 320.0),
     ("RTX 4080", 1000.0, 320.0),
@@ -1218,17 +1275,109 @@ GPU_COST_POWER_DEFAULTS: tuple = (
 )
 
 
-def lookup_gpu_defaults(gpu_name: str) -> Optional[tuple]:
+def load_gpu_defaults(path: Path = DEFAULT_GPU_DEFAULTS_PATH) -> tuple:
+    """Load GPU price/power defaults from a JSON config file.
+
+    Returns a tuple of ``(LABEL, cost_usd, power_watts)`` entries in the
+    order the file lists them, so a more specific label can be listed
+    before a more general one and still match first. Labels are upper-cased
+    here because ``lookup_gpu_defaults`` matches against an upper-cased
+    card name — a user who writes ``"rtx 5090"`` in the file gets the
+    case-insensitive matching the README promises.
+
+    Unlike ``load_pricing``, an unreadable file is not fatal: without
+    pricing nothing can be computed, whereas these values only prefill
+    prompts the user can override, so the run should continue. The file
+    simply being absent falls back silently. Anything else — unparseable
+    JSON, a non-object top level, an entry missing or mistyping a field,
+    an empty list — means the user edited the file and got it wrong, so it
+    warns on stderr before falling back. Silently ignoring a typo would
+    leave them wondering why their card never matches.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return _FALLBACK_GPU_COST_POWER_DEFAULTS
+    except (ValueError, OSError) as exc:
+        # ValueError covers both json.JSONDecodeError and UnicodeDecodeError;
+        # the latter is not an OSError, so a file saved as UTF-16 or Latin-1
+        # would otherwise escape as a traceback rather than warn and fall
+        # back like every other unusable file.
+        return _warn_bad_gpu_defaults(path, f"could not be read ({exc})")
+    if not isinstance(data, dict):
+        return _warn_bad_gpu_defaults(
+            path, f"must contain a JSON object, got {type(data).__name__}"
+        )
+    raw_entries = data.get("gpus", [])
+    if not isinstance(raw_entries, list):
+        return _warn_bad_gpu_defaults(
+            path, f'"gpus" must be a list, got {type(raw_entries).__name__}'
+        )
+    entries = []
+    for index, item in enumerate(raw_entries):
+        try:
+            label = str(item["label"]).strip().upper()
+            cost = _gpu_default_number(item["cost_usd"])
+            power = _gpu_default_number(item["power_watts"])
+            if not label:
+                raise ValueError("label is empty")
+        except (KeyError, TypeError, ValueError, IndexError) as exc:
+            print(
+                f"Warning: skipping gpus[{index}] in {path}: {exc}",
+                file=sys.stderr,
+            )
+            continue
+        entries.append((label, cost, power))
+    if not entries:
+        return _warn_bad_gpu_defaults(path, "listed no usable GPU entries")
+    return tuple(entries)
+
+
+def _warn_bad_gpu_defaults(path: Path, problem: str) -> tuple:
+    """Warn that ``path`` is unusable and return the built-in defaults."""
+    print(
+        f"Warning: {path} {problem}; using built-in GPU defaults.",
+        file=sys.stderr,
+    )
+    return _FALLBACK_GPU_COST_POWER_DEFAULTS
+
+
+def _gpu_default_number(value: object) -> float:
+    """Coerce a GPU cost/power field to a positive float.
+
+    ``bool`` is rejected explicitly: it subclasses ``int``, so ``true``
+    would otherwise be read as a cost of 1.0.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise TypeError(f"expected a number, got {value!r}")
+    number = float(value)
+    if not number > 0:
+        raise ValueError(f"expected a positive number, got {value!r}")
+    return number
+
+
+# The GPU price/power defaults in force for this run, read from
+# ``gpu_power_defaults.json`` at import. Kept under its original public
+# name so existing callers are unaffected by the move to a config file.
+GPU_COST_POWER_DEFAULTS: tuple = load_gpu_defaults()
+
+
+def lookup_gpu_defaults(
+    gpu_name: str, defaults: Optional[tuple] = None
+) -> Optional[tuple]:
     """Best-effort ``(cost_usd, power_watts)`` defaults for a detected GPU.
 
-    Matches by substring against ``GPU_COST_POWER_DEFAULTS`` so a detected
-    card pre-fills a realistic price/power pair instead of a generic
-    default unrelated to the actual hardware. Returns None on no match —
-    callers fall back to a generic default and the prompt still lets the
-    user override.
+    Matches by substring against ``GPU_COST_POWER_DEFAULTS`` (loaded from
+    ``gpu_power_defaults.json``) so a detected card pre-fills a realistic
+    price/power pair instead of a generic default unrelated to the actual
+    hardware. Returns None on no match — callers fall back to a generic
+    default and the prompt still lets the user override.
     """
+    if defaults is None:
+        defaults = GPU_COST_POWER_DEFAULTS
     name = gpu_name.upper()
-    for label, cost, power in GPU_COST_POWER_DEFAULTS:
+    for label, cost, power in defaults:
         if label in name:
             return cost, power
     return None
@@ -1854,14 +2003,18 @@ def interactive_local_setup() -> tuple:
             else:
                 print("  Could not fetch a live Octopus Agile rate — enter manually.")
                 gbp_rate = prompt_float(
-                    "Electricity rate (GBP/kWh)", default=0.2483, minimum=0
+                    "Electricity rate (GBP/kWh)",
+                    default=DEFAULT_GBP_ELECTRICITY_RATE,
+                    minimum=0,
                 )
         elif prompt_yes_no(
             "Do you pay for electricity in GBP (e.g. UK)?", default=True
         ):
             display_currency = "GBP"
             gbp_rate = prompt_float(
-                "Electricity rate (GBP/kWh)", default=0.2483, minimum=0
+                "Electricity rate (GBP/kWh)",
+                default=DEFAULT_GBP_ELECTRICITY_RATE,
+                minimum=0,
             )
 
         if display_currency == "GBP":
@@ -1870,17 +2023,43 @@ def interactive_local_setup() -> tuple:
                 print(f"  Current GBP→USD exchange rate: {live_usd_per_gbp:.4f}")
             else:
                 print("  Could not fetch a live exchange rate — enter manually.")
-            usd_per_gbp = prompt_float(
-                "GBP→USD exchange rate (used internally to keep local and hosted "
-                "costs comparable; the table itself is shown in GBP)",
-                default=live_usd_per_gbp if live_usd_per_gbp is not None else 1.27,
-                minimum=0.001,
-            )
-            electricity_rate = gbp_rate * usd_per_gbp
+            # The FX default is captured before the loop so that declining
+            # re-offers the same starting point it did the first time. The
+            # rate re-prompt uses the shipped default rather than gbp_rate:
+            # defaulting to the value the user has just rejected would hand
+            # it straight back to anyone who pressed Enter.
+            fx_default = live_usd_per_gbp if live_usd_per_gbp is not None else 1.27
+            while True:
+                usd_per_gbp = prompt_float(
+                    "GBP→USD exchange rate (used internally to keep local and hosted "
+                    "costs comparable; the table itself is shown in GBP)",
+                    default=fx_default,
+                    minimum=0.001,
+                )
+                electricity_rate = gbp_rate * usd_per_gbp
+                print("\n  Using:")
+                print(f"    Electricity rate: £{gbp_rate:.4f}/kWh")
+                print(f"    Exchange rate: 1 GBP = {usd_per_gbp:.4f} USD")
+                if prompt_yes_no(
+                    "  Use this electricity rate and exchange rate?", default=True
+                ):
+                    break
+                print("  Re-entering both values.\n")
+                gbp_rate = prompt_float(
+                    "Electricity rate (GBP/kWh)",
+                    default=DEFAULT_GBP_ELECTRICITY_RATE,
+                    minimum=0,
+                )
         else:
-            electricity_rate = prompt_float(
-                "Electricity rate (USD/kWh)", default=0.15, minimum=0
-            )
+            while True:
+                electricity_rate = prompt_float(
+                    "Electricity rate (USD/kWh)", default=0.15, minimum=0
+                )
+                print("\n  Using:")
+                print(f"    Electricity rate: ${electricity_rate:.4f}/kWh")
+                if prompt_yes_no("  Use this electricity rate?", default=True):
+                    break
+                print("  Re-entering the value.\n")
 
         def build_existing_rows(workload: Workload) -> list:
             return [
@@ -2240,6 +2419,32 @@ def _require_numeric_fields(
             )
 
 
+def _validate_workload(workload: Workload) -> None:
+    """Reject workloads that cannot produce a meaningful comparison.
+
+    ``requests_per_day`` and ``avg_input_tokens`` must be strictly positive: a
+    workload with no requests, or no input, has nothing to cost. A zero
+    ``avg_output_tokens`` is legitimate, though (a classification-only workload
+    generates no output), so it is only rejected when negative.
+
+    Validating the resolved :class:`Workload` rather than the raw config means
+    every accepted config shape — ``workload``, ``workload_preset`` and
+    ``workload_presets`` — is held to the same rule and reports the same
+    message, instead of only the explicit-dict shape being checked.
+    """
+    for field_name in ("requests_per_day", "avg_input_tokens"):
+        value = getattr(workload, field_name)
+        if value <= 0:
+            raise ConfigError(
+                f"workload.{field_name} must be a positive number, got {value!r}"
+            )
+    if workload.avg_output_tokens < 0:
+        raise ConfigError(
+            "workload.avg_output_tokens must be a non-negative number, "
+            f"got {workload.avg_output_tokens!r}"
+        )
+
+
 def _resolve_workload_scenarios(config: dict) -> list:
     """Resolve the config's workload section to a list of scenarios.
 
@@ -2275,9 +2480,9 @@ def _resolve_workload_scenarios(config: dict) -> list:
         )
         for field_name in ("requests_per_day", "avg_input_tokens", "avg_output_tokens"):
             value = config["workload"][field_name]
-            if not isinstance(value, (int, float)) or value < 0:
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
                 raise ConfigError(
-                    f"workload.{field_name} must be a non-negative number, got {value!r}"
+                    f"workload.{field_name} must be a number, got {value!r}"
                 )
         try:
             workload = Workload(**config["workload"])
@@ -2285,11 +2490,7 @@ def _resolve_workload_scenarios(config: dict) -> list:
             raise ConfigError(
                 f"workload config has an unexpected field: {exc}"
             ) from exc
-        if workload.monthly_total_tokens <= 0:
-            raise ConfigError(
-                "workload produces zero total tokens/month — set requests_per_day and "
-                "at least one of avg_input_tokens/avg_output_tokens above zero"
-            )
+        _validate_workload(workload)
         return [("custom", "Custom", workload)]
 
     keys = (
@@ -2297,7 +2498,12 @@ def _resolve_workload_scenarios(config: dict) -> list:
         if "workload_preset" in config
         else config["workload_presets"]
     )
-    return [(p.key, p.label, p.to_workload()) for p in (get_preset(k) for k in keys)]
+    scenarios = [
+        (p.key, p.label, p.to_workload()) for p in (get_preset(k) for k in keys)
+    ]
+    for _key, _label, workload in scenarios:
+        _validate_workload(workload)
+    return scenarios
 
 
 def run_non_interactive(

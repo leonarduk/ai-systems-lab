@@ -10,8 +10,8 @@
   Update these two before publishing (see docs/design.md §9, §11):
   - og:url / twitter card URLs below assume GitHub Pages serves this repo
     from its root on the main branch; adjust if #132 configures it differently.
-  - The Render app URL is set once, in the script at the bottom, and is
-    referenced nowhere else — see the RENDER_APP_URL comment there.
+  - The Render app URL is set once, as the CTA button's href below — see
+    the comment there.
 -->
 <meta property="og:type" content="website">
 <meta property="og:title" content="Steve Leonard — AI Twin">
@@ -188,10 +188,11 @@
     <li>"How do I get in touch with him?"</li>
   </ul>
 
-  <!-- href is the real, working fallback for JavaScript disabled — the
-       script below only adds the prewarm fetch and the "waking up" label,
-       it does not set this href for the first time. Must match
-       RENDER_APP_URL in the script. -->
+  <!-- The Render app URL is defined ONCE, as this href — that is the single
+       source of truth. It's the real, working fallback for JavaScript
+       disabled; the script below reads the URL straight from this same
+       attribute to prewarm the app, so there is nothing else to keep in
+       sync when the URL changes. -->
   <a id="start-chat-btn" class="cta" href="https://ai-systems-lab-s8gy.onrender.com">
     <span class="cta-label">Start chatting</span>
   </a>
@@ -206,30 +207,32 @@
 </main>
 
 <script>
-  // Set once the app is deployed (#130) — must match the button's href
-  // above, which is the real fallback for JavaScript disabled. This
-  // assignment just keeps JS-enabled visitors in sync if only one of the
-  // two ever gets updated.
-  var RENDER_APP_URL = "https://ai-systems-lab-s8gy.onrender.com";
-
+  // The Render app URL lives only in the CTA button's href — that's the
+  // single source of truth, read here via getAttribute (not .href, which
+  // the browser resolves to an absolute URL) so the prewarm fetch targets
+  // exactly what's written in the markup.
   var btn = document.getElementById("start-chat-btn");
-  var label = btn.querySelector(".cta-label");
-  btn.href = RENDER_APP_URL;
+  var renderAppUrl = btn ? btn.getAttribute("href") : null;
 
-  try {
-    // no-cors: we don't need to read the response, only trigger the wake —
-    // and a sleeping/unreachable instance must never surface a console
-    // error or block the page.
-    fetch(RENDER_APP_URL, { mode: "no-cors" }).catch(function () {});
-  } catch (e) {
-    // Ignore — the button still links through even if fetch itself throws.
+  if (btn && renderAppUrl) {
+    try {
+      // no-cors: we don't need to read the response, only trigger the wake —
+      // and a sleeping/unreachable instance must never surface a console
+      // error or block the page.
+      fetch(renderAppUrl, { mode: "no-cors" }).catch(function () {});
+    } catch (e) {
+      // Ignore — the button still links through even if fetch itself throws.
+    }
+
+    var label = btn.querySelector(".cta-label");
+    if (label) {
+      var originalLabel = label.textContent;
+      label.textContent = "Waking up my twin…";
+      setTimeout(function () {
+        label.textContent = originalLabel;
+      }, 20000);
+    }
   }
-
-  var originalLabel = label.textContent;
-  label.textContent = "Waking up my twin…";
-  setTimeout(function () {
-    label.textContent = originalLabel;
-  }, 20000);
 </script>
 </body>
 </html>
