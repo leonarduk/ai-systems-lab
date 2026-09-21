@@ -1014,14 +1014,34 @@ def test_fetch_octopus_agile_rate_parses_current_slot(monkeypatch):
         }
     ).encode("utf-8")
 
-    def fake_urlopen(url, timeout=None):
-        if "standard-unit-rates" in url:
+    seen = []
+
+    def fake_urlopen(req, timeout=None):
+        # Both Octopus calls now pass a Request rather than a bare URL, so
+        # the stub reads req.full_url. Keeping the old `in url` test would
+        # raise TypeError, which fetch_octopus_agile_rate's blanket
+        # `except Exception` would swallow into a silent None.
+        seen.append(req)
+        if "standard-unit-rates" in req.full_url:
             return _FakeHTTPResponse(rates_body)
         return _FakeHTTPResponse(products_body)
 
     monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
     rate = m.fetch_octopus_agile_rate("C")
     assert rate == pytest.approx(0.2483)
+
+    # Both the product lookup and the rate lookup identify themselves.
+    assert len(seen) == 2
+    for req in seen:
+        assert req.get_header("User-agent") == m.USER_AGENT
+
+
+def test_user_agent_carries_the_real_version():
+    # A User-Agent that misstates its version is worse than none: an
+    # operator diagnosing a misbehaving client looks up the wrong code.
+    # The original literal "llm-cost-comparison/1.0" was already wrong.
+    assert m.USER_AGENT == f"llm-cost-comparison/{m.VERSION}"
+    assert "1.0" not in m.USER_AGENT or m.VERSION.startswith("1.0")
 
 
 def test_fetch_octopus_agile_rate_returns_none_on_failure(monkeypatch):

@@ -53,6 +53,15 @@ try:
 except PackageNotFoundError:
     VERSION = "0.0.0+unknown"
 
+# Sent when identifying this script honestly to a public API. Derived from
+# VERSION so it cannot drift from the release: a User-Agent that misstates
+# its version is worse than none, because an operator diagnosing a client
+# looks up the wrong code. Two endpoints deliberately send "Mozilla/5.0"
+# instead (see fetch_deepseek_pricing and the Yahoo fallback in
+# fetch_fx_rate) — those scrape pages meant for browsers and are refused
+# otherwise.
+USER_AGENT = f"llm-cost-comparison/{VERSION}"
+
 DEFAULT_PRICING_PATH = Path(__file__).parent / "pricing.json"
 DEFAULT_GPU_DEFAULTS_PATH = Path(__file__).parent / "gpu_power_defaults.json"
 DEFAULT_LAST_RUN_PATH = Path(__file__).parent / ".last_run.json"
@@ -1118,7 +1127,12 @@ def fetch_octopus_agile_rate(
     entry — this is a convenience lookup, not a requirement.
     """
     try:
-        with urllib.request.urlopen(OCTOPUS_PRODUCTS_URL, timeout=timeout) as resp:
+        products_req = urllib.request.Request(
+            OCTOPUS_PRODUCTS_URL,
+            headers={"User-Agent": USER_AGENT},
+            method="GET",
+        )
+        with urllib.request.urlopen(products_req, timeout=timeout) as resp:
             products = json.loads(resp.read()).get("results", [])
         agile_codes = [
             p["code"] for p in products if "AGILE" in p.get("code", "").upper()
@@ -1131,7 +1145,12 @@ def fetch_octopus_agile_rate(
             f"https://api.octopus.energy/v1/products/{product_code}/"
             f"electricity-tariffs/{tariff_code}/standard-unit-rates/"
         )
-        with urllib.request.urlopen(rates_url, timeout=timeout) as resp:
+        rates_req = urllib.request.Request(
+            rates_url,
+            headers={"User-Agent": USER_AGENT},
+            method="GET",
+        )
+        with urllib.request.urlopen(rates_req, timeout=timeout) as resp:
             rates = json.loads(resp.read()).get("results", [])
         now = datetime.now(timezone.utc)
         for rate in rates:
