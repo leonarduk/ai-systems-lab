@@ -200,8 +200,25 @@ def find_contact_leaks(text):
 
 
 def _out_path_is_safe(out_path):
-    resolved = out_path.resolve()
+    """Return True only if out_path resolves inside the real knowledge/ dir.
+
+    Guards against two escape routes:
+      1. out_path itself being a symlink or containing ``..`` that escapes
+         the knowledge directory.
+      2. ``knowledge/`` itself being a symlink to somewhere outside the
+         project — in that case we refuse to write at all, because the
+         resolved containment check would otherwise happily accept a path
+         that lands outside the intended sandbox.
+    """
     knowledge_dir = KNOWLEDGE_DIR.resolve()
+
+    # If knowledge/ is a symlink, refuse outright. Even if it currently
+    # points somewhere benign, a symlinked knowledge/ is not the layout
+    # this tool expects and could be swapped at any time.
+    if KNOWLEDGE_DIR.is_symlink():
+        return False
+
+    resolved = out_path.resolve()
     return resolved == knowledge_dir or knowledge_dir in resolved.parents
 
 

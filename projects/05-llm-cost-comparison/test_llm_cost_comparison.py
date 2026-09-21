@@ -1040,6 +1040,21 @@ def test_fetch_octopus_agile_rate_returns_none_when_no_agile_product(monkeypatch
     assert m.fetch_octopus_agile_rate("C") is None
 
 
+@pytest.fixture(autouse=True)
+def _clear_fx_rate_provider_order_cache():
+    """Clear the cached FX provider order before and after every test.
+
+    ``_resolve_fx_rate_provider_order()`` is ``lru_cache``-decorated so the
+    env var is only read once per process. Any test that mutates
+    ``FX_RATE_PROVIDER_ORDER`` (or that relies on the default order) needs a
+    fresh resolution, so this fixture clears the cache around each test to
+    avoid cross-test contamination.
+    """
+    m._resolve_fx_rate_provider_order.cache_clear()
+    yield
+    m._resolve_fx_rate_provider_order.cache_clear()
+
+
 def test_fetch_fx_rate_parses_response(monkeypatch):
     body = json.dumps(
         {"amount": 1, "base": "GBP", "date": "2026-07-28", "rates": {"USD": 1.27}}
@@ -1100,6 +1115,124 @@ def test_fetch_fx_rate_returns_none_when_yahoo_also_fails(monkeypatch):
 
     monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
     assert m.fetch_fx_rate("GBP", "USD") is None
+
+
+# --------------------------------------------------------------------------
+# _resolve_fx_rate_provider_order (env override + caching)
+# --------------------------------------------------------------------------
+
+
+def test_resolve_fx_rate_provider_order_defaults_when_env_unset(monkeypatch):
+    monkeypatch.delenv("FX_RATE_PROVIDER_ORDER", raising=False)
+    m._resolve_fx_rate_provider_order.cache_clear()
+    assert m._resolve_fx_rate_provider_order() == m.DEFAULT_FX_RATE_PROVIDER_ORDER
+
+
+def test_resolve_fx_rate_provider_order_honours_env_override(monkeypatch):
+    monkeypatch.setenv("FX_RATE_PROVIDER_ORDER", "exchangerate.host,frankfurter.dev")
+    m._resolve_fx_rate_provider_order.cache_clear()
+    assert m._resolve_fx_rate_provider_order() == (
+        "exchangerate.host",
+        "frankfurter.dev",
+    )
+
+
+def test_resolve_fx_rate_provider_order_drops_unknown_keys(monkeypatch):
+    monkeypatch.setenv("FX_RATE_PROVIDER_ORDER", "not-a-real-provider,frankfurter.app")
+    m._resolve_fx_rate_provider_order.cache_clear()
+    assert m._resolve_fx_rate_provider_order() == ("frankfurter.app",)
+
+
+def test_resolve_fx_rate_provider_order_falls_back_when_all_keys_unknown(
+    monkeypatch,
+):
+    monkeypatch.setenv("FX_RATE_PROVIDER_ORDER", "typo1,typo2")
+    m._resolve_fx_rate_provider_order.cache_clear()
+    assert m._resolve_fx_rate_provider_order() == m.DEFAULT_FX_RATE_PROVIDER_ORDER
+
+
+def test_resolve_fx_rate_provider_order_falls_back_when_env_empty(monkeypatch):
+    monkeypatch.setenv("FX_RATE_PROVIDER_ORDER", "")
+    m._resolve_fx_rate_provider_order.cache_clear()
+    assert m._resolve_fx_rate_provider_order() == m.DEFAULT_FX_RATE_PROVIDER_ORDER
+
+
+def test_resolve_fx_rate_provider_order_is_cached(monkeypatch):
+    # First call resolves and caches; a subsequent env mutation without
+    # clearing the cache must not change the returned order.
+    monkeypatch.setenv("FX_RATE_PROVIDER_ORDER", "frankfurter.dev")
+    m._resolve_fx_rate_provider_order.cache_clear()
+    first = m._resolve_fx_rate_provider_order()
+    assert first == ("frankfurter.dev",)
+
+    monkeypatch.setenv("FX_RATE_PROVIDER_ORDER", "exchangerate.host")
+    second = m._resolve_fx_rate_provider_order()
+    assert second == first  # cached — env change ignored until cache_clear()
+
+    info = m._resolve_fx_rate_provider_order.cache_info()
+    assert info.hits >= 1
+
+
+def test_fetch_fx_rate_uses_env_override_order(monkeypatch):
+    # With the env override set, only the named provider should be tried
+    # before falling through to Yahoo.
+    monkeypatch.setenv("FX_RATE_PROVIDER_ORDER", "exchangerate.host")
+    m._resolve_fx_rate_provider_order.cache_clear()
+
+    body = json.dumps({"rates": {"USD": 1.42}}).encode("utf-8")
+    calls = []
+
+    def fake_urlopen(req, timeout=None):
+        url = req if isinstance(req, str) else req.full_url
+        calls.append(url)
+        if "exchangerate.host" in url:
+            return _FakeHTTPResponse(body)
+        raise OSError("should not be called")
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
+    assert m.fetch_fx_rate("GBP", "USD") == pytest.approx(1.42)
+    assert len(calls) == 1
+    assert "exchangerate.host" in calls[0]
+
+
+def test_default_provider_order_matches_url_templates_order():
+    """Locks in the "no-env behaviour must remain byte-identical" constraint:
+    the no-env default must resolve providers in the same order as the
+    original ``FX_RATE_URL_TEMPLATES`` tuple, so a future reorder of one
+    without the other doesn't silently change which provider is tried first.
+    """
+    assert m.DEFAULT_FX_RATE_PROVIDER_ORDER == tuple(
+        m.FX_RATE_PROVIDER_TEMPLATES.keys()
+    )
+    for key, url_template in zip(
+        m.DEFAULT_FX_RATE_PROVIDER_ORDER, m.FX_RATE_URL_TEMPLATES
+    ):
+        assert m.FX_RATE_PROVIDER_TEMPLATES[key] == url_template
+
+
+def test_fetch_fx_rate_tries_yahoo_after_env_override_provider_fails(monkeypatch):
+    # With the env override set to a single provider that fails, Yahoo must
+    # still be tried — the override must not skip the Yahoo last resort.
+    monkeypatch.setenv("FX_RATE_PROVIDER_ORDER", "exchangerate.host")
+    m._resolve_fx_rate_provider_order.cache_clear()
+
+    body = json.dumps(
+        {"chart": {"result": [{"meta": {"regularMarketPrice": 1.31}}]}}
+    ).encode("utf-8")
+    calls = []
+
+    def fake_urlopen(req, timeout=None):
+        url = req if isinstance(req, str) else req.full_url
+        calls.append(url)
+        if "yahoo" in url:
+            return _FakeHTTPResponse(body)
+        raise OSError("blocked")
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
+    assert m.fetch_fx_rate("GBP", "USD") == pytest.approx(1.31)
+    assert len(calls) == 2
+    assert "exchangerate.host" in calls[0]
+    assert "yahoo" in calls[1]
 
 
 # --------------------------------------------------------------------------
@@ -1189,6 +1322,24 @@ def test_prompt_choice_empty_input_returns_default(monkeypatch):
     # The default is only used when the user submits an empty answer.
     monkeypatch.setattr("builtins.input", lambda _: "")
     assert m.prompt_choice("Pick", ["NewProvider", "other"], default="other") == "other"
+
+
+# --------------------------------------------------------------------------
+# Confirmation of manually-entered electricity / exchange rates
+# --------------------------------------------------------------------------
+
+
+def test_prompt_yes_no_accepts_yes_and_no(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _: "y")
+    assert m.prompt_yes_no("ok?") is True
+    monkeypatch.setattr("builtins.input", lambda _: "n")
+    assert m.prompt_yes_no("ok?") is False
+
+
+def test_prompt_yes_no_empty_uses_default(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _: "")
+    assert m.prompt_yes_no("ok?", default=True) is True
+    assert m.prompt_yes_no("ok?", default=False) is False
 
 
 # --------------------------------------------------------------------------
@@ -1536,6 +1687,9 @@ def test_run_non_interactive_rejects_zero_tokens_per_sec_in_every_mode(
 
 
 def test_run_non_interactive_rejects_zero_total_workload_tokens(tmp_path: Path):
+    # A workload with no input and no output used to surface as the vague
+    # "zero total tokens" error. It is now caught by the per-field rule, which
+    # names the offending field (issue #36).
     pricing_path = tmp_path / "pricing.json"
     _write_pricing(pricing_path)
     config_path = tmp_path / "config.json"
@@ -1550,7 +1704,103 @@ def test_run_non_interactive_rejects_zero_total_workload_tokens(tmp_path: Path):
     }
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
-    with pytest.raises(m.ConfigError, match="zero total tokens"):
+    with pytest.raises(
+        m.ConfigError, match=r"workload\.avg_input_tokens must be a positive number"
+    ):
+        m.run_non_interactive(config_path, export_fmt=None, export_path=None)
+
+
+@pytest.mark.parametrize(
+    "field, bad_value",
+    [
+        ("requests_per_day", 0),
+        ("requests_per_day", -1),
+        ("avg_input_tokens", 0),
+        ("avg_input_tokens", -5),
+        # avg_output_tokens == 0 is deliberately NOT included here — it's a
+        # legitimate value (classification-only workload), covered by
+        # test_run_non_interactive_allows_zero_output_tokens_for_input_only_workload
+        # below. Only a negative value is invalid.
+        ("avg_output_tokens", -3),
+    ],
+)
+def test_run_non_interactive_rejects_nonpositive_workload_field(
+    tmp_path: Path, field, bad_value
+):
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    workload = {
+        "requests_per_day": 1000,
+        "avg_input_tokens": 500,
+        "avg_output_tokens": 300,
+    }
+    workload[field] = bad_value
+    config = {
+        "workload": workload,
+        "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+        "pricing_file": str(pricing_path),
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    expected = "non-negative" if field == "avg_output_tokens" else "positive"
+    with pytest.raises(
+        m.ConfigError, match=rf"workload\.{field} must be a {expected} number"
+    ):
+        m.run_non_interactive(config_path, export_fmt=None, export_path=None)
+
+
+def test_all_shipped_presets_pass_validation():
+    # The positivity rules apply to preset shapes too, so a shipped preset with
+    # a zero/negative field would start failing at config-resolution time.
+    for preset in m.WORKLOAD_PRESETS:
+        m._validate_workload(preset.to_workload())
+
+
+@pytest.mark.parametrize("shape", ["workload_preset", "workload_presets"])
+def test_resolve_workload_scenarios_validates_preset_shapes(monkeypatch, shape):
+    # The reason validation lives in _resolve_workload_scenarios rather than
+    # run_non_interactive is that it then covers the preset shapes as well.
+    bad = m.WorkloadPreset(
+        key="broken",
+        label="Broken",
+        description="Preset with no input tokens.",
+        requests_per_day=100,
+        avg_input_tokens=0,
+        avg_output_tokens=300,
+    )
+    monkeypatch.setattr(m, "WORKLOAD_PRESETS", (bad,))
+    config = {shape: "broken" if shape == "workload_preset" else ["broken"]}
+
+    with pytest.raises(
+        m.ConfigError, match=r"workload\.avg_input_tokens must be a positive number"
+    ):
+        m._resolve_workload_scenarios(config)
+
+
+@pytest.mark.parametrize(
+    "field", ["requests_per_day", "avg_input_tokens", "avg_output_tokens"]
+)
+def test_run_non_interactive_rejects_bool_workload_field(tmp_path: Path, field):
+    # bool is a subclass of int, so True/False would otherwise pass the numeric
+    # type check and be silently treated as 1/0.
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    workload = {
+        "requests_per_day": 1000,
+        "avg_input_tokens": 500,
+        "avg_output_tokens": 300,
+    }
+    workload[field] = True
+    config = {
+        "workload": workload,
+        "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+        "pricing_file": str(pricing_path),
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(m.ConfigError, match=rf"workload\.{field} must be a number"):
         m.run_non_interactive(config_path, export_fmt=None, export_path=None)
 
 
@@ -1713,10 +1963,13 @@ _LOCAL_SETUP_ANSWERS = {
     # which is exactly what the detected/undetected assertions below compare.
     "Extra power draw while generating": "",
     "Total system power draw while running": "",
+    # Accept the rate as entered. The decline path is exercised separately
+    # by the _local_setup_with tests below.
+    "Use this electricity rate?": "",
 }
 
 
-def _local_setup(monkeypatch, gpu_info):
+def _local_setup(monkeypatch, gpu_info, answers=None):
     """Run interactive_local_setup offline with GPU detection stubbed.
 
     Both benchmark entry points are replaced with stubs that fail the test if
@@ -1734,10 +1987,21 @@ def _local_setup(monkeypatch, gpu_info):
     )
     monkeypatch.setattr(m, "fetch_fx_rate", lambda *a, **k: pytest.fail("network call"))
 
+    script = {**_LOCAL_SETUP_ANSWERS, **(answers or {})}
+    pending = {
+        fragment: list(value) if isinstance(value, list) else None
+        for fragment, value in script.items()
+    }
+
     def fake_input(prompt: str = "") -> str:
-        for fragment, answer in _LOCAL_SETUP_ANSWERS.items():
+        for fragment, answer in script.items():
             if fragment in prompt:
-                return answer
+                queued = pending[fragment]
+                if queued is None:
+                    return answer
+                if not queued:
+                    pytest.fail(f"ran out of scripted answers for prompt: {prompt!r}")
+                return queued.pop(0)
         pytest.fail(f"unscripted prompt: {prompt!r}")
 
     monkeypatch.setattr("builtins.input", fake_input)
@@ -1781,6 +2045,118 @@ def test_interactive_local_setup_existing_hardware_with_no_gpu_detected(
     assert "No GPU detected" in out
     assert settings["power_watts_extra"] == 250.0
     assert settings["power_watts_total"] == 350.0
+
+
+def test_declining_the_usd_rate_confirmation_reprompts_and_uses_the_new_value(
+    monkeypatch, capsys
+):
+    # The point of issue #54: a mistyped rate must be correctable before it
+    # reaches the table. Enter $99/kWh, decline, enter $0.15, accept.
+    _, _, _, _, settings = _local_setup(
+        monkeypatch,
+        _stub_gpu_info(),
+        answers={
+            "Electricity rate": ["99", "0.15"],
+            "Use this electricity rate?": ["n", "y"],
+        },
+    )
+    assert settings["electricity_rate_per_kwh"] == 0.15
+    out = capsys.readouterr().out
+    # Both the rejected and the accepted value were shown back for review;
+    # confirming a value the user never saw would be no confirmation at all.
+    assert "$99.0000/kWh" in out
+    assert "$0.1500/kWh" in out
+    assert "Re-entering the value." in out
+
+
+def test_accepting_the_usd_rate_confirmation_asks_exactly_once(monkeypatch, capsys):
+    # The happy path must not become a two-step flow for users with nothing
+    # to correct: Enter accepts, and the summary is printed once.
+    _, _, _, _, settings = _local_setup(monkeypatch, _stub_gpu_info())
+    assert settings["electricity_rate_per_kwh"] == 0.15
+    assert capsys.readouterr().out.count("Electricity rate: $") == 1
+
+
+def _gbp_setup(monkeypatch, answers):
+    """interactive_local_setup down the GBP branch, with FX stubbed."""
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: _stub_gpu_info())
+    monkeypatch.setattr(
+        m, "fetch_octopus_agile_rate", lambda *a, **k: pytest.fail("network call")
+    )
+    monkeypatch.setattr(m, "fetch_fx_rate", lambda *a, **k: 1.30)
+    script = {
+        "Skip benchmark": "y",
+        "auto-detect an NVIDIA GPU": "y",
+        "Measured or estimated tokens/sec": "40",
+        "Hardware mode": "existing",
+        "Look up your current unit rate live": "n",
+        "Do you pay for electricity in GBP": "y",
+        "Extra power draw while generating": "",
+        "Total system power draw while running": "",
+        **answers,
+    }
+    pending = {f: list(v) if isinstance(v, list) else None for f, v in script.items()}
+
+    def fake_input(prompt: str = "") -> str:
+        for fragment, answer in script.items():
+            if fragment in prompt:
+                queued = pending[fragment]
+                if queued is None:
+                    return answer
+                if not queued:
+                    pytest.fail(f"ran out of scripted answers for prompt: {prompt!r}")
+                return queued.pop(0)
+        pytest.fail(f"unscripted prompt: {prompt!r}")
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    return m.interactive_local_setup()
+
+
+def test_declining_the_gbp_confirmation_reprompts_both_interdependent_values(
+    monkeypatch, capsys
+):
+    # The displayed electricity rate is gbp_rate * usd_per_gbp, so the two
+    # values cannot be corrected independently — declining must re-ask both.
+    _, display_currency, usd_per_gbp, _, settings = _gbp_setup(
+        monkeypatch,
+        {
+            "Electricity rate (GBP/kWh)": ["0.30", "0.20"],
+            "GBP→USD exchange rate": ["9.99", "1.25"],
+            "Use this electricity rate and exchange rate?": ["n", "y"],
+        },
+    )
+    assert display_currency == "GBP"
+    assert usd_per_gbp == 1.25
+    assert settings["electricity_rate_per_kwh"] == pytest.approx(0.20 * 1.25)
+    assert "Re-entering both values." in capsys.readouterr().out
+
+
+def test_declining_the_gbp_confirmation_does_not_default_to_the_rejected_rate(
+    monkeypatch,
+):
+    # Pressing Enter at the re-prompt must not hand back the value just
+    # rejected. The default offered second time is the same one offered
+    # first time (0.2483), not the 0.30 the user turned down.
+    prompts = []
+    real_prompt_float = m.prompt_float
+
+    def recording_prompt_float(prompt, default=None, minimum=None):
+        prompts.append((prompt, default))
+        return real_prompt_float(prompt, default=default, minimum=minimum)
+
+    monkeypatch.setattr(m, "prompt_float", recording_prompt_float)
+    _, _, _, _, settings = _gbp_setup(
+        monkeypatch,
+        {
+            # "" on the second pass takes whatever default is offered.
+            "Electricity rate (GBP/kWh)": ["0.30", ""],
+            "GBP→USD exchange rate": ["1.25", "1.25"],
+            "Use this electricity rate and exchange rate?": ["n", "y"],
+        },
+    )
+    rate_defaults = [d for p, d in prompts if "Electricity rate (GBP/kWh)" in p]
+    assert rate_defaults == [0.2483, 0.2483]
+    assert settings["electricity_rate_per_kwh"] == pytest.approx(0.2483 * 1.25)
 
 
 # --------------------------------------------------------------------------
@@ -1908,6 +2284,163 @@ def test_lookup_gpu_defaults_returns_none_for_unknown_card():
 
 def test_lookup_gpu_defaults_case_insensitive():
     assert m.lookup_gpu_defaults("nvidia geforce rtx 4090") is not None
+
+
+def test_load_gpu_defaults_reads_shipped_json_file():
+    defaults = m.load_gpu_defaults()
+    assert len(defaults) > 0
+    labels = [label for label, _cost, _power in defaults]
+    assert "RTX 4090" in labels
+    for label, cost, power in defaults:
+        assert isinstance(label, str) and label
+        assert cost > 0
+        assert power > 0
+
+
+def test_load_gpu_defaults_falls_back_when_file_missing(tmp_path: Path, capsys):
+    defaults = m.load_gpu_defaults(tmp_path / "does_not_exist.json")
+    assert defaults == m._FALLBACK_GPU_COST_POWER_DEFAULTS
+    # An absent file is the out-of-the-box state, not a user mistake, so it
+    # must stay silent — unlike every other unusable-file case below.
+    assert capsys.readouterr().err == ""
+
+
+def test_load_gpu_defaults_falls_back_on_invalid_json(tmp_path: Path, capsys):
+    bad_path = tmp_path / "gpu_power_defaults.json"
+    bad_path.write_text("{not valid json", encoding="utf-8")
+    assert m.load_gpu_defaults(bad_path) == m._FALLBACK_GPU_COST_POWER_DEFAULTS
+    assert "using built-in GPU defaults" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("encoding", ["utf-16", "latin-1"])
+def test_load_gpu_defaults_falls_back_on_non_utf8_file(
+    tmp_path: Path, capsys, encoding
+):
+    # The file is opened as UTF-8, so any other encoding raises
+    # UnicodeDecodeError — a ValueError, not an OSError, and therefore not
+    # caught by the obvious `except (json.JSONDecodeError, OSError)`.
+    # "Present but unusable" must warn and fall back, not traceback.
+    path = tmp_path / "gpu_power_defaults.json"
+    path.write_bytes(
+        '{"gpus": [{"label": "RTX 4090", "cost_usd": 1600.0, "power_watts": 450.0}]}'
+        "\n// caf\u00e9".encode(encoding)
+    )
+    assert m.load_gpu_defaults(path) == m._FALLBACK_GPU_COST_POWER_DEFAULTS
+    assert "could not be read" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "contents, expected_problem",
+    [
+        # Valid JSON, but not a JSON object. The original code called
+        # ``.get`` on the parsed value, so these raised AttributeError
+        # instead of falling back as the docstring promised.
+        ("[1, 2, 3]", "must contain a JSON object, got list"),
+        ('"hello"', "must contain a JSON object, got str"),
+        ("42", "must contain a JSON object, got int"),
+        ("null", "must contain a JSON object, got NoneType"),
+        # Object, but "gpus" is not a list.
+        ('{"gpus": {"label": "RTX 4090"}}', '"gpus" must be a list, got dict'),
+        # Object with no usable entries at all.
+        ('{"gpus": []}', "listed no usable GPU entries"),
+    ],
+)
+def test_load_gpu_defaults_falls_back_on_wrong_shape(
+    tmp_path: Path, capsys, contents, expected_problem
+):
+    path = tmp_path / "gpu_power_defaults.json"
+    path.write_text(contents, encoding="utf-8")
+    assert m.load_gpu_defaults(path) == m._FALLBACK_GPU_COST_POWER_DEFAULTS
+    assert expected_problem in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"cost_usd": 100.0, "power_watts": 50.0},  # no label
+        {"label": "X", "power_watts": 50.0},  # no cost
+        {"label": "X", "cost_usd": 100.0},  # no power
+        {"label": "   ", "cost_usd": 100.0, "power_watts": 50.0},  # blank label
+        {"label": "X", "cost_usd": "not a number", "power_watts": 50.0},
+        {"label": "X", "cost_usd": None, "power_watts": 50.0},
+        {"label": "X", "cost_usd": True, "power_watts": 50.0},  # bool is not 1.0
+        {"label": "X", "cost_usd": 0, "power_watts": 50.0},  # free GPU
+        {"label": "X", "cost_usd": -100.0, "power_watts": 50.0},
+        {"label": "X", "cost_usd": 100.0, "power_watts": 0},  # zero draw
+        {"label": "X", "cost_usd": 100.0, "power_watts": -50.0},
+        "not an object",
+    ],
+)
+def test_load_gpu_defaults_skips_bad_entry_but_keeps_the_rest(
+    tmp_path: Path, capsys, entry
+):
+    path = tmp_path / "gpu_power_defaults.json"
+    good = {"label": "GOOD CARD", "cost_usd": 200.0, "power_watts": 60.0}
+    path.write_text(json.dumps({"gpus": [entry, good]}), encoding="utf-8")
+
+    # The rest of the file survives — one typo does not discard the user's
+    # whole customisation — but the skip is reported, so they are never
+    # left wondering why their card stopped matching.
+    assert m.load_gpu_defaults(path) == (("GOOD CARD", 200.0, 60.0),)
+    assert "skipping gpus[0]" in capsys.readouterr().err
+
+
+def test_load_gpu_defaults_upper_cases_user_supplied_labels(tmp_path: Path):
+    # lookup_gpu_defaults upper-cases the detected card name, so a
+    # lower-case label in the user's file could never match before. The
+    # README documents this matching as case-insensitive.
+    path = tmp_path / "gpu_power_defaults.json"
+    path.write_text(
+        json.dumps(
+            {"gpus": [{"label": "rtx 5090", "cost_usd": 2.0, "power_watts": 3.0}]}
+        ),
+        encoding="utf-8",
+    )
+    defaults = m.load_gpu_defaults(path)
+    assert defaults == (("RTX 5090", 2.0, 3.0),)
+    assert m.lookup_gpu_defaults("NVIDIA GeForce RTX 5090", defaults=defaults) == (
+        2.0,
+        3.0,
+    )
+
+
+def test_fallback_gpu_defaults_match_shipped_json():
+    # The fallback tuple duplicates the shipped JSON so the script still
+    # works if the file goes missing. Duplication is only safe while the
+    # two agree, so this asserts they do.
+    assert m.load_gpu_defaults() == m._FALLBACK_GPU_COST_POWER_DEFAULTS
+
+
+def test_gpu_cost_power_defaults_constant_reflects_shipped_json():
+    # The public constant kept its name across the move to a config file,
+    # and now carries what the file says rather than a hardcoded copy.
+    assert m.GPU_COST_POWER_DEFAULTS == m.load_gpu_defaults()
+    assert m.lookup_gpu_defaults("NVIDIA GeForce RTX 4090") == (1600.0, 450.0)
+
+
+def test_load_gpu_defaults_reads_custom_file(tmp_path: Path):
+    custom_path = tmp_path / "gpu_power_defaults.json"
+    custom_path.write_text(
+        json.dumps(
+            {
+                "as_of": "2026-07-28",
+                "note": "custom",
+                "gpus": [
+                    {"label": "MY CUSTOM GPU", "cost_usd": 123.0, "power_watts": 45.0}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    defaults = m.load_gpu_defaults(custom_path)
+    assert defaults == (("MY CUSTOM GPU", 123.0, 45.0),)
+    assert m.lookup_gpu_defaults("my custom gpu", defaults=defaults) == (123.0, 45.0)
+
+
+def test_lookup_gpu_defaults_accepts_explicit_defaults_tuple():
+    custom = (("FAKE CARD", 999.0, 111.0),)
+    assert m.lookup_gpu_defaults("Fake Card 9000", defaults=custom) == (999.0, 111.0)
+    assert m.lookup_gpu_defaults("Something Else", defaults=custom) is None
 
 
 # --------------------------------------------------------------------------
@@ -2212,6 +2745,10 @@ _ACCEPT_DEFAULT = {
     "Total system power draw while running": "",
     "Export results to a file?": "",
     "Save these settings as defaults": "",
+    # The confirmation added for issue #54. The trailing "?" keeps this
+    # distinct from the GBP branch's "...rate and exchange rate?" prompt,
+    # which the first-match responder would otherwise swallow.
+    "Use this electricity rate?": "",
 }
 
 
