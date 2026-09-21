@@ -1325,6 +1325,24 @@ def test_prompt_choice_empty_input_returns_default(monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# Confirmation of manually-entered electricity / exchange rates
+# --------------------------------------------------------------------------
+
+
+def test_prompt_yes_no_accepts_yes_and_no(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _: "y")
+    assert m.prompt_yes_no("ok?") is True
+    monkeypatch.setattr("builtins.input", lambda _: "n")
+    assert m.prompt_yes_no("ok?") is False
+
+
+def test_prompt_yes_no_empty_uses_default(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _: "")
+    assert m.prompt_yes_no("ok?", default=True) is True
+    assert m.prompt_yes_no("ok?", default=False) is False
+
+
+# --------------------------------------------------------------------------
 # Non-interactive config validation
 # --------------------------------------------------------------------------
 
@@ -1945,10 +1963,13 @@ _LOCAL_SETUP_ANSWERS = {
     # which is exactly what the detected/undetected assertions below compare.
     "Extra power draw while generating": "",
     "Total system power draw while running": "",
+    # Accept the rate as entered. The decline path is exercised separately
+    # by the _local_setup_with tests below.
+    "Use this electricity rate?": "",
 }
 
 
-def _local_setup(monkeypatch, gpu_info):
+def _local_setup(monkeypatch, gpu_info, answers=None):
     """Run interactive_local_setup offline with GPU detection stubbed.
 
     Both benchmark entry points are replaced with stubs that fail the test if
@@ -1966,10 +1987,21 @@ def _local_setup(monkeypatch, gpu_info):
     )
     monkeypatch.setattr(m, "fetch_fx_rate", lambda *a, **k: pytest.fail("network call"))
 
+    script = {**_LOCAL_SETUP_ANSWERS, **(answers or {})}
+    pending = {
+        fragment: list(value) if isinstance(value, list) else None
+        for fragment, value in script.items()
+    }
+
     def fake_input(prompt: str = "") -> str:
-        for fragment, answer in _LOCAL_SETUP_ANSWERS.items():
+        for fragment, answer in script.items():
             if fragment in prompt:
-                return answer
+                queued = pending[fragment]
+                if queued is None:
+                    return answer
+                if not queued:
+                    pytest.fail(f"ran out of scripted answers for prompt: {prompt!r}")
+                return queued.pop(0)
         pytest.fail(f"unscripted prompt: {prompt!r}")
 
     monkeypatch.setattr("builtins.input", fake_input)
@@ -2013,6 +2045,118 @@ def test_interactive_local_setup_existing_hardware_with_no_gpu_detected(
     assert "No GPU detected" in out
     assert settings["power_watts_extra"] == 250.0
     assert settings["power_watts_total"] == 350.0
+
+
+def test_declining_the_usd_rate_confirmation_reprompts_and_uses_the_new_value(
+    monkeypatch, capsys
+):
+    # The point of issue #54: a mistyped rate must be correctable before it
+    # reaches the table. Enter $99/kWh, decline, enter $0.15, accept.
+    _, _, _, _, settings = _local_setup(
+        monkeypatch,
+        _stub_gpu_info(),
+        answers={
+            "Electricity rate": ["99", "0.15"],
+            "Use this electricity rate?": ["n", "y"],
+        },
+    )
+    assert settings["electricity_rate_per_kwh"] == 0.15
+    out = capsys.readouterr().out
+    # Both the rejected and the accepted value were shown back for review;
+    # confirming a value the user never saw would be no confirmation at all.
+    assert "$99.0000/kWh" in out
+    assert "$0.1500/kWh" in out
+    assert "Re-entering the value." in out
+
+
+def test_accepting_the_usd_rate_confirmation_asks_exactly_once(monkeypatch, capsys):
+    # The happy path must not become a two-step flow for users with nothing
+    # to correct: Enter accepts, and the summary is printed once.
+    _, _, _, _, settings = _local_setup(monkeypatch, _stub_gpu_info())
+    assert settings["electricity_rate_per_kwh"] == 0.15
+    assert capsys.readouterr().out.count("Electricity rate: $") == 1
+
+
+def _gbp_setup(monkeypatch, answers):
+    """interactive_local_setup down the GBP branch, with FX stubbed."""
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: _stub_gpu_info())
+    monkeypatch.setattr(
+        m, "fetch_octopus_agile_rate", lambda *a, **k: pytest.fail("network call")
+    )
+    monkeypatch.setattr(m, "fetch_fx_rate", lambda *a, **k: 1.30)
+    script = {
+        "Skip benchmark": "y",
+        "auto-detect an NVIDIA GPU": "y",
+        "Measured or estimated tokens/sec": "40",
+        "Hardware mode": "existing",
+        "Look up your current unit rate live": "n",
+        "Do you pay for electricity in GBP": "y",
+        "Extra power draw while generating": "",
+        "Total system power draw while running": "",
+        **answers,
+    }
+    pending = {f: list(v) if isinstance(v, list) else None for f, v in script.items()}
+
+    def fake_input(prompt: str = "") -> str:
+        for fragment, answer in script.items():
+            if fragment in prompt:
+                queued = pending[fragment]
+                if queued is None:
+                    return answer
+                if not queued:
+                    pytest.fail(f"ran out of scripted answers for prompt: {prompt!r}")
+                return queued.pop(0)
+        pytest.fail(f"unscripted prompt: {prompt!r}")
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    return m.interactive_local_setup()
+
+
+def test_declining_the_gbp_confirmation_reprompts_both_interdependent_values(
+    monkeypatch, capsys
+):
+    # The displayed electricity rate is gbp_rate * usd_per_gbp, so the two
+    # values cannot be corrected independently — declining must re-ask both.
+    _, display_currency, usd_per_gbp, _, settings = _gbp_setup(
+        monkeypatch,
+        {
+            "Electricity rate (GBP/kWh)": ["0.30", "0.20"],
+            "GBP→USD exchange rate": ["9.99", "1.25"],
+            "Use this electricity rate and exchange rate?": ["n", "y"],
+        },
+    )
+    assert display_currency == "GBP"
+    assert usd_per_gbp == 1.25
+    assert settings["electricity_rate_per_kwh"] == pytest.approx(0.20 * 1.25)
+    assert "Re-entering both values." in capsys.readouterr().out
+
+
+def test_declining_the_gbp_confirmation_does_not_default_to_the_rejected_rate(
+    monkeypatch,
+):
+    # Pressing Enter at the re-prompt must not hand back the value just
+    # rejected. The default offered second time is the same one offered
+    # first time (0.2483), not the 0.30 the user turned down.
+    prompts = []
+    real_prompt_float = m.prompt_float
+
+    def recording_prompt_float(prompt, default=None, minimum=None):
+        prompts.append((prompt, default))
+        return real_prompt_float(prompt, default=default, minimum=minimum)
+
+    monkeypatch.setattr(m, "prompt_float", recording_prompt_float)
+    _, _, _, _, settings = _gbp_setup(
+        monkeypatch,
+        {
+            # "" on the second pass takes whatever default is offered.
+            "Electricity rate (GBP/kWh)": ["0.30", ""],
+            "GBP→USD exchange rate": ["1.25", "1.25"],
+            "Use this electricity rate and exchange rate?": ["n", "y"],
+        },
+    )
+    rate_defaults = [d for p, d in prompts if "Electricity rate (GBP/kWh)" in p]
+    assert rate_defaults == [0.2483, 0.2483]
+    assert settings["electricity_rate_per_kwh"] == pytest.approx(0.2483 * 1.25)
 
 
 # --------------------------------------------------------------------------
@@ -2601,6 +2745,10 @@ _ACCEPT_DEFAULT = {
     "Total system power draw while running": "",
     "Export results to a file?": "",
     "Save these settings as defaults": "",
+    # The confirmation added for issue #54. The trailing "?" keeps this
+    # distinct from the GBP branch's "...rate and exchange rate?" prompt,
+    # which the first-match responder would otherwise swallow.
+    "Use this electricity rate?": "",
 }
 
 

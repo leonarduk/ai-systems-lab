@@ -56,6 +56,10 @@ except PackageNotFoundError:
 DEFAULT_PRICING_PATH = Path(__file__).parent / "pricing.json"
 DEFAULT_GPU_DEFAULTS_PATH = Path(__file__).parent / "gpu_power_defaults.json"
 DEFAULT_LAST_RUN_PATH = Path(__file__).parent / ".last_run.json"
+# Shipped fallback for the UK electricity rate, offered whenever the user is
+# asked to type one in GBP — including the re-prompt after they decline the
+# confirmation summary.
+DEFAULT_GBP_ELECTRICITY_RATE = 0.2483
 DAYS_PER_MONTH = 30
 HOURS_PER_MONTH = DAYS_PER_MONTH * 24
 
@@ -1999,14 +2003,18 @@ def interactive_local_setup() -> tuple:
             else:
                 print("  Could not fetch a live Octopus Agile rate — enter manually.")
                 gbp_rate = prompt_float(
-                    "Electricity rate (GBP/kWh)", default=0.2483, minimum=0
+                    "Electricity rate (GBP/kWh)",
+                    default=DEFAULT_GBP_ELECTRICITY_RATE,
+                    minimum=0,
                 )
         elif prompt_yes_no(
             "Do you pay for electricity in GBP (e.g. UK)?", default=True
         ):
             display_currency = "GBP"
             gbp_rate = prompt_float(
-                "Electricity rate (GBP/kWh)", default=0.2483, minimum=0
+                "Electricity rate (GBP/kWh)",
+                default=DEFAULT_GBP_ELECTRICITY_RATE,
+                minimum=0,
             )
 
         if display_currency == "GBP":
@@ -2015,17 +2023,43 @@ def interactive_local_setup() -> tuple:
                 print(f"  Current GBP→USD exchange rate: {live_usd_per_gbp:.4f}")
             else:
                 print("  Could not fetch a live exchange rate — enter manually.")
-            usd_per_gbp = prompt_float(
-                "GBP→USD exchange rate (used internally to keep local and hosted "
-                "costs comparable; the table itself is shown in GBP)",
-                default=live_usd_per_gbp if live_usd_per_gbp is not None else 1.27,
-                minimum=0.001,
-            )
-            electricity_rate = gbp_rate * usd_per_gbp
+            # The FX default is captured before the loop so that declining
+            # re-offers the same starting point it did the first time. The
+            # rate re-prompt uses the shipped default rather than gbp_rate:
+            # defaulting to the value the user has just rejected would hand
+            # it straight back to anyone who pressed Enter.
+            fx_default = live_usd_per_gbp if live_usd_per_gbp is not None else 1.27
+            while True:
+                usd_per_gbp = prompt_float(
+                    "GBP→USD exchange rate (used internally to keep local and hosted "
+                    "costs comparable; the table itself is shown in GBP)",
+                    default=fx_default,
+                    minimum=0.001,
+                )
+                electricity_rate = gbp_rate * usd_per_gbp
+                print("\n  Using:")
+                print(f"    Electricity rate: £{gbp_rate:.4f}/kWh")
+                print(f"    Exchange rate: 1 GBP = {usd_per_gbp:.4f} USD")
+                if prompt_yes_no(
+                    "  Use this electricity rate and exchange rate?", default=True
+                ):
+                    break
+                print("  Re-entering both values.\n")
+                gbp_rate = prompt_float(
+                    "Electricity rate (GBP/kWh)",
+                    default=DEFAULT_GBP_ELECTRICITY_RATE,
+                    minimum=0,
+                )
         else:
-            electricity_rate = prompt_float(
-                "Electricity rate (USD/kWh)", default=0.15, minimum=0
-            )
+            while True:
+                electricity_rate = prompt_float(
+                    "Electricity rate (USD/kWh)", default=0.15, minimum=0
+                )
+                print("\n  Using:")
+                print(f"    Electricity rate: ${electricity_rate:.4f}/kWh")
+                if prompt_yes_no("  Use this electricity rate?", default=True):
+                    break
+                print("  Re-entering the value.\n")
 
         def build_existing_rows(workload: Workload) -> list:
             return [
