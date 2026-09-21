@@ -29,6 +29,8 @@ class FakeConfig:
 
 
 class TestParseJsonObject:
+    """Coverage for the shared `_parse_json_object` extraction helper."""
+
     def test_plain_json_object(self):
         assert _parse_json_object('{"eligible": true}', "Test") == {"eligible": True}
 
@@ -47,6 +49,25 @@ class TestParseJsonObject:
     def test_fenced_json_with_surrounding_prose(self):
         raw = 'Here you go:\n```json\n{"eligible": true}\n```\nDone.'
         assert _parse_json_object(raw, "Test") == {"eligible": True}
+
+    def test_prose_wrapped_json_with_trailing_brace_in_prose(self):
+        """Motivating case: trailing prose contains a stray `}`.
+
+        The old `rfind("}")` heuristic would slice from the first `{` to the
+        stray `}` in the prose, producing a malformed slice. `raw_decode`
+        consumes exactly one JSON value and ignores the rest.
+        """
+        raw = '{"eligible": true} trailing text with a } brace'
+        assert _parse_json_object(raw, "Test") == {"eligible": True}
+
+    def test_multiple_json_objects_returns_first(self):
+        raw = '{"first": 1} {"second": 2}'
+        assert _parse_json_object(raw, "Test") == {"first": 1}
+
+    def test_empty_fenced_block_raises(self):
+        raw = "```json\n\n```"
+        with pytest.raises(LLMProviderError, match="did not return valid JSON"):
+            _parse_json_object(raw, "Test")
 
     def test_invalid_json_raises(self):
         with pytest.raises(LLMProviderError, match="did not return valid JSON"):
@@ -234,12 +255,16 @@ class TestBuildLLMProvider:
 
 
 class TestParseJsonObjectEdgeCases:
-    """Edge cases for the JSON extraction helpers introduced in PR #237.
+    """Edge cases for the JSON extraction helpers, exercised through a real
+    provider's `generate_json` rather than `_parse_json_object` directly.
 
-    These tests pin the *current* behavior of the fenced/prose/brace-slicing
-    heuristics. They intentionally assert that ambiguous inputs raise
-    ``LLMProviderError`` rather than silently mis-parsing, so any future
-    change to the extraction logic must update these tests explicitly.
+    An empty fenced block still has no decodable content, so it still raises.
+    Multiple-objects and trailing-brace-in-prose used to raise here too, back
+    when extraction sliced from the first `{` to the last `}` in the text;
+    `_extract_json_candidate` now consumes exactly one JSON value via
+    `json.JSONDecoder().raw_decode` and ignores what follows, so those cases
+    succeed instead — see `TestParseJsonObject.test_multiple_json_objects_returns_first`
+    and `test_prose_wrapped_json_with_trailing_brace_in_prose`.
     """
 
     def _provider(self):
@@ -267,20 +292,21 @@ class TestParseJsonObjectEdgeCases:
             with pytest.raises(LLMProviderError):
                 self._provider().generate_json("prompt")
 
-    def test_multiple_json_objects_raises(self):
-        """Two JSON objects in one response must raise rather than pick one."""
+    def test_multiple_json_objects_returns_first_via_provider(self):
+        """Two JSON objects in one response: the first is used, via the real
+        provider path (not just the `_parse_json_object` unit test)."""
         mock_response = self._mock_response(
             '{"eligible": true} but note {"x": 1} is unrelated'
         )
         with patch("llm_providers.requests.post", return_value=mock_response):
-            with pytest.raises(LLMProviderError):
-                self._provider().generate_json("prompt")
+            assert self._provider().generate_json("prompt") == {"eligible": True}
 
-    def test_trailing_brace_in_prose_raises(self):
-        """A valid object followed by prose containing a `}` must raise."""
+    def test_trailing_brace_in_prose_succeeds_via_provider(self):
+        """A valid object followed by prose containing a `}` still parses,
+        via the real provider path (not just the `_parse_json_object` unit
+        test)."""
         mock_response = self._mock_response(
             '{"eligible": true} trailing text with a } brace'
         )
         with patch("llm_providers.requests.post", return_value=mock_response):
-            with pytest.raises(LLMProviderError):
-                self._provider().generate_json("prompt")
+            assert self._provider().generate_json("prompt") == {"eligible": True}
