@@ -28,8 +28,6 @@ DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6"
 DEFAULT_TIMEOUT = 60
 
-_FENCED_JSON_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
-
 
 class LLMProviderError(RuntimeError):
     """Raised when an LLM backend can't be reached or returns unusable output."""
@@ -53,49 +51,59 @@ class LLMProvider(Protocol):
         ...
 
 
-def _extract_json_candidate(raw_text: str) -> str:
+def _extract_json_candidate(raw_text: str) -> str | None:
     """Best-effort extraction of a JSON-object candidate from `raw_text`.
 
-    Handles three common LLM output shapes:
-      1. Plain JSON: `{"a": 1}`
-      2. Fenced JSON: ```json\n{"a": 1}\n``` (or bare ``` fences)
-      3. JSON embedded in prose: "Here you go: {"a": 1} — hope that helps!"
+    Handles three shapes of LLM output, in order:
 
-    Returns the candidate substring (still a string; not yet parsed). If no
-    obvious candidate is found, returns the original text so the caller's
-    `json.loads` can produce a meaningful error.
+    1. A fenced code block (```json ... ``` or ``` ... ```) — the fenced
+       content is returned verbatim.
+    2. Prose-wrapped JSON — the first `{` is located and a single JSON value
+       is consumed via `json.JSONDecoder().raw_decode`, so trailing prose
+       (including stray `}` characters) is ignored. The decoded object is
+       re-serialized and returned.
+    3. Plain JSON — the original text is returned unchanged so the caller's
+       direct `json.loads` can handle it.
+
+    Returns `None` when no candidate can be extracted; the caller is
+    responsible for raising `LLMProviderError`.
     """
     text = raw_text.strip()
-    if not text:
-        return text
 
-    # 1. Try markdown code fences first (with or without a language tag).
-    fence_match = _FENCED_JSON_RE.search(text)
+    # Step 1: fenced code block (with or without a language tag).
+    fence_match = re.search(
+        r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL | re.IGNORECASE
+    )
     if fence_match:
-        inner = fence_match.group(1).strip()
-        if inner:
-            return inner
+        fenced = fence_match.group(1).strip()
+        if fenced:
+            return fenced
+        # Empty fenced block: fall through to the failure path.
+        return None
 
-    # 2. If the whole thing already looks like a JSON object, use it as-is.
-    if text.startswith("{") and text.endswith("}"):
-        return text
-
-    # 3. Otherwise, slice from the first `{` to the last `}` to strip prose.
+    # Step 2: prose-wrapped JSON — consume exactly one JSON value from the
+    # first `{` using raw_decode, ignoring anything that follows.
     first_brace = text.find("{")
-    last_brace = text.rfind("}")
-    if first_brace != -1 and last_brace > first_brace:
-        return text[first_brace : last_brace + 1]
+    if first_brace != -1:
+        try:
+            decoded, _end = json.JSONDecoder().raw_decode(text[first_brace:])
+        except json.JSONDecodeError:
+            decoded = None
+        if isinstance(decoded, dict):
+            return json.dumps(decoded)
 
+    # Step 3: no fences and no decodable object — return the original text so
+    # the caller's direct `json.loads` can attempt (and likely fail) on it.
     return text
 
 
 def _parse_json_object(raw_text: str, provider_name: str) -> dict[str, Any]:
-    """Parse `raw_text` as a JSON object, raising `LLMProviderError` if it isn't one.
-
-    Tolerates markdown code fences and surrounding prose by extracting the
-    most likely JSON-object substring before parsing.
-    """
+    """Parse `raw_text` as a JSON object, raising `LLMProviderError` if it isn't one."""
     candidate = _extract_json_candidate(raw_text)
+    if candidate is None:
+        raise LLMProviderError(
+            f"{provider_name} did not return valid JSON: {raw_text[:200]!r}"
+        )
     try:
         parsed = json.loads(candidate)
     except json.JSONDecodeError as exc:
