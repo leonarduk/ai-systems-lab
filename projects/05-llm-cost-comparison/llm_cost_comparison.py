@@ -2148,11 +2148,57 @@ def interactive_provider_selection(pricing: dict) -> Optional[set]:
         print(f"  {full_key}: {model_info.get('display_name', full_key)}")
     if prompt_yes_no("Compare against all of the above?", default=True):
         return None
-    raw = input(
-        "Enter comma-separated keys to include (leave blank for local only): "
-    ).strip()
-    selected = {k.strip() for k in raw.split(",") if k.strip()}
-    return selected
+
+    # Build a case-insensitive lookup so a user typing "Claude/Opus-5" still
+    # matches the canonical "claude/opus-5" key. Without this, a mistyped or
+    # differently-cased key would be silently dropped from the selection and
+    # the user would get a comparison missing the model they thought they
+    # picked — with no indication anything went wrong.
+    canonical_by_lower = {k.lower(): k for k in all_keys}
+
+    while True:
+        raw = input(
+            "Enter comma-separated keys to include (leave blank for local only): "
+        ).strip()
+        if not raw:
+            # Redundant — an empty entry falls through to `return selected`
+            # with nothing unknown and nothing selected, which is the same
+            # empty set. Kept because "leave blank for local only" is a
+            # contract the prompt above makes to the user, and leaving it as
+            # an emergent property of two later branches invites a future
+            # edit to break it silently.
+            return set()
+        entered = [k.strip() for k in raw.split(",") if k.strip()]
+        selected = set()
+        unknown = []
+        for key in entered:
+            canonical = canonical_by_lower.get(key.lower())
+            if canonical is None:
+                unknown.append(key)
+            else:
+                selected.add(canonical)
+        if not unknown:
+            return selected
+        print(
+            "  Unrecognized key(s): "
+            + ", ".join(repr(k) for k in unknown)
+            + " — not present in the pricing data."
+        )
+        print("  Valid keys are:")
+        for k in all_keys:
+            print(f"    {k}")
+        if prompt_yes_no(
+            "Re-enter the selection? (No = keep only the recognized keys)",
+            default=True,
+        ):
+            continue
+        if not selected:
+            # Every key was unrecognized and the user declined to retry.
+            # Returning an empty set means "local only", which is a real
+            # answer but not an obvious consequence of the exchange they
+            # just had — say so rather than let the table speak for it.
+            print("  No hosted models recognized — comparing local options only.")
+        return selected
 
 
 def run_interactive(use_defaults: bool = False) -> int:
