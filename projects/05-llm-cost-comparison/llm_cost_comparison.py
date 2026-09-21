@@ -778,6 +778,32 @@ def _validate_pricing_model(model_info: dict, full_key: str) -> None:
             )
 
 
+def warn_unknown_model_keys(pricing: dict, selected: Optional[set]) -> list:
+    """Warn about selected keys that match no model, and return them.
+
+    A typo'd or stale ``"provider/model"`` key is simply absent from the
+    comparison, which looks identical to the model being expensive enough
+    to rank last — nothing tells the user their selection was partly
+    ignored.
+
+    Called once per run rather than from ``build_hosted_rows``, which both
+    callers invoke inside a per-scenario loop: a config naming three
+    presets would otherwise repeat the same warning three times. Keeping
+    it out of the row builder also leaves that function free of I/O.
+    """
+    if not selected:
+        return []
+    known = {f"{p}/{m}" for p, m, _info in iter_models(pricing)}
+    unknown = sorted(selected - known)
+    for key in unknown:
+        print(
+            f"Warning: unknown model key {key!r} — ignoring. "
+            f"Known keys: {', '.join(sorted(known)) or '(none)'}.",
+            file=sys.stderr,
+        )
+    return unknown
+
+
 def build_hosted_rows(
     workload: Workload, pricing: dict, selected: Optional[set] = None
 ) -> list:
@@ -2428,6 +2454,7 @@ def run_interactive(use_defaults: bool = False) -> int:
                 settings["workload_preset"] = key
 
     multiple = len(scenarios) > 1
+    warn_unknown_model_keys(pricing, selected)
     scenario_labels_rows = []
     scaled_scenarios = []
     for _key, label, workload in scenarios:
@@ -2795,6 +2822,7 @@ def run_non_interactive(
         )
 
     multiple = len(scenarios) > 1
+    warn_unknown_model_keys(pricing, selected)
     scenario_labels_rows = []
     scaled_scenarios = []
     for key, label, workload in scenarios:
