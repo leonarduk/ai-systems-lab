@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import functools
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -1154,6 +1156,50 @@ FX_RATE_URL_TEMPLATES: tuple = (
     "https://api.exchangerate.host/latest?base={from_currency}&symbols={to_currency}",
 )
 
+# Default provider order used when FX_RATE_PROVIDER_ORDER is unset, empty, or
+# contains only unknown keys. Kept as a module-level tuple so tests and callers
+# can reference the canonical default without re-deriving it.
+DEFAULT_FX_RATE_PROVIDER_ORDER: tuple = (
+    "frankfurter.dev",
+    "frankfurter.app",
+    "exchangerate.host",
+)
+
+# Maps the short, user-facing provider keys accepted in
+# FX_RATE_PROVIDER_ORDER to the URL template they select. Keeping this as an
+# explicit mapping (rather than positional indexing into
+# FX_RATE_URL_TEMPLATES) means the env var can name providers in any order,
+# omit ones the user doesn't want, and stay readable if the template list is
+# ever reordered.
+FX_RATE_PROVIDER_TEMPLATES: dict = {
+    "frankfurter.dev": FX_RATE_URL_TEMPLATES[0],
+    "frankfurter.app": FX_RATE_URL_TEMPLATES[1],
+    "exchangerate.host": FX_RATE_URL_TEMPLATES[2],
+}
+
+
+@functools.lru_cache(maxsize=None)
+def _resolve_fx_rate_provider_order() -> tuple:
+    """Resolve the ordered tuple of FX provider keys to try, from the env.
+
+    Reads ``FX_RATE_PROVIDER_ORDER`` (a comma-separated list of provider keys
+    such as ``"exchangerate.host,frankfurter.dev"``) and returns the matching
+    subset of ``DEFAULT_FX_RATE_PROVIDER_ORDER`` in the requested order.
+    Unknown keys are silently dropped; if the result is empty (unset env,
+    empty string, or only typos), the full default order is returned so
+    behaviour is unchanged from before this env var existed.
+
+    The result is cached for the lifetime of the process (``lru_cache`` with
+    no arguments), so repeated ``fetch_fx_rate()`` calls don't re-read and
+    re-parse the environment on every invocation. Tests that mutate
+    ``FX_RATE_PROVIDER_ORDER`` between cases must call
+    ``_resolve_fx_rate_provider_order.cache_clear()`` to see the new value.
+    """
+    raw = os.environ.get("FX_RATE_PROVIDER_ORDER", "")
+    requested = [key.strip().lower() for key in raw.split(",") if key.strip()]
+    resolved = tuple(key for key in requested if key in FX_RATE_PROVIDER_TEMPLATES)
+    return resolved or DEFAULT_FX_RATE_PROVIDER_ORDER
+
 
 def _fetch_yahoo_fx_rate(from_currency: str, to_currency: str, timeout: float) -> float:
     """Last-resort fallback via Yahoo Finance's unofficial chart endpoint.
@@ -1176,14 +1222,20 @@ def _fetch_yahoo_fx_rate(from_currency: str, to_currency: str, timeout: float) -
 def fetch_fx_rate(
     from_currency: str, to_currency: str, timeout: float = 5.0
 ) -> Optional[float]:
-    """Best-effort live exchange rate, trying each ``FX_RATE_URL_TEMPLATES``
-    provider and finally Yahoo Finance.
+    """Best-effort live exchange rate, trying each configured provider and
+    finally Yahoo Finance.
+
+    The provider order comes from ``_resolve_fx_rate_provider_order()`` (which
+    honours the ``FX_RATE_PROVIDER_ORDER`` env var and is cached for the
+    process lifetime). Yahoo is always tried last, after every configured
+    provider has failed.
 
     Returns None only if every provider fails (network, unknown currency,
     parsing) so callers fall back to manual entry rather than hardcoding a
     rate that goes stale.
     """
-    for template in FX_RATE_URL_TEMPLATES:
+    for provider_key in _resolve_fx_rate_provider_order():
+        template = FX_RATE_PROVIDER_TEMPLATES[provider_key]
         url = template.format(from_currency=from_currency, to_currency=to_currency)
         try:
             with urllib.request.urlopen(url, timeout=timeout) as resp:
