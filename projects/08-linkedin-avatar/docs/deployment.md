@@ -22,6 +22,13 @@ Render's free web-service tier. One-time setup:
 6. **Environment variables** — set every one of these in Render's dashboard (Settings →
    Environment), never in the repo:
 
+   > ⚠️ **Secrets warning.** Every value marked *(secret)* below — in particular
+   > `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `DEEPSEEK_API_KEY`, `PUSHOVER_USER` and
+   > `PUSHOVER_TOKEN` — must **never** be committed to the repository, pasted into issues, or
+   > included in logs. Set them only in Render's dashboard (or a local `.env` that is
+   > `.gitignore`d). If a secret is ever committed, treat it as compromised and rotate it
+   > immediately (see §1.5 Emergency shutdown).
+
    | Variable | Value | Notes |
    |---|---|---|
    | `DEEPSEEK_API_KEY` | *(secret)* | Required. From [platform.deepseek.com](https://platform.deepseek.com) |
@@ -34,7 +41,7 @@ Render's free web-service tier. One-time setup:
    | `AVATAR_IP_RATE_LIMIT` | `40/day` | Optional |
    | `PUSHOVER_USER` | *(secret)* | Optional — without it, `record_contact`/`record_unknown_question` log instead of notifying |
    | `PUSHOVER_TOKEN` | *(secret)* | Optional, pairs with `PUSHOVER_USER` |
-   | `TELEGRAM_BOT_TOKEN` | *(secret)* | Optional — from [@BotFather](https://t.me/BotFather); another channel for the same two tools, independent of Pushover |
+   | `TELEGRAM_BOT_TOKEN` | *(secret)* | Optional — from [@BotFather](https://t.me/BotFather); another channel for the same two tools, independent of Pushover. **Never commit this value.** |
    | `TELEGRAM_CHAT_ID` | *(secret)* | Optional, pairs with `TELEGRAM_BOT_TOKEN` — your numeric chat ID, e.g. from [@userinfobot](https://t.me/userinfobot) |
    | `GRADIO_SERVER_NAME` | `0.0.0.0` | **Required** — Render routes traffic to this, not `127.0.0.1` |
    | `GRADIO_SERVER_PORT` | `10000` | **Required** — must match the port Render expects |
@@ -56,17 +63,47 @@ var — check the table above against what's actually set before looking anywher
 
 ### Cold-start behaviour
 
-Render's free tier sleeps after 15 minutes idle and takes 30–60s to wake on the next request.
-Two mitigations are already built (design §9):
+A **cold start** is any time the process is not already running and has to be brought up from
+scratch. It is triggered by:
 
-- The landing page (`site/index.html`) fires a `fetch()` at the app the moment it loads, so the
-  instance is waking while the visitor reads — the "Start chatting" button usually lands on a warm
-  app by the time it's clicked.
-- A keep-warm GitHub Action (issue #131, not yet built) pings the app every ~14 minutes during
-  waking hours to reduce how often it sleeps at all.
+- **Idle spin-down** — Render's free tier sleeps the service after ~15 minutes with no traffic.
+- **Redeploy** — every push to `main` that touches `projects/08-linkedin-avatar/` rebuilds and
+  restarts the service.
+- **Manual restart / instance recycle** — e.g. after an env-var change, or if Render recycles the
+  instance.
 
-Directly hitting the Render URL cold (no landing page fetch first) still means a 30–60s wait on
-the very first request. That's expected, not a bug.
+What happens during a cold start:
+
+- **Build phase (redeploy only).** Render runs `pip install -r requirements.txt` before the
+  process starts. Duration depends on Render's cache state and PyPI latency — **TBD, to be
+  measured** on a clean build. Idle spin-down does *not* re-run the build; it only restarts the
+  process.
+- **Process start.** `python app.py` imports the Gradio app and the `avatar/` package. There is
+  no model loading on our side (the LLM is a remote API call), so this is fast — but the exact
+  wall-clock time is **TBD, to be measured**.
+- **Warm-up window.** Until the Gradio server is listening on `0.0.0.0:10000`, requests to the
+  Render URL will fail — typically a connection error, a 502, or a hanging request that
+  eventually times out. This is expected, not an outage. The landing page mitigates it by firing
+  a `fetch()` at the app the moment it loads (see below), so the instance is usually warm by the
+  time a visitor clicks "Start chatting".
+- **Health checks.** Render's own health check will fail during the warm-up window; the service
+  is only marked healthy once the port is accepting connections. A short burst of failed checks
+  during a cold start is normal.
+
+Configuration that affects cold-start time:
+
+- **Instance type.** Currently **Free**. Upgrading to a paid instance type removes the idle
+  spin-down entirely (no more cold starts from idleness) and gives more CPU during the build.
+- **Disk persistence.** Not used — the app is stateless and holds no local state across restarts,
+  so there is nothing to rehydrate on cold start. If persistent disk is ever added, factor its
+  mount/attach time into the cold-start budget.
+- **Build cache.** Render caches `pip` downloads between builds; a cache miss (e.g. after a
+  `requirements.txt` change) makes the build phase noticeably longer.
+
+**Rule of thumb for operators:** if the service was idle for >15 minutes, expect a cold start on
+the next request. Allow up to ~60s before treating it as a real failure. Only escalate (see
+Emergency shutdown) if the service is *still* not responding after that, or if the logs show a
+crash loop rather than a normal startup.
 
 ### Taking it down in a hurry
 
@@ -78,6 +115,8 @@ state.
 
 If the problem is a specific leaked or compromised secret rather than "take the whole thing
 down", rotating that one key (below) is faster than suspending and doesn't interrupt the app.
+For a suspected secret leak, an active abuse incident, or anything needing credentials revoked
+as well as traffic stopped, use the full **Emergency shutdown** procedure below instead.
 
 ### Rotating a key
 
@@ -87,6 +126,60 @@ down", rotating that one key (below) is faster than suspending and doesn't inter
 4. Revoke the old key at the provider once the new deploy is confirmed live (see the smoke test
    below) — don't revoke first, or the current deploy starts failing before its replacement is
    confirmed working.
+
+### Emergency shutdown
+
+Use this when the service must stop **now** — a suspected secret leak, an active abuse incident,
+an uncontrolled cost spike, or anything else where "make it stop" beats "fix it in place". The
+steps are ordered so that traffic stops first, then credentials are neutralised, then you confirm
+the shutdown actually took effect.
+
+1. **Stop the Render web service.**
+   - **Dashboard (preferred):** [dashboard.render.com](https://dashboard.render.com) → the
+     `08-linkedin-avatar` service → **Suspend**. This halts traffic immediately and is reversible
+     with one click. Use **Delete** only if the service should not come back — deleting also
+     destroys the service's configuration (environment variables, build settings), so a later
+     restore means recreating the service and re-entering every env var from scratch, not just
+     un-suspending it.
+   - **CLI (if you have it configured):** `render services suspend <service-id>` (or
+     `render services delete <service-id>` for permanent removal). Confirm the service ID in the
+     dashboard first — do not guess it.
+   - Do **not** rely on the daily budget kill-switch for an emergency: it is a cost guard, not a
+     shutdown control, and it does not stop the process or revoke credentials.
+
+2. **Revoke compromised credentials.** Do this even if the service is suspended — a leaked token
+   is usable from anywhere, not just from Render.
+   - **Telegram:** open [@BotFather](https://t.me/BotFather) → `/mybots` → select the bot →
+     **API Token** → **Revoke current token**. This invalidates `TELEGRAM_BOT_TOKEN` everywhere.
+     Generate a replacement only when you are ready to redeploy.
+   - **Pushover:** log in at [pushover.net](https://pushover.net) → your application → **Regenerate
+     Application Token** (invalidates `PUSHOVER_TOKEN`). If `PUSHOVER_USER` may also be exposed,
+     rotate the user key from the same page.
+   - **DeepSeek:** log in at [platform.deepseek.com](https://platform.deepseek.com) → API keys →
+     revoke the exposed key and issue a new one (`DEEPSEEK_API_KEY`).
+   - **Anthropic** (only if `AVATAR_PROVIDER=anthropic`): revoke the key in the Anthropic console
+     (`ANTHROPIC_API_KEY`).
+   - Update the corresponding values in Render's Environment settings **only after** the new
+     credentials are in hand, and only if the service is being brought back up.
+
+3. **Verify the service is actually down.**
+   - Render dashboard → the service → **Logs**: confirm the process has stopped (no new lines)
+     and that the service status shows *Suspended* (or *Deleted*).
+   - From a terminal, hit the service URL directly, e.g.
+     `curl -i https://<service-name>.onrender.com/` — expect a connection failure or a Render
+     "service unavailable" response, **not** a Gradio page. A 200 with the chat UI means it is
+     still up; go back to step 1.
+   - If Telegram or Pushover were configured, confirm the revoked tokens no longer work. For
+     Telegram, check the **JSON body**, not just the HTTP status — the Bot API can report an
+     invalid token with `"ok": false` even when the transport-level status looks like success:
+     `curl -s https://api.telegram.org/bot<old-token>/getMe` should return a body containing
+     `"ok":false` (e.g. `{"ok":false,"error_code":401,"description":"Unauthorized"}`). A body with
+     `"ok":true` means the token is still live; go back to step 2.
+
+4. **Document the incident.** Record what happened, when the service was suspended, which
+   credentials were revoked and when, and who was notified. Link the incident note from the
+   relevant issue or PR so the next person has the timeline. If a runbook exists elsewhere in the
+   repo, link it here; otherwise this section is the runbook.
 
 ---
 
@@ -118,7 +211,7 @@ issue #130's "success looks like" checklist is asking for, and it's cheap enough
 redeploy:
 
 1. Open the Render app URL directly. It should load the chat UI (allow up to 60s if it was
-   asleep).
+   asleep — see Cold-start behaviour above).
 2. Ask it a real question — e.g. "Tell me about issue-worm." — and confirm it answers correctly,
    grounded in the actual knowledge files, not a generic non-answer.
 3. Say something that should trigger `record_contact` (e.g. "I'd like to talk to him about a
