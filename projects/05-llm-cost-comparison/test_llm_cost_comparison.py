@@ -9,6 +9,7 @@ interactive functions are thin wrappers over the tested pure functions.
 from __future__ import annotations
 
 import json
+import time
 import subprocess
 import sys
 import threading
@@ -1429,6 +1430,91 @@ def test_measure_gpu_power_during_returns_average_reading(monkeypatch):
     # them (never equal to the peak) regardless of how many polls actually
     # ran before func() returned.
     assert avg is not None and 40.0 <= avg <= 380.0
+
+
+def test_gpu_poll_interval_default_is_one_second():
+    # The change issue #71 asks for. Pinned against the constant and the
+    # signature's default, so neither can drift from the other.
+    import inspect
+
+    assert m.GPU_POLL_INTERVAL_SECONDS == 1.0
+    default = (
+        inspect.signature(m.measure_gpu_power_during)
+        .parameters["poll_interval"]
+        .default
+    )
+    assert default == m.GPU_POLL_INTERVAL_SECONDS
+
+
+def test_nvidia_smi_timeout_constant_is_the_one_actually_used(monkeypatch):
+    # The constant exists to stop the join timeout and the subprocess
+    # timeout drifting apart. It only does that if detect_nvidia_gpu
+    # really passes it.
+    seen = {}
+
+    class _Result:
+        returncode = 0
+        stdout = "RTX 4090, 24576, 100.0, 450.0\n"
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+        seen["timeout"] = timeout
+        return _Result()
+
+    # Set the constant to a value no literal would coincide with.
+    # Asserting against its real value proves nothing while that value is
+    # still 5.0 — the hardcoded timeout=5 satisfies it equally.
+    monkeypatch.setattr(m, "NVIDIA_SMI_TIMEOUT_SECONDS", 12.5)
+    m.detect_nvidia_gpu(runner=fake_run)
+    assert seen["timeout"] == 12.5
+
+
+def test_measure_gpu_power_during_samples_before_waiting(monkeypatch):
+    # A benchmark shorter than the poll interval must still produce a
+    # reading. This is what makes widening 0.5s to 1.0s safe: if the loop
+    # waited first, doubling the interval would double the window in which
+    # a quick benchmark returns no measurement at all.
+    #
+    # Checking only that the average is non-None cannot show this — a
+    # wait-first loop still appends a reading after func returns but
+    # before the join, so the average comes out the same. Verified: that
+    # version survives the mutation. So the work itself waits on the
+    # poller, and completes only if sampling happened while it ran.
+    polled = threading.Event()
+
+    def spy_detect(runner=None):
+        polled.set()
+        return {"power_draw_w": 321.0}
+
+    def work():
+        # With a 30-second interval, a loop that waits before its first
+        # sample cannot set this in time, and the result says so rather
+        # than the test hanging.
+        return "sampled during work" if polled.wait(timeout=5) else "never polled"
+
+    monkeypatch.setattr(m, "detect_nvidia_gpu", spy_detect)
+    result, avg = m.measure_gpu_power_during(
+        work, runner=lambda *a, **k: None, poll_interval=30.0
+    )
+    assert result == "sampled during work"
+    assert avg == pytest.approx(321.0)
+
+
+def test_measure_gpu_power_during_stops_polling_when_the_work_finishes(monkeypatch):
+    # The poll thread is a daemon, so a leak would not fail the suite —
+    # it would just keep spawning nvidia-smi for the rest of the process.
+    calls = []
+
+    def counting_detect(runner=None):
+        calls.append(1)
+        return {"power_draw_w": 100.0}
+
+    monkeypatch.setattr(m, "detect_nvidia_gpu", counting_detect)
+    m.measure_gpu_power_during(
+        lambda: None, runner=lambda *a, **k: None, poll_interval=0.01
+    )
+    settled = len(calls)
+    time.sleep(0.1)
+    assert len(calls) == settled
 
 
 def test_measure_gpu_power_during_returns_none_average_without_gpu(monkeypatch):
