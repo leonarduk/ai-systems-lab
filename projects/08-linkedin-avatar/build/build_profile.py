@@ -137,6 +137,48 @@ def build_profile(pdf_path, out_path):
     return profile_markdown
 
 
+def summarize_redactions(original_text, redacted_text):
+    """Return a list of (pattern_name, snippet) for each redaction applied.
+
+    Compares the original and redacted text line by line; a line whose redacted
+    form differs is reported with the pattern(s) that fired on it.
+    """
+    findings = []
+    original_lines = original_text.splitlines()
+    redacted_lines = redacted_text.splitlines()
+    for original, redacted in zip(original_lines, redacted_lines):
+        if original == redacted:
+            continue
+        names = []
+        if EMAIL_RE.search(original):
+            names.append("email")
+        if LINKEDIN_URL_RE.search(original):
+            names.append("linkedin URL")
+        if UK_POSTCODE_RE.search(original):
+            names.append("postcode")
+        if STREET_ADDRESS_RE.match(original):
+            names.append("street address")
+        for match in PHONE_CANDIDATE_RE.finditer(original):
+            if _looks_like_phone(match.group(0)):
+                names.append("phone number")
+                break
+        if not names:
+            names.append("other")
+        findings.append((", ".join(names), original.strip()))
+    return findings
+
+
+def print_dry_run_summary(pdf_path, original_text, redacted_text):
+    """Print a human-readable summary of redactions without writing anything."""
+    findings = summarize_redactions(original_text, redacted_text)
+    print(f"{pdf_path}: {len(findings)} redaction(s) would be applied")
+    for pattern_name, snippet in findings:
+        if len(snippet) > 80:
+            snippet = snippet[:77] + "..."
+        print(f"  - {pattern_name}: {snippet}")
+    return findings
+
+
 def find_contact_leaks(text):
     """Return a list of (line_number, pattern_name, snippet) for anything
     contact-shaped still present in already-redacted text."""
@@ -190,12 +232,29 @@ def main(argv=None):
     )
     parser.add_argument(
         "--check",
+        nargs="?",
+        const=True,
+        default=None,
         metavar="PROFILE_MD",
-        help="Re-run redaction detection over an existing profile.md and exit 1 on any leak",
+        help=(
+            "Re-run redaction detection and exit 1 on any leak. Takes a path to "
+            "check an existing profile.md; combine with --dry-run (no path) to "
+            "check the not-yet-written output instead."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview redactions without writing any output files",
     )
     args = parser.parse_args(argv)
 
-    if args.check:
+    if args.check and not args.dry_run:
+        if args.check is True:
+            parser.error(
+                "--check requires a path (e.g. --check knowledge/profile.md) "
+                "unless combined with --dry-run"
+            )
         check_path = Path(args.check)
         text = check_path.read_text(encoding="utf-8")
         leaks = find_contact_leaks(text)
@@ -216,7 +275,26 @@ def main(argv=None):
     if not _out_path_is_safe(out_path):
         parser.error(f"--out must be inside {KNOWLEDGE_DIR}")
 
-    build_profile(Path(args.pdf), out_path)
+    pdf_path = Path(args.pdf)
+
+    if args.dry_run:
+        text = extract_text(pdf_path)
+        redacted_text = redact(text)
+        profile_markdown = normalize(redacted_text)
+        print_dry_run_summary(pdf_path, text, redacted_text)
+        print(f"(dry run: {out_path} not written)")
+        if args.check:
+            leaks = find_contact_leaks(profile_markdown)
+            if leaks:
+                for line_no, pattern_name, snippet in leaks:
+                    print(
+                        f"{out_path}:{line_no}: possible {pattern_name} — {snippet}",
+                        file=sys.stderr,
+                    )
+                return 1
+        return 0
+
+    build_profile(pdf_path, out_path)
     print(f"Wrote {out_path}")
     return 0
 
