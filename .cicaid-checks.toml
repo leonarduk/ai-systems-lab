@@ -13,6 +13,9 @@
 # the git-mcp-server integration test, for the same reason python-ci.yml
 # excludes it) by .github/scripts/run_project_tests.py below. Everything
 # under projects/ itself has no such issue and is safe to run locally.
+#
+# These checks are exercised in CI by .github/workflows/cicaid-checks.yml,
+# which runs `cicaid run-ci-checks` from the repo root.
 
 [[checks]]
 name = "test"

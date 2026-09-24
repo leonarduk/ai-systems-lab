@@ -33,7 +33,9 @@ import argparse
 import csv
 import functools
 import json
+import math
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -56,6 +58,12 @@ try:
     VERSION = _pkg_version("llm-cost-comparison")
 except PackageNotFoundError:
     VERSION = "0.0.0+unknown"
+
+# The conventional module attribute, so `module.__version__` works for the
+# tooling that looks for it. An alias, not a second literal: a hardcoded
+# string here would go stale against pyproject.toml the first time anyone
+# released without remembering to edit both.
+__version__ = VERSION
 
 # Sent when identifying this script honestly to a public API. Derived from
 # VERSION so it cannot drift from the release: a User-Agent that misstates
@@ -176,8 +184,6 @@ def fetch_deepseek_pricing(
     or the prices were unchanged.  Only the DeepSeek section is touched;
     other providers (Claude, etc.) are preserved as-is.
     """
-    import re
-
     try:
         req = urllib.request.Request(
             DEEPSEEK_PRICING_URL,
@@ -259,8 +265,6 @@ def fetch_deepseek_pricing(
 
 def _extract_price(text: str, pattern: str) -> Optional[float]:
     """Try a regex; return the first captured float or None."""
-    import re
-
     match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
     if match:
         try:
@@ -914,8 +918,6 @@ def _validate_pricing_model(model_info: dict, full_key: str) -> None:
     nonsensical cost, and ``NaN``/``inf`` would poison every downstream
     figure.
     """
-    import math
-
     for field in ("input_per_million", "output_per_million"):
         value = model_info.get(field)
         ok = (
@@ -1782,8 +1784,6 @@ def _validate_http_url(base_url: str) -> str:
 
     Returns the normalized URL so callers can use the scheme-prefixed form.
     """
-    import re
-
     url = base_url.strip()
     # urlsplit can't be used to detect the scheme here: it reads the "host" of
     # a bare "localhost:11434" as a scheme, which is exactly the input this
@@ -2131,6 +2131,9 @@ def interactive_local_setup() -> tuple:
 
     tokens_per_sec = None
     measured_load_power_w = None
+    # Recorded when a benchmark actually runs, so --use-defaults can repeat
+    # the same measurement later without re-asking which endpoint to hit.
+    benchmark_target = None
     if benchmark_enabled and prompt_yes_no(
         "Attempt to benchmark a running local model endpoint (Ollama or OpenAI-compatible)?",
         default=True,
@@ -2162,6 +2165,11 @@ def interactive_local_setup() -> tuple:
                     lambda: benchmark_openai_compatible(base_url, model)
                 )
             print(f"  Measured throughput: {tokens_per_sec:.1f} tokens/sec")
+            benchmark_target = {
+                "backend": backend,
+                "base_url": base_url,
+                "model": model,
+            }
             if backend != "ollama":
                 # After the number, not before it: a caveat printed ahead of
                 # the figure it qualifies reads as unrelated preamble.
@@ -2221,6 +2229,7 @@ def interactive_local_setup() -> tuple:
         settings = {
             "mode": "own",
             "tokens_per_sec": tokens_per_sec,
+            "benchmark_target": benchmark_target,
             "hardware_cost": hardware_cost,
             "lifetime_years": lifetime_years,
             "power_watts": power_watts,
@@ -2411,6 +2420,7 @@ def interactive_local_setup() -> tuple:
         settings = {
             "mode": "existing",
             "tokens_per_sec": tokens_per_sec,
+            "benchmark_target": benchmark_target,
             "power_watts_extra": power_watts_extra,
             "power_watts_total": power_watts_total,
             "electricity_rate_per_kwh": electricity_rate,
@@ -2431,6 +2441,7 @@ def interactive_local_setup() -> tuple:
         settings = {
             "mode": "rent",
             "tokens_per_sec": tokens_per_sec,
+            "benchmark_target": benchmark_target,
             "hourly_rate": hourly_rate,
         }
         return (
@@ -2527,6 +2538,77 @@ def interactive_provider_selection(pricing: dict) -> Optional[set]:
         return selected
 
 
+def _refresh_measurements_for_defaults(settings: dict) -> tuple:
+    """Re-measure what can be re-measured for ``--use-defaults``.
+
+    The saved file stores a ``tokens_per_sec`` captured on whatever day
+    the previous run happened to execute, so replaying it silently gives
+    stale cost projections — the point of ``--use-defaults`` is a *quick*
+    run, not a *stale* one.
+
+    It is also a *non-interactive* one, which is the constraint that
+    shapes this. Re-running the full benchmark flow would have to ask
+    which backend, which URL and which model, and a fast path that asks
+    four questions is not a fast path. So the endpoint is taken from
+    ``benchmark_target``, recorded by the run that saved these settings,
+    and nothing here reads from stdin.
+
+    Three cases:
+
+    * GPU detection needs no input, so it always re-runs.
+    * A saved ``benchmark_target`` means the previous run measured a real
+      endpoint; the same one is measured again.
+    * No target means the previous run had no benchmark to save — the
+      user declined it, or typed a figure by hand. A hand-entered number
+      is not a stale measurement, so it is kept as-is.
+
+    Returns ``(tokens_per_sec, gpu_info, measured_load_power_w)``, falling
+    back to the saved throughput whenever a fresh one is unavailable.
+    """
+    saved_tokens_per_sec = settings.get("tokens_per_sec")
+    gpu_info = detect_nvidia_gpu()
+    if gpu_info:
+        idle_avg = average_gpu_power_w()
+        if idle_avg is not None:
+            gpu_info["power_draw_w"] = idle_avg
+        print(f"  Detected: {format_gpu_summary(gpu_info)}")
+    else:
+        print(
+            "  No GPU detected (nvidia-smi not found or returned no data) — "
+            "using saved settings for hardware details."
+        )
+
+    target = settings.get("benchmark_target")
+    if not target:
+        print(
+            f"  No saved benchmark endpoint — keeping throughput "
+            f"{saved_tokens_per_sec} tokens/sec from the saved settings."
+        )
+        return saved_tokens_per_sec, gpu_info, None
+
+    backend = target.get("backend")
+    base_url = target.get("base_url")
+    model = target.get("model")
+    print(f"  Re-benchmarking {backend} at {base_url} ({model})...")
+    try:
+        if backend == "ollama":
+            tokens_per_sec, measured_load_power_w = measure_gpu_power_during(
+                lambda: benchmark_ollama(base_url, model)
+            )
+        else:
+            tokens_per_sec, measured_load_power_w = measure_gpu_power_during(
+                lambda: benchmark_openai_compatible(base_url, model)
+            )
+    except Exception as exc:  # noqa: BLE001 - best-effort, fall back to saved
+        print(
+            f"  Benchmark failed ({exc}) — using saved throughput "
+            f"{saved_tokens_per_sec} tokens/sec."
+        )
+        return saved_tokens_per_sec, gpu_info, None
+    print(f"  Measured throughput: {tokens_per_sec:.1f} tokens/sec")
+    return tokens_per_sec, gpu_info, measured_load_power_w
+
+
 def run_interactive(use_defaults: bool = False) -> int:
     """Compare local hardware vs hosted providers for user-selected workloads.
 
@@ -2535,9 +2617,13 @@ def run_interactive(use_defaults: bool = False) -> int:
     rendering the cost table.
 
     When ``use_defaults`` is True, saved settings from a previous run are
-    used without prompting (equivalent to passing ``--use-defaults`` on the
-    command line).  If no saved file exists the flag is a no-op and the
-    normal interactive flow runs instead.
+    used for the workload/hardware-mode/provider choices without prompting
+    (equivalent to passing ``--use-defaults`` on the command line). GPU
+    detection and the tokens-per-second benchmark are still re-run so the
+    cost projections reflect current hardware, not a stale measurement
+    captured on whatever day the previous run happened to execute. If no
+    saved file exists the flag is a no-op and the normal interactive flow
+    runs instead.
     """
     print("LLM Cost Comparison — local vs hosted APIs")
     print("=" * 60)
@@ -2570,9 +2656,17 @@ def run_interactive(use_defaults: bool = False) -> int:
         print()
 
     if defaults is not None:
-        # Fast path: replay saved settings — no prompts at all.
+        # Fast path: replay saved settings for workload/hardware-mode/provider
+        # choices, but re-run GPU detection and the throughput benchmark so
+        # the cost projections reflect current hardware rather than a stale
+        # measurement captured on whatever day the previous run happened to
+        # execute. Only fall back to the saved tokens_per_sec when a fresh
+        # measurement genuinely isn't available.
         settings = dict(defaults)
-        tokens_per_sec = settings["tokens_per_sec"]
+        tokens_per_sec, _gpu_info, _measured_load_power_w = (
+            _refresh_measurements_for_defaults(settings)
+        )
+        settings["tokens_per_sec"] = tokens_per_sec
         mode = settings["mode"]
         if any(
             k in settings for k in ("workload", "workload_preset", "workload_presets")
@@ -2901,9 +2995,21 @@ def _resolve_workload_scenarios(config: dict) -> list:
         )
         for field_name in ("requests_per_day", "avg_input_tokens", "avg_output_tokens"):
             value = config["workload"][field_name]
-            if not isinstance(value, (int, float)) or isinstance(value, bool):
+            # bool is a subclass of int, so True/False would otherwise pass
+            # the numeric type check below and be silently treated as 1/0.
+            # This case keeps the "workload."-prefixed wording since it is a
+            # type error, not an out-of-range value.
+            if isinstance(value, bool):
                 raise ConfigError(
                     f"workload.{field_name} must be a number, got {value!r}"
+                )
+            if not isinstance(value, (int, float)) or value < 0:
+                # Per-field wording (no "workload." prefix) matches the
+                # issue's example shape and is more immediately recognizable
+                # to end users reading the error; the offending value is
+                # retained to make the fix obvious.
+                raise ConfigError(
+                    f"{field_name} must be a non-negative number, got {value!r}"
                 )
         try:
             workload = Workload(**config["workload"])
@@ -3258,7 +3364,11 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument(
         "--use-defaults",
         action="store_true",
-        help="Skip prompts and reuse settings saved by a previous interactive run.",
+        help=(
+            "Skip prompts and reuse settings saved by a previous interactive run. "
+            "GPU detection and the tokens-per-second benchmark are still re-run "
+            "so the cost projections use fresh measurements."
+        ),
     )
     parser.add_argument(
         "--currency",

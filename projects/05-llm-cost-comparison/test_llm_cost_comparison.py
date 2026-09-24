@@ -9,6 +9,7 @@ interactive functions are thin wrappers over the tested pure functions.
 from __future__ import annotations
 
 import json
+import os
 import time
 import subprocess
 import sys
@@ -440,6 +441,178 @@ def test_build_hosted_rows_direct_call_rejects_invalid_output_price():
 # --------------------------------------------------------------------------
 # Real pricing.json shipped alongside the script
 # --------------------------------------------------------------------------
+
+
+# A function-local import may be deliberate — an optional dependency, or
+# breaking an import cycle. Two escape hatches, both of which make the
+# reason visible at the import site rather than leaving a reader to guess:
+DEFERRED_IMPORT_MARKER = "deferred-import:"
+
+
+def _function_local_imports(source: str) -> list:
+    """Every import inside a function, minus the deliberately deferred ones.
+
+    Exempt if the import sits under a ``try`` whose handlers catch exactly
+    ``ImportError`` (bare ``except ImportError:`` or a tuple such as
+    ``except (ImportError, ModuleNotFoundError):`` containing it) — the
+    optional-dependency idiom — or if its line carries a
+    ``# deferred-import: <reason>`` comment. A bare ``except:`` or a
+    handler for some other exception type (e.g. ``except ValueError:``)
+    does NOT exempt the import: only the exact ImportError idiom does.
+    """
+    import ast
+
+    tree = ast.parse(source)
+    lines = source.splitlines()
+
+    exempt_lines = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        catches_import_error = any(
+            (isinstance(handler.type, ast.Name) and handler.type.id == "ImportError")
+            or (
+                isinstance(handler.type, ast.Tuple)
+                and any(
+                    isinstance(e, ast.Name) and e.id == "ImportError"
+                    for e in handler.type.elts
+                )
+            )
+            for handler in node.handlers
+        )
+        if not catches_import_error:
+            continue
+        for stmt in node.body:
+            for inner in ast.walk(stmt):
+                if isinstance(inner, (ast.Import, ast.ImportFrom)):
+                    exempt_lines.add(inner.lineno)
+
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for inner in ast.walk(node):
+            if not isinstance(inner, (ast.Import, ast.ImportFrom)):
+                continue
+            if inner.lineno in exempt_lines:
+                continue
+            if DEFERRED_IMPORT_MARKER in lines[inner.lineno - 1]:
+                continue
+            names = ", ".join(a.name for a in inner.names)
+            offenders.append(f"{node.name}() line {inner.lineno}: {names}")
+    return offenders
+
+
+def test_no_undeclared_function_local_imports():
+    # Issue #76 asks for `import re` to be hoisted. Hoisting only the one
+    # the issue names leaves the pattern in place — there were three — so
+    # this pins the rule rather than the instance.
+    #
+    # It is not an absolute ban. A deferred import is sometimes right, so
+    # the rule is "say why": an optional dependency guarded by
+    # try/except ImportError passes untouched, and anything else passes
+    # with a `# deferred-import: <reason>` comment. What it stops is the
+    # unexplained one, which is what all three of these were.
+    #
+    # Structural rather than textual: a grep for "    import " misses
+    # `from x import y` and matches inside the docstrings of this very
+    # module, which discuss imports.
+    source = Path(m.__file__).read_text(encoding="utf-8")
+    offenders = _function_local_imports(source)
+    assert offenders == [], "undeclared function-local imports: " + "; ".join(offenders)
+
+
+def test_the_deferred_import_escape_hatches_work():
+    # A guard nobody can satisfy gets deleted the first time it is
+    # inconvenient. Prove both exits are real, against synthetic source,
+    # so the rule above is enforceable rather than absolute.
+    banned = "def f():\n    import json\n"
+    assert _function_local_imports(banned)
+
+    marked = "def f():\n    import json  # deferred-import: breaks a cycle\n"
+    assert _function_local_imports(marked) == []
+
+    optional = (
+        "def f():\n"
+        "    try:\n"
+        "        import tomllib\n"
+        "    except ImportError:\n"
+        "        tomllib = None\n"
+    )
+    assert _function_local_imports(optional) == []
+
+    optional_tuple = (
+        "def f():\n"
+        "    try:\n"
+        "        import tomllib\n"
+        "    except (ImportError, ModuleNotFoundError):\n"
+        "        tomllib = None\n"
+    )
+    assert _function_local_imports(optional_tuple) == []
+
+
+def test_except_other_than_import_error_does_not_exempt_deferred_import():
+    # Regression test: the guard's job is to flag unexplained deferred
+    # imports. A handler for some *other* exception type must not be
+    # mistaken for the ImportError optional-dependency idiom just because
+    # its name happens to contain the substring "Error" — and a bare
+    # `except:` must not be treated as catching ImportError either.
+    wrong_error_type = (
+        "def f():\n"
+        "    try:\n"
+        "        import json\n"
+        "    except ValueError:\n"
+        "        json = None\n"
+    )
+    assert _function_local_imports(wrong_error_type)
+
+    bare_except = (
+        "def f():\n"
+        "    try:\n"
+        "        import json\n"
+        "    except:\n"
+        "        json = None\n"
+    )
+    assert _function_local_imports(bare_except)
+
+
+def test_hoisted_modules_are_actually_used():
+    # The counterpart: hoisting only helps if the name is still needed.
+    # An unused module-level import is F401, and CI's blocking flake8
+    # selection is E9,F63,F7,F82, so nothing else here would notice.
+    #
+    # A name can be referenced in ways the AST does not surface as a Name
+    # node — a string annotation, an __all__ entry — so a bare AST check
+    # could fail on an import that is genuinely used. Requiring the name
+    # to be absent textually as well makes a false positive much harder,
+    # at the cost of missing an import mentioned only in a comment.
+    import ast
+    import re as _re
+
+    source = Path(m.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imported = {
+        alias.asname or alias.name.split(".")[0]
+        for node in tree.body
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {
+        n.value.id
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+    }
+    body_without_imports = "\n".join(
+        line
+        for line in source.splitlines()
+        if not _re.match(r"\s*(import|from)\s", line)
+    )
+    unused = [
+        name
+        for name in sorted(imported - used)
+        if not _re.search(rf"\b{_re.escape(name)}\b", body_without_imports)
+    ]
+    assert unused == []
 
 
 _CLAUDE_PRICING_PAGE = (
@@ -2142,6 +2315,55 @@ def test_main_non_interactive_export_without_path_defaults(
     assert (tmp_path / "cost_comparison.csv").exists()
 
 
+def test_version_attribute_is_an_alias_not_a_second_literal():
+    # "is a non-empty string" would pass for any hardcoded value, which is
+    # exactly what must not be here: a literal alongside pyproject.toml
+    # goes stale the first time someone releases without editing both.
+    # Identity, not equality, so the two names cannot drift apart.
+    assert m.__version__ is m.VERSION
+    assert isinstance(m.__version__, str) and m.__version__
+
+
+def test_version_comes_from_package_metadata_or_the_source_sentinel():
+    # Either the installed distribution's version, or the sentinel used
+    # when running from a checkout. Anything else means someone reinstated
+    # a literal.
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as pkg_version
+
+    try:
+        expected = pkg_version("llm-cost-comparison")
+    except PackageNotFoundError:
+        expected = "0.0.0+unknown"
+    assert m.VERSION == expected
+
+
+def test_main_version_flag_prints_version_and_exits_zero(capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        m.main(["--version"])
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    # argparse's %(prog)s prefix names the program alongside the number. A
+    # bare version string is ambiguous the moment it is pasted into a bug
+    # report, which is the use case the issue names. prog is derived from
+    # sys.argv[0], so it is pinned against that rather than hardcoded —
+    # under pytest it is the runner's name, not the script's.
+    expected_prog = os.path.basename(sys.argv[0])
+    assert out.strip() == f"{expected_prog} {m.__version__}"
+    assert out.strip() != m.__version__
+
+
+def test_main_help_flag_still_works(capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        m.main(["--help"])
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    # Existing flags must still be advertised.
+    assert "--version" in out
+    assert "--non-interactive" in out
+    assert "--update-pricing" in out
+
+
 def test_main_non_interactive_config_error_reports_and_exits_nonzero(
     tmp_path: Path, capsys
 ):
@@ -2623,11 +2845,24 @@ def test_run_non_interactive_rejects_nonpositive_workload_field(
     }
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
-    expected = "non-negative" if field == "avg_output_tokens" else "positive"
-    with pytest.raises(
-        m.ConfigError, match=rf"workload\.{field} must be a {expected} number"
-    ):
-        m.run_non_interactive(config_path, export_fmt=None, export_path=None)
+    if bad_value < 0:
+        # Negative values are rejected earlier, by the per-field type/range
+        # check in _resolve_workload_scenarios, which uses the unprefixed
+        # "{field} must be ..." wording (see
+        # test_run_non_interactive_rejects_bad_workload_field).
+        with pytest.raises(
+            m.ConfigError,
+            match=rf"^{field} must be a non-negative number, got {bad_value!r}$",
+        ):
+            m.run_non_interactive(config_path, export_fmt=None, export_path=None)
+    else:
+        # Zero passes the non-negative check above but is still rejected by
+        # _validate_workload's stricter positivity rule for these two
+        # fields, which keeps the "workload."-prefixed wording.
+        with pytest.raises(
+            m.ConfigError, match=rf"workload\.{field} must be a positive number"
+        ):
+            m.run_non_interactive(config_path, export_fmt=None, export_path=None)
 
 
 def test_all_shipped_presets_pass_validation():
@@ -2685,22 +2920,36 @@ def test_run_non_interactive_rejects_bool_workload_field(tmp_path: Path, field):
 
 
 @pytest.mark.parametrize("bad_value", [-1, "many"])
-def test_run_non_interactive_rejects_bad_workload_field(tmp_path: Path, bad_value):
+@pytest.mark.parametrize(
+    "field_name", ["requests_per_day", "avg_input_tokens", "avg_output_tokens"]
+)
+def test_run_non_interactive_rejects_bad_workload_field(
+    tmp_path: Path, field_name, bad_value
+):
     pricing_path = tmp_path / "pricing.json"
     _write_pricing(pricing_path)
     config_path = tmp_path / "config.json"
+    workload = {
+        "requests_per_day": 1000,
+        "avg_input_tokens": 500,
+        "avg_output_tokens": 300,
+    }
+    workload[field_name] = bad_value
     config = {
-        "workload": {
-            "requests_per_day": bad_value,
-            "avg_input_tokens": 500,
-            "avg_output_tokens": 300,
-        },
+        "workload": workload,
         "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
         "pricing_file": str(pricing_path),
     }
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
-    with pytest.raises(m.ConfigError, match="requests_per_day"):
+    # Per-field wording (no "workload." prefix) — pins the exact message
+    # shape, including the field name and the offending value, so the
+    # format can't silently drift back to a prefixed or value-less variant
+    # for any of the three fields, not just the one originally exercised.
+    with pytest.raises(
+        m.ConfigError,
+        match=rf"^{field_name} must be a non-negative number, got {bad_value!r}$",
+    ):
         m.run_non_interactive(config_path, export_fmt=None, export_path=None)
 
 
@@ -2969,6 +3218,7 @@ def _benchmark_setup(monkeypatch, base_url, backend="openai"):
         "Look up your current unit rate live": "n",
         "Do you pay for electricity in GBP": "n",
         "Electricity rate": "0.15",
+        "Use this electricity rate?": "y",
         "Extra power draw while generating": "",
         "Total system power draw while running": "",
     }
@@ -4061,6 +4311,229 @@ def test_main_non_interactive_currency_flag_is_forwarded(
     )
     assert exit_code == 0
     assert "£" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------
+# --use-defaults fast-path re-runs GPU detection / throughput benchmark
+# --------------------------------------------------------------------------
+
+
+_SAVED_TARGET = {
+    "backend": "ollama",
+    "base_url": "http://localhost:11434",
+    "model": "llama3",
+}
+
+
+def _no_stdin(monkeypatch):
+    """Fail the test if anything reads stdin.
+
+    --use-defaults is the fast path. A refresh that asks which backend,
+    which URL and which model is four questions the flag exists to avoid,
+    so "does not prompt" is part of the contract, not an incidental.
+    """
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda prompt="": pytest.fail(f"--use-defaults prompted: {prompt!r}"),
+    )
+
+
+def test_refresh_measurements_for_defaults_uses_fresh_benchmark(monkeypatch):
+    # The saved tokens_per_sec is stale; the fresh benchmark must win.
+    _no_stdin(monkeypatch)
+    settings = {"tokens_per_sec": 5.0, "benchmark_target": dict(_SAVED_TARGET)}
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: _stub_gpu_info())
+    monkeypatch.setattr(m, "average_gpu_power_w", lambda *a, **k: 40.0)
+    monkeypatch.setattr(m, "benchmark_ollama", lambda base_url, model: 123.0)
+    monkeypatch.setattr(
+        m, "measure_gpu_power_during", lambda func, **k: (func(), 380.0)
+    )
+
+    tokens_per_sec, gpu_info, measured_load_power_w = (
+        m._refresh_measurements_for_defaults(settings)
+    )
+    assert tokens_per_sec == pytest.approx(123.0)
+    assert gpu_info is not None
+    assert measured_load_power_w == pytest.approx(380.0)
+
+
+def test_refresh_measurements_reuses_the_saved_endpoint(monkeypatch):
+    # The endpoint comes from the saved settings, not from the user. If it
+    # did not, the fast path would have to ask for it.
+    _no_stdin(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: None)
+    monkeypatch.setattr(
+        m,
+        "benchmark_openai_compatible",
+        lambda base_url, model: seen.update(url=base_url, model=model) or 50.0,
+    )
+    monkeypatch.setattr(
+        m, "benchmark_ollama", lambda *a, **k: pytest.fail("wrong backend")
+    )
+    monkeypatch.setattr(m, "measure_gpu_power_during", lambda func, **k: (func(), None))
+
+    m._refresh_measurements_for_defaults(
+        {
+            "tokens_per_sec": 5.0,
+            "benchmark_target": {
+                "backend": "openai",
+                "base_url": "http://gpu-box:8000/v1",
+                "model": "qwen",
+            },
+        }
+    )
+    assert seen == {"url": "http://gpu-box:8000/v1", "model": "qwen"}
+
+
+def test_refresh_measurements_keeps_a_hand_entered_throughput(monkeypatch, capsys):
+    # No saved endpoint means the previous run never benchmarked one — the
+    # user declined, or typed the figure in. A hand-entered number is not a
+    # stale measurement, so re-measuring is neither possible nor wanted.
+    _no_stdin(monkeypatch)
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: None)
+    monkeypatch.setattr(
+        m, "benchmark_ollama", lambda *a, **k: pytest.fail("nothing to benchmark")
+    )
+    tokens_per_sec, gpu_info, power = m._refresh_measurements_for_defaults(
+        {"tokens_per_sec": 7.5}
+    )
+    assert tokens_per_sec == pytest.approx(7.5)
+    assert gpu_info is None and power is None
+    assert "No saved benchmark endpoint" in capsys.readouterr().out
+
+
+def test_refresh_measurements_falls_back_to_saved_on_benchmark_failure(
+    monkeypatch, capsys
+):
+    # When the endpoint is saved but unreachable, the saved value is used
+    # and the script says so rather than silently replaying it.
+    _no_stdin(monkeypatch)
+    settings = {"tokens_per_sec": 7.5, "benchmark_target": dict(_SAVED_TARGET)}
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: None)
+    monkeypatch.setattr(
+        m,
+        "benchmark_ollama",
+        lambda base_url, model: (_ for _ in ()).throw(OSError("connection refused")),
+    )
+    monkeypatch.setattr(m, "measure_gpu_power_during", lambda func, **k: (func(), None))
+
+    tokens_per_sec, gpu_info, measured_load_power_w = (
+        m._refresh_measurements_for_defaults(settings)
+    )
+    assert tokens_per_sec == pytest.approx(7.5)
+    assert gpu_info is None
+    assert measured_load_power_w is None
+    out = capsys.readouterr().out
+    assert "connection refused" in out
+    assert "using saved throughput" in out.lower()
+
+
+def test_run_interactive_use_defaults_reruns_benchmark(
+    tmp_path: Path, monkeypatch, capsys
+):
+    # End-to-end: --use-defaults must not simply replay the saved
+    # tokens_per_sec — it must re-run the benchmark and use the fresh
+    # value, without asking anything.
+    saved = {
+        "mode": "rent",
+        "tokens_per_sec": 5.0,
+        "hourly_rate": 2.5,
+        "benchmark_target": dict(_SAVED_TARGET),
+        "workload_preset": "casual",
+        "selected_models": None,
+        "last_run_at": "2020-01-01T00:00:00+00:00",
+    }
+    last_run_path = tmp_path / ".last_run.json"
+    last_run_path.write_text(json.dumps(saved), encoding="utf-8")
+    # load_last_run's path default is bound at definition, so rebinding
+    # m.DEFAULT_LAST_RUN_PATH does nothing — the original test did that and
+    # therefore never entered the fast path at all, falling through to the
+    # full interactive flow and passing on its output instead.
+    monkeypatch.setattr(
+        m,
+        "load_last_run",
+        lambda *a, **k: json.loads(last_run_path.read_text(encoding="utf-8")),
+    )
+    _no_stdin(monkeypatch)
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: None)
+    monkeypatch.setattr(m, "benchmark_ollama", lambda base_url, model: 99.0)
+    monkeypatch.setattr(m, "measure_gpu_power_during", lambda func, **k: (func(), None))
+    monkeypatch.setattr(m, "prompt_yes_no", lambda prompt, default=True: False)
+
+    exit_code = m.run_interactive(use_defaults=True)
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "Measured throughput: 99.0 tokens/sec" in out
+    # The stale saved figure must not be what got used.
+    assert "5.0 tokens/sec" not in out
+
+
+@pytest.mark.parametrize(
+    "mode_answer, expected_mode, extra_answers",
+    [
+        ("rent", "rent", {"Rented GPU hourly rate": "2.5"}),
+        # The prompt offers existing/buying/rent; "buying" is stored as
+        # mode "own". Answering "own" loops the prompt forever.
+        (
+            "buying",
+            "own",
+            {
+                "Hardware cost (USD)": "3600",
+                "Expected hardware lifetime": "3",
+                "Power draw under load": "450",
+            },
+        ),
+        ("existing", "existing", {}),
+    ],
+)
+def test_interactive_setup_records_the_benchmark_target(
+    monkeypatch, capsys, mode_answer, expected_mode, extra_answers
+):
+    # --use-defaults can only re-benchmark an endpoint the previous run
+    # wrote down, and nothing persisted backend/base_url/model before.
+    # Every hardware mode builds its own settings dict, so all three have
+    # to carry it — dropping it from one would otherwise go unnoticed.
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: None)
+    monkeypatch.setattr(m, "average_gpu_power_w", lambda *a, **k: None)
+    monkeypatch.setattr(m, "discover_local_models", lambda backend, url: ["llama3"])
+    monkeypatch.setattr(m, "benchmark_ollama", lambda base_url, model: 42.0)
+    monkeypatch.setattr(m, "measure_gpu_power_during", lambda func, **k: (func(), None))
+    monkeypatch.setattr(
+        m, "fetch_octopus_agile_rate", lambda *a, **k: pytest.fail("network call")
+    )
+    monkeypatch.setattr(m, "fetch_fx_rate", lambda *a, **k: pytest.fail("network call"))
+    answers = {
+        "Skip benchmark": "n",
+        "auto-detect an NVIDIA GPU": "n",
+        "benchmark a running local model endpoint": "y",
+        "Backend": "ollama",
+        "Base URL": "http://gpu-box:11434",
+        "Model name as served locally": "llama3",
+        "Hardware mode": mode_answer,
+        "Look up your current unit rate live": "n",
+        "Do you pay for electricity in GBP": "n",
+        "Electricity rate": "0.15",
+        "Use this electricity rate?": "y",
+        "Extra power draw while generating": "",
+        "Total system power draw while running": "",
+        **extra_answers,
+    }
+
+    def fake_input(prompt: str = "") -> str:
+        for fragment, answer in answers.items():
+            if fragment in prompt:
+                return answer
+        pytest.fail(f"unscripted prompt: {prompt!r}")
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    *_, settings = m.interactive_local_setup()
+    assert settings["mode"] == expected_mode
+    assert settings["benchmark_target"] == {
+        "backend": "ollama",
+        "base_url": "http://gpu-box:11434",
+        "model": "llama3",
+    }
 
 
 def test_run_non_interactive_accepts_valid_multi_scenario_config(
