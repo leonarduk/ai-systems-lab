@@ -2802,6 +2802,129 @@ def _local_setup(monkeypatch, gpu_info, answers=None):
     return m.interactive_local_setup()
 
 
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://localhost:8000/v1",
+        "http://127.0.0.1:8000/v1",
+        "http://0.0.0.0:8000/v1",
+        "http://[::1]:8000/v1",
+        # urlsplit normalises the host to lower case, so no explicit
+        # fold is needed in the helper. Pinned here because removing
+        # one that is not needed should not be able to break this.
+        "http://LOCALHOST:8000/v1",
+    ],
+)
+def test_no_wall_clock_caveat_for_a_loopback_endpoint(base_url):
+    # The README's own position: on loopback there is no real network hop,
+    # so wall-clock is a fair proxy. Warning anyway is noise, and noise
+    # trains people to skip the warning that does matter.
+    assert m.wall_clock_benchmark_caveat(base_url) is None
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://api.example.com/v1",
+        "http://192.168.1.50:8000/v1",
+        "http://gpu-box.lan:11434/v1",
+    ],
+)
+def test_wall_clock_caveat_for_a_remote_endpoint(base_url):
+    caveat = m.wall_clock_benchmark_caveat(base_url)
+    assert caveat is not None
+    assert "network latency" in caveat
+
+
+def test_wall_clock_caveat_handles_an_unparseable_url():
+    # The caveat is decoration on a benchmark that already succeeded, so a
+    # URL it cannot parse must not take the run down with it.
+    assert m.wall_clock_benchmark_caveat("http://[") is not None
+
+
+def test_benchmark_openai_compatible_does_not_print(monkeypatch, capsys):
+    # The caveat belongs to the caller that displays the number. A library
+    # function that prints cannot be reused by anything that formats its
+    # own output, and printing before returning put the caveat above the
+    # figure it qualifies.
+    body = json.dumps(
+        {
+            "choices": [{"message": {"content": "one two three"}}],
+            "usage": {"completion_tokens": 3},
+        }
+    ).encode("utf-8")
+    monkeypatch.setattr(
+        m.urllib.request, "urlopen", lambda *a, **k: _FakeHTTPResponse(body)
+    )
+    rate = m.benchmark_openai_compatible("https://api.example.com/v1", "gpt-x")
+    assert rate > 0
+    assert capsys.readouterr().out == ""
+
+
+def _benchmark_setup(monkeypatch, base_url, backend="openai"):
+    """interactive_local_setup driven through the endpoint-benchmark branch."""
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: None)
+    monkeypatch.setattr(m, "average_gpu_power_w", lambda *a, **k: None)
+    monkeypatch.setattr(m, "measure_gpu_power_during", lambda fn: (fn(), None))
+    monkeypatch.setattr(m, "benchmark_openai_compatible", lambda *a, **k: 37.0)
+    monkeypatch.setattr(m, "benchmark_ollama", lambda *a, **k: 37.0)
+    monkeypatch.setattr(
+        m, "fetch_octopus_agile_rate", lambda *a, **k: pytest.fail("network call")
+    )
+    monkeypatch.setattr(m, "fetch_fx_rate", lambda *a, **k: pytest.fail("network call"))
+    answers = {
+        "Skip benchmark": "n",
+        "auto-detect an NVIDIA GPU": "n",
+        "benchmark a running local model endpoint": "y",
+        "Backend": backend,
+        "Base URL": base_url,
+        "Model name as served locally": "some-model",
+        "Hardware mode": "existing",
+        "Look up your current unit rate live": "n",
+        "Do you pay for electricity in GBP": "n",
+        "Electricity rate": "0.15",
+        "Extra power draw while generating": "",
+        "Total system power draw while running": "",
+    }
+
+    def fake_input(prompt: str = "") -> str:
+        for fragment, answer in answers.items():
+            if fragment in prompt:
+                return answer
+        pytest.fail(f"unscripted prompt: {prompt!r}")
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    return m.interactive_local_setup()
+
+
+def test_caveat_is_printed_after_the_throughput_for_a_remote_endpoint(
+    monkeypatch, capsys
+):
+    # The caveat has to reach the user, not merely exist as a helper, and
+    # it has to come after the number it qualifies.
+    _benchmark_setup(monkeypatch, "https://api.example.com/v1")
+    out = capsys.readouterr().out
+    assert "Measured throughput: 37.0 tokens/sec" in out
+    assert "network latency" in out
+    assert out.index("Measured throughput") < out.index("network latency")
+
+
+def test_no_caveat_printed_for_a_loopback_endpoint(monkeypatch, capsys):
+    _benchmark_setup(monkeypatch, "http://localhost:11434/v1")
+    out = capsys.readouterr().out
+    assert "Measured throughput: 37.0 tokens/sec" in out
+    assert "network latency" not in out
+
+
+def test_no_caveat_printed_for_the_ollama_backend(monkeypatch, capsys):
+    # benchmark_ollama reports generation-only time from eval_duration, so
+    # the wall-clock caveat does not apply to it at all — remote or not.
+    _benchmark_setup(monkeypatch, "https://ollama.example.com", backend="ollama")
+    out = capsys.readouterr().out
+    assert "Measured throughput: 37.0 tokens/sec" in out
+    assert "network latency" not in out
+
+
 def test_interactive_local_setup_existing_hardware_branch(monkeypatch, capsys):
     row_builder, display_currency, usd_per_gbp, tokens_per_sec, settings = _local_setup(
         monkeypatch, _stub_gpu_info()

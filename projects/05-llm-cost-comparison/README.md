@@ -125,6 +125,9 @@ not currently read or display. If you need that figure, capture it yourself
 from the raw response (or the provider's usage dashboard) rather than
 relying on the benchmark's wall-clock number.
 
+When the endpoint is not on loopback, the benchmark says this next to the
+number it reports, so the caveat reaches users who never read this file.
+
 ## Traffic scenarios (workload presets)
 
 Guessing "requests per day" and "average input tokens per request" cold is a
