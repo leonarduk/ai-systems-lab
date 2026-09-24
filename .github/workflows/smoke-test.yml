@@ -1,0 +1,51 @@
+name: Smoke test (LinkedIn Avatar)
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Base URL of the deployed app"
+        required: false
+        default: "https://ai-systems-lab-s8gy.onrender.com"
+      dry_run:
+        description: "Skip real Pushover send (validate payload only)"
+        type: boolean
+        required: false
+        default: true
+  schedule:
+    # Every day at 08:00 UTC
+    - cron: "0 8 * * *"
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run smoke test
+        env:
+          # Optional secrets — the script degrades gracefully when unset.
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          PUSHOVER_USER: ${{ secrets.PUSHOVER_USER }}
+          PUSHOVER_TOKEN: ${{ secrets.PUSHOVER_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # workflow_dispatch inputs are user-controlled; pass them through env
+          # vars rather than interpolating ${{ }} directly into the shell
+          # script below, which would let a crafted input inject commands
+          # (see GitHub's own script-injection hardening guide).
+          INPUT_BASE_URL: ${{ github.event.inputs.base_url }}
+          INPUT_DRY_RUN: ${{ github.event.inputs.dry_run }}
+          IS_SCHEDULED_RUN: ${{ github.event_name == 'schedule' }}
+        run: |
+          BASE_URL="${INPUT_BASE_URL:-https://ai-systems-lab-s8gy.onrender.com}"
+          DRY_RUN_FLAG=""
+          if [ "${INPUT_DRY_RUN}" = "true" ] || [ "${IS_SCHEDULED_RUN}" = "true" ]; then
+            DRY_RUN_FLAG="--dry-run"
+          fi
+          python projects/08-linkedin-avatar/scripts/smoke_test.py \
+            --base-url "$BASE_URL" $DRY_RUN_FLAG

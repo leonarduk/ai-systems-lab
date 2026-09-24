@@ -1,0 +1,56 @@
+name: Image Size Check
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  check-image-sizes:
+    name: Check image file sizes
+    runs-on: ubuntu-latest
+
+    env:
+      # Maximum allowed size for added/modified image files, in kilobytes.
+      MAX_IMAGE_SIZE_KB: "500"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Full history is required so we can diff against the base ref.
+          fetch-depth: 0
+
+      - name: Determine base ref
+        id: base
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "ref=origin/${{ github.base_ref }}" >> "$GITHUB_OUTPUT"
+          else
+            # For pushes, diff against the previous commit on the branch.
+            echo "ref=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch base ref
+        run: |
+          git fetch --no-tags --prune origin \
+            "+refs/heads/*:refs/remotes/origin/*" || true
+
+      - name: Make script executable
+        run: chmod +x scripts/check-image-sizes.sh
+
+      - name: Run image size check
+        env:
+          BASE_REF: ${{ steps.base.outputs.ref }}
+        run: |
+          # For push events, github.event.before may be all zeros on first push.
+          if [ -z "${BASE_REF}" ] || [ "${BASE_REF}" = "0000000000000000000000000000000000000000" ]; then
+            echo "No valid base ref available; skipping image size check."
+            exit 0
+          fi
+          scripts/check-image-sizes.sh "${BASE_REF}"
