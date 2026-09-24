@@ -69,10 +69,16 @@ See `example_config.json` (workload presets, hardware you already own) and
 `example_config_buying_hardware.json` (explicit workload, buying new
 hardware) for the config shapes.
 
-By default the non-interactive table and any export are in USD. Pass
-`--currency GBP` (or any other currency code) to have the whole table —
-local and hosted rows alike — converted at display time using a live
-exchange rate, matching what the interactive flow does when you choose GBP:
+#### Display currency (non-interactive)
+
+By default the non-interactive table and any export are in USD. There are
+two ways to display another currency instead; `--currency` takes
+precedence when both are set.
+
+**`--currency` (live FX rate).** Pass `--currency GBP` (or any other
+currency code) to have the whole table — local and hosted rows alike —
+converted at display time using a live exchange rate, matching what the
+interactive flow does when you choose GBP:
 
 ```bash
 python llm_cost_comparison.py --non-interactive --config example_config.json \
@@ -85,6 +91,29 @@ the FX lookup fails (no network, unknown currency code), the run falls back
 to USD with a warning on stderr rather than failing — the numbers are still
 correct, just in the wrong unit. `--currency` is ignored in interactive
 mode, which asks about currency as part of the local-setup flow.
+
+**Config keys (static rate, no network).** If `--currency` isn't given (or
+is left at the default `USD`), you can instead display another currency
+without any network access by adding two optional top-level keys to the
+config:
+
+```json
+{
+  "currency": "GBP",
+  "static_fx_rate": 0.79
+}
+```
+
+- `currency` — three-letter display currency code (default `"USD"`).
+  `"USD"` and `"GBP"` print their symbol; any other valid code prints
+  verbatim, as in `EUR 12.34`.
+- `static_fx_rate` — **how many units of `currency` one US dollar buys**.
+  At `0.79`, a $100 figure is shown as £79. Required when
+  `currency != "USD"`. A static rate avoids a live FX API call — no
+  network, no latency, no failure point — at the cost of going stale, so
+  it is yours to keep current. All cost math stays in USD internally, and
+  the whole table (local and hosted rows alike) is converted once at
+  display time and exported in the chosen currency.
 
 ### Timing notes
 
@@ -118,6 +147,9 @@ in response headers or in the final streaming chunk), which this script does
 not currently read or display. If you need that figure, capture it yourself
 from the raw response (or the provider's usage dashboard) rather than
 relying on the benchmark's wall-clock number.
+
+When the endpoint is not on loopback, the benchmark says this next to the
+number it reports, so the caveat reaches users who never read this file.
 
 ## Traffic scenarios (workload presets)
 
