@@ -42,6 +42,15 @@ GitHub REST API, Pushover/Telegram, Render, GitHub Pages.
 front matter, no headings. It's the only file that sets personality and sits in every request's
 cached prefix, so it's kept short and hand-edited.
 
+`build/build_profile.py` also supports a `--dry-run` flag: it runs the full extract/redact pipeline
+and prints a per-file summary of what would be redacted (count, types, snippets) without writing
+anything. Combine with `--check` to preview and still get a non-zero exit on leaks:
+
+```bash
+python build/build_profile.py --pdf linkedin.pdf --dry-run
+python build/build_profile.py --pdf linkedin.pdf --dry-run --check
+```
+
 `knowledge/projects.md` is plain Markdown: one `## repo-name` heading per repo (matching its GitHub
 name exactly), followed by 1–3 sentences of first-person framing. The snapshot builder
 (`build/build_github_snapshot.py`) parses it into per-repo notes and prefers a `projects.md` entry
