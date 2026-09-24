@@ -53,6 +53,9 @@ def chat(message, history, request: gr.Request):
 
 
 def build_demo():
+    # NOTE: scripts/smoke_test.py cross-checks the env vars this module reads.
+    # Keep REQUIRED_ENV_VARS / OPTIONAL_ENV_VARS in that script in sync with
+    # any new os.environ.get(...) calls added here.
     with gr.Blocks(title=styles.TITLE) as demo:
         gr.Markdown(
             f"# {styles.TITLE}\n\n{styles.DESCRIPTION}", elem_id="avatar-header"

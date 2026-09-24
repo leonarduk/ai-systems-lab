@@ -206,9 +206,23 @@ nothing to rotate — it's a static file.
 
 ## 3. Verifying a deploy actually works
 
-After any deploy (first time or after a change), a quick end-to-end smoke test — this is what
+After any deploy (first time or after a change), run the automated smoke test — this is what
 issue #130's "success looks like" checklist is asking for, and it's cheap enough to run after every
 redeploy:
+
+```bash
+# From projects/08-linkedin-avatar/
+python scripts/smoke_test.py --base-url https://ai-systems-lab-s8gy.onrender.com --dry-run
+```
+
+`--dry-run` validates the contact-capture request payload without actually sending a Pushover
+notification. Drop the flag to send a real one (requires `PUSHOVER_USER`/`PUSHOVER_TOKEN` in the
+environment). The script exits non-zero and prints a clear error on the first failed check, so it's
+safe to wire into CI — see `.github/workflows/smoke-test.yml`, which runs it on a daily schedule
+and on manual dispatch.
+
+The manual procedure below is the fallback if the script itself can't run (e.g. no Python
+available):
 
 1. Open the Render app URL directly. It should load the chat UI (allow up to 60s if it was
    asleep — see Cold-start behaviour above).

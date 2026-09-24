@@ -33,28 +33,26 @@ jobs:
     - name: Verify shared repository automation
       run: cicaid --help
 
-    - name: Verify mcp version pin
+    - name: Exercise cicaid run-ci-checks subcommand
       run: |
-        # Ensure every server's requirements.txt explicitly constrains
-        # the `mcp` package to <2.0.0. PR #28 pinned this to fix a
-        # breaking change in mcp>=2.0.0; this check prevents future
-        # changes from silently removing the pin.
-        failed=0
-        shopt -s nullglob
-        files=(projects/01-mcp-server-suite/servers/*/requirements.txt)
-        if [ ${#files[@]} -eq 0 ]; then
-          echo "::error::No requirements.txt files found under projects/01-mcp-server-suite/servers/"
-          exit 1
-        fi
-        for f in "${files[@]}"; do
-          if ! grep -qE '^mcp.*<2\.0\.0' "$f"; then
-            echo "::error::FAIL: $f does not pin mcp<2.0.0"
-            failed=1
-          else
-            echo "OK: $f pins mcp<2.0.0"
-          fi
-        done
-        exit $failed
+        # Run a real cicaid subcommand (not just --help) so that a broken
+        # subcommand, missing optional dependency, or misconfigured entry
+        # point fails the build instead of only being caught manually.
+        # `run-ci-checks --list` parses this repo's own .cicaid-checks.toml
+        # and resolves it into the check list, without running any of the
+        # underlying commands or mutating the repository, so it can't
+        # duplicate or conflict with the test/lint/security jobs it lists.
+        #
+        # `local-review` was tried first and does not exist in this
+        # release of cicaid-devtools: `cicaid --help` lists sync-issues,
+        # work-on-issue, work-on-pr, run-ci-checks, publish-pr,
+        # add-issue-to-pr, update-issue, update-prs, graphify-repos, and
+        # `cicaid local-review --check` exits 1 with "Unknown command:
+        # 'local-review'". That command would have failed on every run.
+        cicaid run-ci-checks --list
+
+    - name: Verify mcp<2.0.0 pin across MCP server requirements
+      run: bash .github/scripts/check_mcp_pin.sh
 
     - name: Run flake8
       run: |
@@ -66,6 +64,15 @@ jobs:
     - name: Check code formatting with black
       run: |
         black --check projects/ || echo "Code formatting issues found. Run 'black projects/' to fix."
+
+    - name: Check profile.md length
+      run: python scripts/check_profile_length.py
+
+    - name: Test the profile-length checker itself
+      # scripts/ (top-level) sits outside the "Run Tests" job's discovery,
+      # which only walks projects/ — so this script's own tests need an
+      # explicit step, same as scripts/test_validate_pr_description.py's.
+      run: python -m pytest scripts/test_check_profile_length.py -v
 
   test:
     name: Run Tests
@@ -216,6 +223,78 @@ jobs:
           echo "### :white_check_mark: safety found no known vulnerabilities" \
             >> "$GITHUB_STEP_SUMMARY"
         fi
+
+  mcp-pin-selftest:
+    name: Self-test mcp-pin check (workflow_dispatch only)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Verify check passes on the real repository
+      run: bash .github/scripts/check_mcp_pin.sh
+
+    - name: Verify check fails on a fixture missing the pin
+      run: |
+        set -euo pipefail
+
+        # Build a throwaway root that mimics the real layout but whose
+        # requirements.txt deliberately omits the mcp<2.0.0 pin. The
+        # comment below must not itself contain the pin string, or the
+        # check's own grep will match the comment and this self-test
+        # will always fail (found by actually running it).
+        fixture_root="$(mktemp -d)"
+        trap 'rm -rf "$fixture_root"' EXIT
+
+        mkdir -p "$fixture_root/projects/01-mcp-server-suite/servers/bad-server"
+        cat > "$fixture_root/projects/01-mcp-server-suite/servers/bad-server/requirements.txt" <<'EOF'
+        # this file does not declare the required mcp dependency pin
+        requests>=2.31.0
+        EOF
+
+        set +e
+        output="$(bash .github/scripts/check_mcp_pin.sh "$fixture_root" 2>&1)"
+        status=$?
+        set -e
+
+        echo "$output"
+
+        if [ "$status" -eq 0 ]; then
+          echo "::error::Self-test FAILED: check_mcp_pin.sh exited 0 on a fixture missing the pin (silent no-op)"
+          exit 1
+        fi
+
+        if ! grep -q '::error::FAIL:' <<<"$output"; then
+          echo "::error::Self-test FAILED: check_mcp_pin.sh exited non-zero but did not emit the expected ::error::FAIL: message"
+          exit 1
+        fi
+
+        echo "Self-test OK: check_mcp_pin.sh correctly failed on a fixture missing the pin."
+
+    - name: Verify check fails when no requirements files are discovered
+      run: |
+        set -euo pipefail
+
+        # Empty fixture root: the glob matches nothing. The check must not
+        # pass vacuously.
+        fixture_root="$(mktemp -d)"
+        trap 'rm -rf "$fixture_root"' EXIT
+
+        set +e
+        output="$(bash .github/scripts/check_mcp_pin.sh "$fixture_root" 2>&1)"
+        status=$?
+        set -e
+
+        echo "$output"
+
+        if [ "$status" -eq 0 ]; then
+          echo "::error::Self-test FAILED: check_mcp_pin.sh exited 0 with zero requirements files (vacuous pass)"
+          exit 1
+        fi
+
+        echo "Self-test OK: check_mcp_pin.sh correctly failed when no requirements files were found."
 
   pricing-staleness:
     name: Check pricing.json staleness
