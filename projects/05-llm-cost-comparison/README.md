@@ -69,6 +69,29 @@ See `example_config.json` (workload presets, hardware you already own) and
 `example_config_buying_hardware.json` (explicit workload, buying new
 hardware) for the config shapes.
 
+#### Display currency (non-interactive)
+
+By default the table is shown in USD. To display it in another currency
+without any network access, add two optional top-level keys to the config:
+
+```json
+{
+  "currency": "GBP",
+  "static_fx_rate": 0.79
+}
+```
+
+- `currency` — three-letter display currency code (default `"USD"`).
+  `"USD"` and `"GBP"` print their symbol; any other valid code prints
+  verbatim, as in `EUR 12.34`.
+- `static_fx_rate` — **how many units of `currency` one US dollar buys**.
+  At `0.79`, a $100 figure is shown as £79. Required when
+  `currency != "USD"`. A static rate avoids a live FX API call — no
+  network, no latency, no failure point — at the cost of going stale, so
+  it is yours to keep current. All cost math stays in USD internally, and
+  the whole table (local and hosted rows alike) is converted once at
+  display time and exported in the chosen currency.
+
 ### Timing notes
 
 The optional local-endpoint benchmark reports a single **wall-clock** timing
@@ -101,6 +124,9 @@ in response headers or in the final streaming chunk), which this script does
 not currently read or display. If you need that figure, capture it yourself
 from the raw response (or the provider's usage dashboard) rather than
 relying on the benchmark's wall-clock number.
+
+When the endpoint is not on loopback, the benchmark says this next to the
+number it reports, so the caveat reaches users who never read this file.
 
 ## Traffic scenarios (workload presets)
 
@@ -188,6 +214,36 @@ requests/day and token counts behind each one.
 - All options are also expressed as a blended **$ per 1 million tokens**
   (input + output combined) so local and hosted costs are directly
   comparable regardless of your workload's input/output mix.
+
+## Customising GPU assumptions
+
+The GPU price/power defaults used to prefill the "buying new hardware" and
+"already-on PC" prompts live in `gpu_power_defaults.json`, next to the
+script. Its shape is:
+
+```json
+{
+  "as_of": "2026-07-28",
+  "note": "free-text caveat shown to the user",
+  "gpus": [
+    {"label": "RTX 4090", "cost_usd": 1600.0, "power_watts": 450.0}
+  ]
+}
+```
+
+`label` is matched as a case-insensitive substring against the detected
+GPU's name (via `nvidia-smi`), so list more specific labels before more
+general ones — `RTX 4080 SUPER` must come before `RTX 4080`, or the
+shorter label swallows the match. `cost_usd` and `power_watts` must both
+be positive numbers. Edit this file to add your own card, adjust prices
+for your region, or correct a power figure — no Python changes needed.
+
+If the file is simply absent, the script quietly falls back to a built-in
+copy of the shipped defaults, so it works out of the box. If the file is
+present but unusable — invalid JSON, the wrong shape, or an entry missing
+or mistyping a field — it says so on stderr and then falls back. A single
+bad entry is skipped by name and the rest of your file is still used. The
+run is never aborted: these values only prefill prompts you can override.
 
 ## Updating pricing
 
