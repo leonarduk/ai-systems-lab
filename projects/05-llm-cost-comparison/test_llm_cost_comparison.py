@@ -9,6 +9,8 @@ interactive functions are thin wrappers over the tested pure functions.
 from __future__ import annotations
 
 import json
+import math
+import os
 import time
 import subprocess
 import sys
@@ -174,10 +176,11 @@ def test_build_local_row_owned():
 
 def test_build_local_row_flags_when_throughput_cannot_keep_up_in_real_time():
     # A huge workload against a slow tokens/sec needs more compute-hours than
-    # exist in a month (720). The cost is still real — it's what running
-    # flat-out, 24/7, all month would cost — but the notes must say plainly
-    # that this only covers part of the workload rather than implying the
-    # full requested volume was delivered for that price.
+    # exist in a month (720). The cost is real — it's what running a fleet of
+    # machines flat-out, 24/7, all month would cost — but the notes must say
+    # plainly that this only covers part of the workload on a single machine
+    # rather than implying the full requested volume was delivered for that
+    # price.
     w = m.Workload(requests_per_day=50000, avg_input_tokens=500, avg_output_tokens=300)
     row = m.build_local_row(
         w,
@@ -187,9 +190,266 @@ def test_build_local_row_flags_when_throughput_cannot_keep_up_in_real_time():
         electricity_rate_per_kwh=0.15,
     )
     assert "covers only ~" in row.notes
-    assert "x this throughput" in row.notes
+    assert "machines" in row.notes
     assert row.feasible is False
     assert row.monthly_cost > 0
+
+
+# A workload needing more compute-hours than a month contains, reused by
+# every fleet test below so they all describe the same scenario:
+#   500 req/day * 4800 tokens/req * 30 days = 72,000,000 tokens/month
+#   at 10 tok/s that is 72e6 / (10 * 3600) = 2000 machine-hours
+#   720 hours exist in a month, so ceil(2000 / 720) = 3 machines
+# Note 3 * 720 = 2160 > 2000: the fleet has 160 hours of spare capacity, and
+# nothing may be billed for it.
+_FLEET_WORKLOAD = dict(
+    requests_per_day=500, avg_input_tokens=4000, avg_output_tokens=800
+)
+_FLEET_TOKENS = 72_000_000
+_FLEET_HOURS = 2000.0
+_FLEET_MACHINES = 3
+
+
+def test_fleet_fixture_matches_its_stated_arithmetic():
+    # The expected costs below are hand-computed from these numbers, so if
+    # the fixture drifts the other tests would silently assert the wrong
+    # thing. Pin it.
+    w = m.Workload(**_FLEET_WORKLOAD)
+    assert w.monthly_total_tokens == _FLEET_TOKENS
+    assert m.hours_needed_for_workload(w.monthly_total_tokens, 10) == pytest.approx(
+        _FLEET_HOURS
+    )
+    assert math.ceil(_FLEET_HOURS / m.HOURS_PER_MONTH) == _FLEET_MACHINES
+    assert _FLEET_MACHINES * m.HOURS_PER_MONTH > _FLEET_HOURS
+
+
+def test_build_local_row_charges_variable_cost_for_hours_needed_not_fleet_capacity():
+    # "existing" is a purely variable mode: the only cost is electricity
+    # while generating. Three machines for 667 hours each burn exactly the
+    # same power as one machine for 2000 hours, so the bill is for 2000
+    # machine-hours — NOT 3 * 720 = 2160, which would charge for 160 hours
+    # of idle spare capacity nobody uses.
+    row = m.build_local_row(
+        m.Workload(**_FLEET_WORKLOAD),
+        tokens_per_sec=10,
+        mode="existing",
+        power_watts=1000,  # 1 kW for easy math
+        electricity_rate_per_kwh=0.10,
+    )
+    assert row.feasible is False
+    # 1 kW * $0.10/kWh * 2000 hr = $200.00, not 3 * (1 * 0.10 * 720) = $216.
+    assert row.monthly_cost == pytest.approx(200.0)
+    assert row.cost_per_million_tokens == pytest.approx(200.0 / 72.0)
+    assert "3 machines" in row.notes
+
+
+def test_build_local_row_rent_charges_hours_needed_not_fleet_capacity():
+    # Renting is billed by the hour, so a fleet delivering the workload
+    # rents 2000 GPU-hours in total. Capping each machine at 720 hours and
+    # multiplying by 3 would invoice 2160 hours — inflating the rented-cloud
+    # option by 8% here, and by nearly 2x just past the 720-hour boundary.
+    row = m.build_local_row(
+        m.Workload(**_FLEET_WORKLOAD), tokens_per_sec=10, mode="rent", hourly_rate=2.0
+    )
+    assert row.feasible is False
+    assert row.monthly_cost == pytest.approx(2.0 * _FLEET_HOURS)  # $4000, not $4320
+
+
+def test_build_local_row_owned_mode_scales_hardware_amortization_by_machine_count():
+    # The fixed hardware amortization must be multiplied by the machine
+    # count — charging one card's amortization for a three-card fleet is
+    # the under-estimate issue #52 is about.
+    row = m.build_local_row(
+        m.Workload(**_FLEET_WORKLOAD),
+        tokens_per_sec=10,
+        mode="own",
+        hardware_cost=3600,  # $100/month amortized per machine
+        lifetime_years=3,
+        power_watts=0,  # isolate the fixed component
+        electricity_rate_per_kwh=0.0,
+    )
+    assert row.feasible is False
+    assert row.monthly_cost == pytest.approx(300.0)  # 3 machines * $100/month
+
+
+def test_build_local_row_owned_mode_splits_fixed_and_variable_correctly():
+    # Both components at once: fixed scales by machines, variable by hours.
+    row = m.build_local_row(
+        m.Workload(**_FLEET_WORKLOAD),
+        tokens_per_sec=10,
+        mode="own",
+        hardware_cost=3600,
+        lifetime_years=3,
+        power_watts=1000,
+        electricity_rate_per_kwh=0.10,
+    )
+    # 3 * $100 amortization + 1 kW * $0.10 * 2000 hr = $300 + $200 = $500.
+    # Scaling the whole per-machine cost instead would give 3 * (100 + 72)
+    # = $516, over-charging the electricity.
+    assert row.monthly_cost == pytest.approx(500.0)
+
+
+def test_build_local_row_always_on_scales_idle_draw_but_not_generation():
+    # A 24/7 server's idle draw is owed for all 720 hours per machine, so it
+    # triples with the fleet. The extra draw while generating is variable,
+    # so it is charged once for the 2000 machine-hours of actual work.
+    row = m.build_local_row(
+        m.Workload(**_FLEET_WORKLOAD),
+        tokens_per_sec=10,
+        mode="always_on",
+        idle_watts=100,
+        extra_watts=900,
+        electricity_rate_per_kwh=0.10,
+    )
+    idle = _FLEET_MACHINES * 0.1 * 0.10 * m.HOURS_PER_MONTH  # $21.60
+    generation = 0.9 * 0.10 * _FLEET_HOURS  # $180.00
+    assert row.monthly_cost == pytest.approx(idle + generation)  # $201.60
+
+
+@pytest.mark.parametrize(
+    "mode, kwargs",
+    [
+        ("existing", dict(power_watts=1000, electricity_rate_per_kwh=0.10)),
+        ("rent", dict(hourly_rate=2.0)),
+    ],
+)
+def test_purely_variable_modes_keep_the_same_rate_per_million(mode, kwargs):
+    # For modes with no fixed component, $/1M is a property of the hardware
+    # and the tariff, not of how big the workload is. A feasible run and an
+    # infeasible three-machine run at the same tok/s must price identically.
+    small = m.build_local_row(
+        m.Workload(requests_per_day=10, avg_input_tokens=4000, avg_output_tokens=800),
+        tokens_per_sec=10,
+        mode=mode,
+        **kwargs,
+    )
+    fleet = m.build_local_row(
+        m.Workload(**_FLEET_WORKLOAD), tokens_per_sec=10, mode=mode, **kwargs
+    )
+    assert small.feasible is True
+    assert fleet.feasible is False
+    assert fleet.cost_per_million_tokens == pytest.approx(small.cost_per_million_tokens)
+
+
+def test_owned_mode_rate_per_million_falls_as_tokens_spread_the_fixed_cost():
+    # Named for what it asserts. An earlier version of this called the
+    # effect a rise, which the assertion below contradicts and which the
+    # docstring repeated: between machine boundaries the fixed cost is
+    # spread over more tokens, so $/1M falls. The rise happens *at* a
+    # boundary, which is the next test.
+    common = dict(
+        tokens_per_sec=10,
+        mode="own",
+        hardware_cost=3600,
+        lifetime_years=3,
+        power_watts=1000,
+        electricity_rate_per_kwh=0.10,
+    )
+    # Same tokens/hour ratio, but small enough for one machine.
+    small = m.build_local_row(
+        m.Workload(requests_per_day=100, avg_input_tokens=4000, avg_output_tokens=800),
+        **common,
+    )
+    fleet = m.build_local_row(m.Workload(**_FLEET_WORKLOAD), **common)
+    assert small.feasible is True
+    assert fleet.feasible is False
+    assert fleet.cost_per_million_tokens < small.cost_per_million_tokens
+
+
+def test_owned_mode_rate_per_million_jumps_at_a_machine_boundary():
+    # The sawtooth. Two extra hours of work either side of the 720-hour
+    # line cost a whole extra card's amortization, so $/1M steps up even
+    # though the workload barely grew. This is the effect issue #52 exists
+    # to surface, and it is invisible to a small-vs-large comparison,
+    # which only shows the downward trend between boundaries.
+    common = dict(
+        tokens_per_sec=10,
+        mode="own",
+        hardware_cost=3600,  # $100/month per machine
+        lifetime_years=3,
+        power_watts=1000,
+        electricity_rate_per_kwh=0.10,
+    )
+    # 179 req/day * 4800 tokens * 30 = 25,776,000 tokens -> 716 hours.
+    just_under = m.build_local_row(
+        m.Workload(requests_per_day=179, avg_input_tokens=4000, avg_output_tokens=800),
+        **common,
+    )
+    # 181 req/day -> 26,064,000 tokens -> 724 hours, so a second machine.
+    just_over = m.build_local_row(
+        m.Workload(requests_per_day=181, avg_input_tokens=4000, avg_output_tokens=800),
+        **common,
+    )
+    assert just_under.feasible is True
+    assert just_over.feasible is False
+    # 1 * $100 + $0.10 * 716 = $171.60 over 25.776M tokens
+    assert just_under.cost_per_million_tokens == pytest.approx(171.6 / 25.776)
+    # 2 * $100 + $0.10 * 724 = $272.40 over 26.064M tokens
+    assert just_over.cost_per_million_tokens == pytest.approx(272.4 / 26.064)
+    assert just_over.cost_per_million_tokens > just_under.cost_per_million_tokens
+
+
+def test_always_on_single_machine_charges_idle_once():
+    # num_machines == 1 must leave the idle term exactly as the helper
+    # computes it — the `idle_watts * num_machines` scaling has to be a
+    # no-op below the boundary, not an off-by-one.
+    w = m.Workload(requests_per_day=100, avg_input_tokens=4000, avg_output_tokens=800)
+    hours = m.hours_needed_for_workload(w.monthly_total_tokens, 10)
+    assert hours < m.HOURS_PER_MONTH
+    row = m.build_local_row(
+        w,
+        tokens_per_sec=10,
+        mode="always_on",
+        idle_watts=100,
+        extra_watts=900,
+        electricity_rate_per_kwh=0.10,
+    )
+    expected = m.local_monthly_cost_always_on(100, 900, 0.10, hours)
+    assert row.monthly_cost == pytest.approx(expected)
+
+
+def test_build_local_row_uses_one_machine_exactly_at_the_month_boundary():
+    # 180 req/day * 4800 tokens * 30 = 25,920,000 tokens; at 10 tok/s that
+    # is exactly HOURS_PER_MONTH. ceil() must not round this up to 2 — the
+    # max(1, ...) and the <= in `feasible` both sit on this edge.
+    w = m.Workload(requests_per_day=180, avg_input_tokens=4000, avg_output_tokens=800)
+    assert m.hours_needed_for_workload(w.monthly_total_tokens, 10) == pytest.approx(
+        m.HOURS_PER_MONTH
+    )
+    row = m.build_local_row(w, tokens_per_sec=10, mode="rent", hourly_rate=2.0)
+    assert row.feasible is True
+    assert row.monthly_cost == pytest.approx(2.0 * m.HOURS_PER_MONTH)
+
+
+def test_build_local_row_costs_the_full_workload_not_just_what_one_machine_makes():
+    # $/1M is computed against the workload's full monthly total, which the
+    # fleet does deliver. Dividing by one machine's 720 hours of output
+    # would report a rate for tokens the user never asked for.
+    row = m.build_local_row(
+        m.Workload(**_FLEET_WORKLOAD),
+        tokens_per_sec=10,
+        mode="rent",
+        hourly_rate=2.0,
+    )
+    assert row.cost_per_million_tokens == pytest.approx(
+        row.monthly_cost / _FLEET_TOKENS * 1_000_000
+    )
+
+
+def test_build_local_row_rejects_a_zero_token_workload():
+    # ceil(0 / 720) is 0, so there is no max(1, ...) floor on the machine
+    # count: a zero-token workload has no hours to cost and is rejected
+    # downstream by cost_per_million_tokens. Clamping to one machine would
+    # only have produced a $0 row for a workload that does not exist.
+    with pytest.raises(
+        ValueError, match=r"monthly_total_tokens must be > 0 to cost a local option"
+    ):
+        m.build_local_row(
+            m.Workload(requests_per_day=0, avg_input_tokens=0, avg_output_tokens=0),
+            tokens_per_sec=10,
+            mode="rent",
+            hourly_rate=2.0,
+        )
 
 
 def test_build_local_row_no_warning_when_throughput_is_sufficient():
@@ -440,6 +700,178 @@ def test_build_hosted_rows_direct_call_rejects_invalid_output_price():
 # --------------------------------------------------------------------------
 # Real pricing.json shipped alongside the script
 # --------------------------------------------------------------------------
+
+
+# A function-local import may be deliberate — an optional dependency, or
+# breaking an import cycle. Two escape hatches, both of which make the
+# reason visible at the import site rather than leaving a reader to guess:
+DEFERRED_IMPORT_MARKER = "deferred-import:"
+
+
+def _function_local_imports(source: str) -> list:
+    """Every import inside a function, minus the deliberately deferred ones.
+
+    Exempt if the import sits under a ``try`` whose handlers catch exactly
+    ``ImportError`` (bare ``except ImportError:`` or a tuple such as
+    ``except (ImportError, ModuleNotFoundError):`` containing it) — the
+    optional-dependency idiom — or if its line carries a
+    ``# deferred-import: <reason>`` comment. A bare ``except:`` or a
+    handler for some other exception type (e.g. ``except ValueError:``)
+    does NOT exempt the import: only the exact ImportError idiom does.
+    """
+    import ast
+
+    tree = ast.parse(source)
+    lines = source.splitlines()
+
+    exempt_lines = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        catches_import_error = any(
+            (isinstance(handler.type, ast.Name) and handler.type.id == "ImportError")
+            or (
+                isinstance(handler.type, ast.Tuple)
+                and any(
+                    isinstance(e, ast.Name) and e.id == "ImportError"
+                    for e in handler.type.elts
+                )
+            )
+            for handler in node.handlers
+        )
+        if not catches_import_error:
+            continue
+        for stmt in node.body:
+            for inner in ast.walk(stmt):
+                if isinstance(inner, (ast.Import, ast.ImportFrom)):
+                    exempt_lines.add(inner.lineno)
+
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for inner in ast.walk(node):
+            if not isinstance(inner, (ast.Import, ast.ImportFrom)):
+                continue
+            if inner.lineno in exempt_lines:
+                continue
+            if DEFERRED_IMPORT_MARKER in lines[inner.lineno - 1]:
+                continue
+            names = ", ".join(a.name for a in inner.names)
+            offenders.append(f"{node.name}() line {inner.lineno}: {names}")
+    return offenders
+
+
+def test_no_undeclared_function_local_imports():
+    # Issue #76 asks for `import re` to be hoisted. Hoisting only the one
+    # the issue names leaves the pattern in place — there were three — so
+    # this pins the rule rather than the instance.
+    #
+    # It is not an absolute ban. A deferred import is sometimes right, so
+    # the rule is "say why": an optional dependency guarded by
+    # try/except ImportError passes untouched, and anything else passes
+    # with a `# deferred-import: <reason>` comment. What it stops is the
+    # unexplained one, which is what all three of these were.
+    #
+    # Structural rather than textual: a grep for "    import " misses
+    # `from x import y` and matches inside the docstrings of this very
+    # module, which discuss imports.
+    source = Path(m.__file__).read_text(encoding="utf-8")
+    offenders = _function_local_imports(source)
+    assert offenders == [], "undeclared function-local imports: " + "; ".join(offenders)
+
+
+def test_the_deferred_import_escape_hatches_work():
+    # A guard nobody can satisfy gets deleted the first time it is
+    # inconvenient. Prove both exits are real, against synthetic source,
+    # so the rule above is enforceable rather than absolute.
+    banned = "def f():\n    import json\n"
+    assert _function_local_imports(banned)
+
+    marked = "def f():\n    import json  # deferred-import: breaks a cycle\n"
+    assert _function_local_imports(marked) == []
+
+    optional = (
+        "def f():\n"
+        "    try:\n"
+        "        import tomllib\n"
+        "    except ImportError:\n"
+        "        tomllib = None\n"
+    )
+    assert _function_local_imports(optional) == []
+
+    optional_tuple = (
+        "def f():\n"
+        "    try:\n"
+        "        import tomllib\n"
+        "    except (ImportError, ModuleNotFoundError):\n"
+        "        tomllib = None\n"
+    )
+    assert _function_local_imports(optional_tuple) == []
+
+
+def test_except_other_than_import_error_does_not_exempt_deferred_import():
+    # Regression test: the guard's job is to flag unexplained deferred
+    # imports. A handler for some *other* exception type must not be
+    # mistaken for the ImportError optional-dependency idiom just because
+    # its name happens to contain the substring "Error" — and a bare
+    # `except:` must not be treated as catching ImportError either.
+    wrong_error_type = (
+        "def f():\n"
+        "    try:\n"
+        "        import json\n"
+        "    except ValueError:\n"
+        "        json = None\n"
+    )
+    assert _function_local_imports(wrong_error_type)
+
+    bare_except = (
+        "def f():\n"
+        "    try:\n"
+        "        import json\n"
+        "    except:\n"
+        "        json = None\n"
+    )
+    assert _function_local_imports(bare_except)
+
+
+def test_hoisted_modules_are_actually_used():
+    # The counterpart: hoisting only helps if the name is still needed.
+    # An unused module-level import is F401, and CI's blocking flake8
+    # selection is E9,F63,F7,F82, so nothing else here would notice.
+    #
+    # A name can be referenced in ways the AST does not surface as a Name
+    # node — a string annotation, an __all__ entry — so a bare AST check
+    # could fail on an import that is genuinely used. Requiring the name
+    # to be absent textually as well makes a false positive much harder,
+    # at the cost of missing an import mentioned only in a comment.
+    import ast
+    import re as _re
+
+    source = Path(m.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imported = {
+        alias.asname or alias.name.split(".")[0]
+        for node in tree.body
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {
+        n.value.id
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+    }
+    body_without_imports = "\n".join(
+        line
+        for line in source.splitlines()
+        if not _re.match(r"\s*(import|from)\s", line)
+    )
+    unused = [
+        name
+        for name in sorted(imported - used)
+        if not _re.search(rf"\b{_re.escape(name)}\b", body_without_imports)
+    ]
+    assert unused == []
 
 
 _CLAUDE_PRICING_PAGE = (
@@ -2258,6 +2690,55 @@ def test_main_non_interactive_export_without_path_defaults(
     assert (tmp_path / "cost_comparison.csv").exists()
 
 
+def test_version_attribute_is_an_alias_not_a_second_literal():
+    # "is a non-empty string" would pass for any hardcoded value, which is
+    # exactly what must not be here: a literal alongside pyproject.toml
+    # goes stale the first time someone releases without editing both.
+    # Identity, not equality, so the two names cannot drift apart.
+    assert m.__version__ is m.VERSION
+    assert isinstance(m.__version__, str) and m.__version__
+
+
+def test_version_comes_from_package_metadata_or_the_source_sentinel():
+    # Either the installed distribution's version, or the sentinel used
+    # when running from a checkout. Anything else means someone reinstated
+    # a literal.
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as pkg_version
+
+    try:
+        expected = pkg_version("llm-cost-comparison")
+    except PackageNotFoundError:
+        expected = "0.0.0+unknown"
+    assert m.VERSION == expected
+
+
+def test_main_version_flag_prints_version_and_exits_zero(capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        m.main(["--version"])
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    # argparse's %(prog)s prefix names the program alongside the number. A
+    # bare version string is ambiguous the moment it is pasted into a bug
+    # report, which is the use case the issue names. prog is derived from
+    # sys.argv[0], so it is pinned against that rather than hardcoded —
+    # under pytest it is the runner's name, not the script's.
+    expected_prog = os.path.basename(sys.argv[0])
+    assert out.strip() == f"{expected_prog} {m.__version__}"
+    assert out.strip() != m.__version__
+
+
+def test_main_help_flag_still_works(capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        m.main(["--help"])
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    # Existing flags must still be advertised.
+    assert "--version" in out
+    assert "--non-interactive" in out
+    assert "--update-pricing" in out
+
+
 def test_main_non_interactive_config_error_reports_and_exits_nonzero(
     tmp_path: Path, capsys
 ):
@@ -2739,11 +3220,24 @@ def test_run_non_interactive_rejects_nonpositive_workload_field(
     }
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
-    expected = "non-negative" if field == "avg_output_tokens" else "positive"
-    with pytest.raises(
-        m.ConfigError, match=rf"workload\.{field} must be a {expected} number"
-    ):
-        m.run_non_interactive(config_path, export_fmt=None, export_path=None)
+    if bad_value < 0:
+        # Negative values are rejected earlier, by the per-field type/range
+        # check in _resolve_workload_scenarios, which uses the unprefixed
+        # "{field} must be ..." wording (see
+        # test_run_non_interactive_rejects_bad_workload_field).
+        with pytest.raises(
+            m.ConfigError,
+            match=rf"^{field} must be a non-negative number, got {bad_value!r}$",
+        ):
+            m.run_non_interactive(config_path, export_fmt=None, export_path=None)
+    else:
+        # Zero passes the non-negative check above but is still rejected by
+        # _validate_workload's stricter positivity rule for these two
+        # fields, which keeps the "workload."-prefixed wording.
+        with pytest.raises(
+            m.ConfigError, match=rf"workload\.{field} must be a positive number"
+        ):
+            m.run_non_interactive(config_path, export_fmt=None, export_path=None)
 
 
 def test_all_shipped_presets_pass_validation():
@@ -2801,22 +3295,36 @@ def test_run_non_interactive_rejects_bool_workload_field(tmp_path: Path, field):
 
 
 @pytest.mark.parametrize("bad_value", [-1, "many"])
-def test_run_non_interactive_rejects_bad_workload_field(tmp_path: Path, bad_value):
+@pytest.mark.parametrize(
+    "field_name", ["requests_per_day", "avg_input_tokens", "avg_output_tokens"]
+)
+def test_run_non_interactive_rejects_bad_workload_field(
+    tmp_path: Path, field_name, bad_value
+):
     pricing_path = tmp_path / "pricing.json"
     _write_pricing(pricing_path)
     config_path = tmp_path / "config.json"
+    workload = {
+        "requests_per_day": 1000,
+        "avg_input_tokens": 500,
+        "avg_output_tokens": 300,
+    }
+    workload[field_name] = bad_value
     config = {
-        "workload": {
-            "requests_per_day": bad_value,
-            "avg_input_tokens": 500,
-            "avg_output_tokens": 300,
-        },
+        "workload": workload,
         "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
         "pricing_file": str(pricing_path),
     }
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
-    with pytest.raises(m.ConfigError, match="requests_per_day"):
+    # Per-field wording (no "workload." prefix) — pins the exact message
+    # shape, including the field name and the offending value, so the
+    # format can't silently drift back to a prefixed or value-less variant
+    # for any of the three fields, not just the one originally exercised.
+    with pytest.raises(
+        m.ConfigError,
+        match=rf"^{field_name} must be a non-negative number, got {bad_value!r}$",
+    ):
         m.run_non_interactive(config_path, export_fmt=None, export_path=None)
 
 
@@ -3086,6 +3594,7 @@ def _benchmark_setup(monkeypatch, base_url, backend="openai"):
         "Look up your current unit rate live": "n",
         "Do you pay for electricity in GBP": "n",
         "Electricity rate": "0.15",
+        "Use this electricity rate?": "y",
         "Extra power draw while generating": "",
         "Total system power draw while running": "",
     }
@@ -4072,6 +4581,467 @@ def test_run_non_interactive_raises_config_error_for_mapping_shaped_workload(
 # --------------------------------------------------------------------------
 # run_non_interactive with multiple preset scenarios (per-scenario export)
 # --------------------------------------------------------------------------
+
+
+def test_run_non_interactive_currency_flag_converts_rows_and_export(
+    tmp_path: Path, monkeypatch, capsys
+):
+    # A non-USD --currency should fetch an FX rate and convert every row
+    # (local and hosted alike) before rendering/exporting, mirroring the
+    # interactive GBP path. The rate is mocked so the test doesn't depend
+    # on a live FX provider.
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    config = {
+        "workload": {
+            "requests_per_day": 1000,
+            "avg_input_tokens": 500,
+            "avg_output_tokens": 300,
+        },
+        "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+        "pricing_file": str(pricing_path),
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    # Record the arguments: the direction of the lookup is the whole
+    # correctness question here, and a stub that ignores them cannot
+    # distinguish a right answer from an inverted one.
+    fx_calls = []
+
+    def fake_fx(from_currency, to_currency, timeout=5.0):
+        fx_calls.append((from_currency, to_currency))
+        return 1.25  # 1 GBP = 1.25 USD
+
+    monkeypatch.setattr(m, "fetch_fx_rate", fake_fx)
+
+    export_path = tmp_path / "out.json"
+    exit_code = m.run_non_interactive(
+        config_path,
+        export_fmt="json",
+        export_path=export_path,
+        currency="GBP",
+    )
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "£" in out
+
+    # convert_rows_currency divides by USD-per-target, so the lookup has to
+    # be GBP->USD, not USD->GBP. Asking the other way round returns ~0.79
+    # and scales costs *up*.
+    assert fx_calls == [("GBP", "USD")]
+
+    # The Claude Opus 5 row is $300/month in USD (1000 req/day, 500 in +
+    # 300 out tokens, at $5/$25 per million). At 1 GBP = 1.25 USD that is
+    # £240 — and it must be smaller than the dollar figure, because a
+    # pound buys more than a dollar.
+    data = json.loads(export_path.read_text(encoding="utf-8"))
+    assert all("monthly_cost_gbp" in row for row in data)
+    assert all("monthly_cost_usd" not in row for row in data)
+    hosted = next(row for row in data if "Opus" in row["option"])
+    assert hosted["monthly_cost_gbp"] == pytest.approx(240.0)
+    assert hosted["monthly_cost_gbp"] < 300.0
+    assert "£240.00" in out
+
+
+def test_currency_flag_fetches_the_rate_once_for_a_multi_scenario_run(
+    tmp_path: Path, monkeypatch, capsys
+):
+    # The FX lookup is a network call. Resolving it before the scenario
+    # loop is the stated design; three presets must not mean three
+    # requests.
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workload_presets": ["casual", "coding_agent", "team_tool"],
+                "local": {
+                    "mode": "existing",
+                    "tokens_per_sec": 40,
+                    "power_watts": 450,
+                    "electricity_rate_per_kwh": 0.15,
+                },
+                "pricing_file": str(pricing_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls = []
+
+    def fake_fx(from_currency, to_currency, timeout=5.0):
+        calls.append((from_currency, to_currency))
+        return 1.25
+
+    monkeypatch.setattr(m, "fetch_fx_rate", fake_fx)
+    assert (
+        m.run_non_interactive(
+            config_path, export_fmt=None, export_path=None, currency="GBP"
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("bad_rate", [None, 0, -1.0])
+def test_currency_flag_falls_back_on_a_non_positive_rate(
+    tmp_path: Path, monkeypatch, capsys, bad_rate
+):
+    # A zero or negative rate is as unusable as no rate at all, and
+    # convert_rows_currency would raise on it. Falling back keeps the run
+    # alive with correct numbers in the wrong unit.
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workload": {
+                    "requests_per_day": 1000,
+                    "avg_input_tokens": 500,
+                    "avg_output_tokens": 300,
+                },
+                "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+                "pricing_file": str(pricing_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "fetch_fx_rate", lambda f, t, timeout=5.0: bad_rate)
+    assert (
+        m.run_non_interactive(
+            config_path, export_fmt=None, export_path=None, currency="GBP"
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert "falling back to USD" in captured.err
+    assert "$300.00" in captured.out
+    assert "£" not in captured.out
+
+
+def test_run_non_interactive_currency_flag_falls_back_to_usd_on_fx_failure(
+    tmp_path: Path, monkeypatch, capsys
+):
+    # If the FX lookup fails, the run should still succeed — just in USD —
+    # with a warning on stderr, rather than raising or producing nonsense.
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    config = {
+        "workload": {
+            "requests_per_day": 1000,
+            "avg_input_tokens": 500,
+            "avg_output_tokens": 300,
+        },
+        "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+        "pricing_file": str(pricing_path),
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    monkeypatch.setattr(m, "fetch_fx_rate", lambda f, t, timeout=5.0: None)
+
+    export_path = tmp_path / "out.json"
+    exit_code = m.run_non_interactive(
+        config_path,
+        export_fmt="json",
+        export_path=export_path,
+        currency="GBP",
+    )
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "falling back to USD" in captured.err
+    assert "$" in captured.out
+
+    data = json.loads(export_path.read_text(encoding="utf-8"))
+    assert all("monthly_cost_usd" in row for row in data)
+
+
+def test_run_non_interactive_default_currency_is_usd(
+    tmp_path: Path, monkeypatch, capsys
+):
+    # No --currency (or USD) must not trigger an FX lookup at all.
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    config = {
+        "workload": {
+            "requests_per_day": 1000,
+            "avg_input_tokens": 500,
+            "avg_output_tokens": 300,
+        },
+        "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+        "pricing_file": str(pricing_path),
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("fetch_fx_rate should not be called for USD")
+
+    monkeypatch.setattr(m, "fetch_fx_rate", fail_if_called)
+
+    exit_code = m.run_non_interactive(config_path, export_fmt=None, export_path=None)
+    assert exit_code == 0
+    assert "$" in capsys.readouterr().out
+
+
+def test_main_non_interactive_currency_flag_is_forwarded(
+    tmp_path: Path, monkeypatch, capsys
+):
+    # The CLI flag must actually reach run_non_interactive — a common
+    # regression when a new argument is added but not threaded through.
+    pricing_path = tmp_path / "pricing.json"
+    _write_pricing(pricing_path)
+    config_path = tmp_path / "config.json"
+    config = {
+        "workload": {
+            "requests_per_day": 1000,
+            "avg_input_tokens": 500,
+            "avg_output_tokens": 300,
+        },
+        "local": {"mode": "rent", "tokens_per_sec": 40, "hourly_rate": 2.5},
+        "pricing_file": str(pricing_path),
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    monkeypatch.setattr(m, "fetch_fx_rate", lambda f, t, timeout=5.0: 0.8)
+
+    exit_code = m.main(
+        [
+            "--non-interactive",
+            "--config",
+            str(config_path),
+            "--currency",
+            "GBP",
+        ]
+    )
+    assert exit_code == 0
+    assert "£" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------
+# --use-defaults fast-path re-runs GPU detection / throughput benchmark
+# --------------------------------------------------------------------------
+
+
+_SAVED_TARGET = {
+    "backend": "ollama",
+    "base_url": "http://localhost:11434",
+    "model": "llama3",
+}
+
+
+def _no_stdin(monkeypatch):
+    """Fail the test if anything reads stdin.
+
+    --use-defaults is the fast path. A refresh that asks which backend,
+    which URL and which model is four questions the flag exists to avoid,
+    so "does not prompt" is part of the contract, not an incidental.
+    """
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda prompt="": pytest.fail(f"--use-defaults prompted: {prompt!r}"),
+    )
+
+
+def test_refresh_measurements_for_defaults_uses_fresh_benchmark(monkeypatch):
+    # The saved tokens_per_sec is stale; the fresh benchmark must win.
+    _no_stdin(monkeypatch)
+    settings = {"tokens_per_sec": 5.0, "benchmark_target": dict(_SAVED_TARGET)}
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: _stub_gpu_info())
+    monkeypatch.setattr(m, "average_gpu_power_w", lambda *a, **k: 40.0)
+    monkeypatch.setattr(m, "benchmark_ollama", lambda base_url, model: 123.0)
+    monkeypatch.setattr(
+        m, "measure_gpu_power_during", lambda func, **k: (func(), 380.0)
+    )
+
+    tokens_per_sec, gpu_info, measured_load_power_w = (
+        m._refresh_measurements_for_defaults(settings)
+    )
+    assert tokens_per_sec == pytest.approx(123.0)
+    assert gpu_info is not None
+    assert measured_load_power_w == pytest.approx(380.0)
+
+
+def test_refresh_measurements_reuses_the_saved_endpoint(monkeypatch):
+    # The endpoint comes from the saved settings, not from the user. If it
+    # did not, the fast path would have to ask for it.
+    _no_stdin(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: None)
+    monkeypatch.setattr(
+        m,
+        "benchmark_openai_compatible",
+        lambda base_url, model: seen.update(url=base_url, model=model) or 50.0,
+    )
+    monkeypatch.setattr(
+        m, "benchmark_ollama", lambda *a, **k: pytest.fail("wrong backend")
+    )
+    monkeypatch.setattr(m, "measure_gpu_power_during", lambda func, **k: (func(), None))
+
+    m._refresh_measurements_for_defaults(
+        {
+            "tokens_per_sec": 5.0,
+            "benchmark_target": {
+                "backend": "openai",
+                "base_url": "http://gpu-box:8000/v1",
+                "model": "qwen",
+            },
+        }
+    )
+    assert seen == {"url": "http://gpu-box:8000/v1", "model": "qwen"}
+
+
+def test_refresh_measurements_keeps_a_hand_entered_throughput(monkeypatch, capsys):
+    # No saved endpoint means the previous run never benchmarked one — the
+    # user declined, or typed the figure in. A hand-entered number is not a
+    # stale measurement, so re-measuring is neither possible nor wanted.
+    _no_stdin(monkeypatch)
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: None)
+    monkeypatch.setattr(
+        m, "benchmark_ollama", lambda *a, **k: pytest.fail("nothing to benchmark")
+    )
+    tokens_per_sec, gpu_info, power = m._refresh_measurements_for_defaults(
+        {"tokens_per_sec": 7.5}
+    )
+    assert tokens_per_sec == pytest.approx(7.5)
+    assert gpu_info is None and power is None
+    assert "No saved benchmark endpoint" in capsys.readouterr().out
+
+
+def test_refresh_measurements_falls_back_to_saved_on_benchmark_failure(
+    monkeypatch, capsys
+):
+    # When the endpoint is saved but unreachable, the saved value is used
+    # and the script says so rather than silently replaying it.
+    _no_stdin(monkeypatch)
+    settings = {"tokens_per_sec": 7.5, "benchmark_target": dict(_SAVED_TARGET)}
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: None)
+    monkeypatch.setattr(
+        m,
+        "benchmark_ollama",
+        lambda base_url, model: (_ for _ in ()).throw(OSError("connection refused")),
+    )
+    monkeypatch.setattr(m, "measure_gpu_power_during", lambda func, **k: (func(), None))
+
+    tokens_per_sec, gpu_info, measured_load_power_w = (
+        m._refresh_measurements_for_defaults(settings)
+    )
+    assert tokens_per_sec == pytest.approx(7.5)
+    assert gpu_info is None
+    assert measured_load_power_w is None
+    out = capsys.readouterr().out
+    assert "connection refused" in out
+    assert "using saved throughput" in out.lower()
+
+
+def test_run_interactive_use_defaults_reruns_benchmark(
+    tmp_path: Path, monkeypatch, capsys
+):
+    # End-to-end: --use-defaults must not simply replay the saved
+    # tokens_per_sec — it must re-run the benchmark and use the fresh
+    # value, without asking anything.
+    saved = {
+        "mode": "rent",
+        "tokens_per_sec": 5.0,
+        "hourly_rate": 2.5,
+        "benchmark_target": dict(_SAVED_TARGET),
+        "workload_preset": "casual",
+        "selected_models": None,
+        "last_run_at": "2020-01-01T00:00:00+00:00",
+    }
+    last_run_path = tmp_path / ".last_run.json"
+    last_run_path.write_text(json.dumps(saved), encoding="utf-8")
+    # load_last_run's path default is bound at definition, so rebinding
+    # m.DEFAULT_LAST_RUN_PATH does nothing — the original test did that and
+    # therefore never entered the fast path at all, falling through to the
+    # full interactive flow and passing on its output instead.
+    monkeypatch.setattr(
+        m,
+        "load_last_run",
+        lambda *a, **k: json.loads(last_run_path.read_text(encoding="utf-8")),
+    )
+    _no_stdin(monkeypatch)
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: None)
+    monkeypatch.setattr(m, "benchmark_ollama", lambda base_url, model: 99.0)
+    monkeypatch.setattr(m, "measure_gpu_power_during", lambda func, **k: (func(), None))
+    monkeypatch.setattr(m, "prompt_yes_no", lambda prompt, default=True: False)
+
+    exit_code = m.run_interactive(use_defaults=True)
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "Measured throughput: 99.0 tokens/sec" in out
+    # The stale saved figure must not be what got used.
+    assert "5.0 tokens/sec" not in out
+
+
+@pytest.mark.parametrize(
+    "mode_answer, expected_mode, extra_answers",
+    [
+        ("rent", "rent", {"Rented GPU hourly rate": "2.5"}),
+        # The prompt offers existing/buying/rent; "buying" is stored as
+        # mode "own". Answering "own" loops the prompt forever.
+        (
+            "buying",
+            "own",
+            {
+                "Hardware cost (USD)": "3600",
+                "Expected hardware lifetime": "3",
+                "Power draw under load": "450",
+            },
+        ),
+        ("existing", "existing", {}),
+    ],
+)
+def test_interactive_setup_records_the_benchmark_target(
+    monkeypatch, capsys, mode_answer, expected_mode, extra_answers
+):
+    # --use-defaults can only re-benchmark an endpoint the previous run
+    # wrote down, and nothing persisted backend/base_url/model before.
+    # Every hardware mode builds its own settings dict, so all three have
+    # to carry it — dropping it from one would otherwise go unnoticed.
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: None)
+    monkeypatch.setattr(m, "average_gpu_power_w", lambda *a, **k: None)
+    monkeypatch.setattr(m, "discover_local_models", lambda backend, url: ["llama3"])
+    monkeypatch.setattr(m, "benchmark_ollama", lambda base_url, model: 42.0)
+    monkeypatch.setattr(m, "measure_gpu_power_during", lambda func, **k: (func(), None))
+    monkeypatch.setattr(
+        m, "fetch_octopus_agile_rate", lambda *a, **k: pytest.fail("network call")
+    )
+    monkeypatch.setattr(m, "fetch_fx_rate", lambda *a, **k: pytest.fail("network call"))
+    answers = {
+        "Skip benchmark": "n",
+        "auto-detect an NVIDIA GPU": "n",
+        "benchmark a running local model endpoint": "y",
+        "Backend": "ollama",
+        "Base URL": "http://gpu-box:11434",
+        "Model name as served locally": "llama3",
+        "Hardware mode": mode_answer,
+        "Look up your current unit rate live": "n",
+        "Do you pay for electricity in GBP": "n",
+        "Electricity rate": "0.15",
+        "Use this electricity rate?": "y",
+        "Extra power draw while generating": "",
+        "Total system power draw while running": "",
+        **extra_answers,
+    }
+
+    def fake_input(prompt: str = "") -> str:
+        for fragment, answer in answers.items():
+            if fragment in prompt:
+                return answer
+        pytest.fail(f"unscripted prompt: {prompt!r}")
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    *_, settings = m.interactive_local_setup()
+    assert settings["mode"] == expected_mode
+    assert settings["benchmark_target"] == {
+        "backend": "ollama",
+        "base_url": "http://gpu-box:11434",
+        "model": "llama3",
+    }
 
 
 def test_run_non_interactive_accepts_valid_multi_scenario_config(
