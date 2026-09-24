@@ -1,6 +1,11 @@
 # Shared repository automation. Keep this pinned to a published cicaid release so
 # local development and CI use the same issue/PR/review commands.
-cicaid-devtools @ https://github.com/leonarduk/cicaid/releases/download/v0.3.0/cicaid_devtools-0.3.0-py3-none-any.whl
+#
+# The #sha256= fragment makes pip verify the wheel before installing it, so a
+# replaced or tampered release asset fails the install instead of silently
+# running different code. Recompute it whenever the pinned version changes:
+#   curl -sSL <url> | sha256sum
+cicaid-devtools @ https://github.com/leonarduk/cicaid/releases/download/v0.3.0/cicaid_devtools-0.3.0-py3-none-any.whl#sha256=5b113d70851a58a8d6a9bbd6c1160b9569aadac486262140afedc75ecf7f179c
 
 # Tools used by .github/workflows/python-ci.yml.
 bandit
