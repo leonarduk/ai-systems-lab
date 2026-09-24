@@ -52,11 +52,18 @@ jobs:
         # runner. Confirmed by running `cicaid run-ci-checks --all`
         # locally with only requirements-dev.txt installed.
         run: |
-          find projects -name "requirements.txt" -print0 | while IFS= read -r -d '' req; do
+          set -euo pipefail
+          # Use process substitution (not a pipe) so the `while read` loop
+          # runs in the *current* shell rather than a subshell. That way a
+          # failing `pip install` triggers `set -e` directly and fails this
+          # step, instead of only failing the loop's subshell, whose exit
+          # status a bare pipe would otherwise discard in favour of the
+          # last command run (`echo "::endgroup::"`, which always succeeds).
+          while IFS= read -r -d '' req; do
             echo "::group::Installing $req"
             python -m pip install -r "$req"
             echo "::endgroup::"
-          done
+          done < <(find projects -name "requirements.txt" -print0)
 
       - name: Verify required tools are on PATH
         run: |
