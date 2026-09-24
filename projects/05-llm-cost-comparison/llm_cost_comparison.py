@@ -1588,15 +1588,75 @@ def fetch_octopus_agile_rate(
         return None
 
 
-# Tried in order; each is a free FX source. Frankfurter has moved domains
-# before (frankfurter.app -> frankfurter.dev), and any single provider can be
-# down or blocked on a given network, so falling through to the next one is
-# more robust than depending on exactly one host.
-FX_RATE_URL_TEMPLATES: tuple = (
-    "https://api.frankfurter.dev/v1/latest?from={from_currency}&to={to_currency}",
-    "https://api.frankfurter.app/v1/latest?from={from_currency}&to={to_currency}",
-    "https://api.exchangerate.host/latest?base={from_currency}&symbols={to_currency}",
+# Named FX rate providers, tried in the order given by FX_RATE_PROVIDER_ORDER
+# (see below). Each is a free FX source. Frankfurter has moved domains before
+# (frankfurter.app -> frankfurter.dev), and any single provider can be down or
+# blocked on a given network, so falling through to the next one is more
+# robust than depending on exactly one host.
+FX_RATE_PROVIDERS: dict = {
+    "frankfurter_dev": (
+        "https://api.frankfurter.dev/v1/latest?from={from_currency}&to={to_currency}"
+    ),
+    "frankfurter_app": (
+        "https://api.frankfurter.app/v1/latest?from={from_currency}&to={to_currency}"
+    ),
+    "exchangerate_host": (
+        "https://api.exchangerate.host/latest?base={from_currency}&symbols={to_currency}"
+    ),
+}
+
+# Default fallback order for the FX providers above. Override at runtime by
+# setting the FX_RATE_PROVIDER_ORDER environment variable to a comma-separated
+# list of provider keys (e.g. "exchangerate_host,frankfurter_dev"). Unknown
+# keys are ignored; if the override yields no known providers, the default
+# order is used so a typo can't disable FX lookups entirely.
+DEFAULT_FX_RATE_PROVIDER_ORDER: tuple = (
+    "frankfurter_dev",
+    "frankfurter_app",
+    "exchangerate_host",
 )
+
+
+def _resolve_fx_rate_provider_order() -> tuple:
+    """Return the ordered tuple of FX provider keys to try.
+
+    Reads ``FX_RATE_PROVIDER_ORDER`` from the environment if set (a
+    comma-separated list of keys from ``FX_RATE_PROVIDERS``), otherwise
+    falls back to ``DEFAULT_FX_RATE_PROVIDER_ORDER``. Unknown keys are
+    dropped; if nothing valid remains, the default order is returned so a
+    typo can't silently disable FX lookups.
+    """
+    raw = os.environ.get("FX_RATE_PROVIDER_ORDER", "").strip()
+    if not raw:
+        return DEFAULT_FX_RATE_PROVIDER_ORDER
+    requested = [key.strip() for key in raw.split(",") if key.strip()]
+    # dict.fromkeys de-duplicates while keeping first-seen order, so
+    # "a,b,a" tries a once rather than making a failing provider cost two
+    # timeouts.
+    seen = list(dict.fromkeys(requested))
+    valid = tuple(key for key in seen if key in FX_RATE_PROVIDERS)
+    unknown = [key for key in seen if key not in FX_RATE_PROVIDERS]
+    if unknown:
+        # Never silent. Someone setting this variable is reacting to a
+        # provider that is already failing them, and the one outcome worse
+        # than the wrong order is quietly getting the order they did not
+        # ask for while they watch the same failures.
+        print(
+            "Warning: FX_RATE_PROVIDER_ORDER lists unknown provider(s) "
+            + ", ".join(repr(key) for key in unknown)
+            + "; known providers are "
+            + ", ".join(sorted(FX_RATE_PROVIDERS))
+            + ".",
+            file=sys.stderr,
+        )
+    if not valid:
+        print(
+            "Warning: FX_RATE_PROVIDER_ORDER named no known provider; "
+            "using the default order.",
+            file=sys.stderr,
+        )
+        return DEFAULT_FX_RATE_PROVIDER_ORDER
+    return valid
 
 
 def _fetch_yahoo_fx_rate(from_currency: str, to_currency: str, timeout: float) -> float:

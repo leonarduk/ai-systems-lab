@@ -2412,6 +2412,83 @@ def test_fetch_fx_rate_returns_none_when_yahoo_also_fails(monkeypatch):
     assert m.fetch_fx_rate("GBP", "USD") is None
 
 
+def test_resolve_fx_rate_provider_order_defaults_without_env(monkeypatch):
+    monkeypatch.delenv("FX_RATE_PROVIDER_ORDER", raising=False)
+    assert m._resolve_fx_rate_provider_order() == m.DEFAULT_FX_RATE_PROVIDER_ORDER
+
+
+def test_resolve_fx_rate_provider_order_honours_env_override(monkeypatch):
+    monkeypatch.setenv("FX_RATE_PROVIDER_ORDER", "exchangerate_host,frankfurter_dev")
+    assert m._resolve_fx_rate_provider_order() == (
+        "exchangerate_host",
+        "frankfurter_dev",
+    )
+
+
+def test_resolve_fx_rate_provider_order_drops_unknown_keys(monkeypatch, capsys):
+    monkeypatch.setenv(
+        "FX_RATE_PROVIDER_ORDER", "not_a_provider,frankfurter_app,also_bogus"
+    )
+    assert m._resolve_fx_rate_provider_order() == ("frankfurter_app",)
+    err = capsys.readouterr().err
+    # Dropping a key silently is the wrong outcome: someone setting this
+    # is reacting to a provider that is already failing them, and would
+    # otherwise watch the same failures with no hint their override was
+    # partly ignored. The message names both the typos and the valid keys.
+    assert "not_a_provider" in err and "also_bogus" in err
+    assert "frankfurter_dev" in err
+
+
+def test_resolve_fx_rate_provider_order_deduplicates(monkeypatch, capsys):
+    # A repeated key would otherwise cost a second timeout against a
+    # provider that has already failed once.
+    monkeypatch.setenv(
+        "FX_RATE_PROVIDER_ORDER",
+        "exchangerate_host,frankfurter_dev,exchangerate_host",
+    )
+    assert m._resolve_fx_rate_provider_order() == (
+        "exchangerate_host",
+        "frankfurter_dev",
+    )
+    assert capsys.readouterr().err == ""
+
+
+def test_default_provider_order_covers_every_provider():
+    # A provider added to FX_RATE_PROVIDERS but left out of the default
+    # order is unreachable unless the user sets an env var naming it —
+    # dead config that nothing else would fail on.
+    assert set(m.DEFAULT_FX_RATE_PROVIDER_ORDER) == set(m.FX_RATE_PROVIDERS)
+    assert len(m.DEFAULT_FX_RATE_PROVIDER_ORDER) == len(m.FX_RATE_PROVIDERS)
+
+
+def test_resolve_fx_rate_provider_order_falls_back_when_all_keys_unknown(
+    monkeypatch, capsys
+):
+    # A typo must not disable FX lookups — but falling back is not the
+    # same as accepting the override, so it says so.
+    monkeypatch.setenv("FX_RATE_PROVIDER_ORDER", "bogus_a,bogus_b")
+    assert m._resolve_fx_rate_provider_order() == m.DEFAULT_FX_RATE_PROVIDER_ORDER
+    assert "using the default order" in capsys.readouterr().err
+
+
+def test_fetch_fx_rate_respects_env_provider_order(monkeypatch):
+    body = json.dumps({"rates": {"USD": 1.3}}).encode("utf-8")
+    calls = []
+
+    def fake_urlopen(url, timeout=None):
+        calls.append(url)
+        if "exchangerate.host" in url:
+            return _FakeHTTPResponse(body)
+        raise OSError("blocked")
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setenv("FX_RATE_PROVIDER_ORDER", "exchangerate_host,frankfurter_dev")
+    assert m.fetch_fx_rate("GBP", "USD") == pytest.approx(1.3)
+    # Only the first (promoted) provider should have been tried before success.
+    assert len(calls) == 1
+    assert "exchangerate.host" in calls[0]
+
+
 # --------------------------------------------------------------------------
 # prompt_float minimum enforcement
 # --------------------------------------------------------------------------

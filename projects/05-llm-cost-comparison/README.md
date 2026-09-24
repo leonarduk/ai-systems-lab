@@ -255,13 +255,12 @@ requests/day and token counts behind each one.
 
 ## Configuring FX rate providers
 
-Live exchange rates (used both by the interactive flow and by
-`--currency`) are fetched from a chain of free providers, tried in order
-until one succeeds. The default order is:
+Live exchange rates are fetched from a chain of free providers, tried in
+order until one succeeds. The default order is:
 
-1. `frankfurter.dev` — `https://api.frankfurter.dev/v1/latest`
-2. `frankfurter.app` — `https://api.frankfurter.app/v1/latest`
-3. `exchangerate.host` — `https://api.exchangerate.host/latest`
+1. `frankfurter_dev` — `https://api.frankfurter.dev/v1/latest`
+2. `frankfurter_app` — `https://api.frankfurter.app/v1/latest`
+3. `exchangerate_host` — `https://api.exchangerate.host/latest`
 
 If every one of those fails, the script falls back to Yahoo Finance's
 unofficial chart endpoint as a last resort.
@@ -273,10 +272,10 @@ variable to a comma-separated list of provider keys:
 
 ```bash
 # Linux/macOS
-FX_RATE_PROVIDER_ORDER=exchangerate.host,frankfurter.dev python llm_cost_comparison.py
+FX_RATE_PROVIDER_ORDER=exchangerate_host,frankfurter_dev python llm_cost_comparison.py
 
 # Windows (PowerShell)
-$env:FX_RATE_PROVIDER_ORDER = "exchangerate.host,frankfurter.dev"
+$env:FX_RATE_PROVIDER_ORDER = "exchangerate_host,frankfurter_dev"
 python llm_cost_comparison.py
 ```
 
