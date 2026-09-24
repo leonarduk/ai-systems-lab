@@ -2995,9 +2995,21 @@ def _resolve_workload_scenarios(config: dict) -> list:
         )
         for field_name in ("requests_per_day", "avg_input_tokens", "avg_output_tokens"):
             value = config["workload"][field_name]
-            if not isinstance(value, (int, float)) or isinstance(value, bool):
+            # bool is a subclass of int, so True/False would otherwise pass
+            # the numeric type check below and be silently treated as 1/0.
+            # This case keeps the "workload."-prefixed wording since it is a
+            # type error, not an out-of-range value.
+            if isinstance(value, bool):
                 raise ConfigError(
                     f"workload.{field_name} must be a number, got {value!r}"
+                )
+            if not isinstance(value, (int, float)) or value < 0:
+                # Per-field wording (no "workload." prefix) matches the
+                # issue's example shape and is more immediately recognizable
+                # to end users reading the error; the offending value is
+                # retained to make the fix obvious.
+                raise ConfigError(
+                    f"{field_name} must be a non-negative number, got {value!r}"
                 )
         try:
             workload = Workload(**config["workload"])
