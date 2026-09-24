@@ -9,6 +9,7 @@ interactive functions are thin wrappers over the tested pure functions.
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 import subprocess
@@ -175,10 +176,11 @@ def test_build_local_row_owned():
 
 def test_build_local_row_flags_when_throughput_cannot_keep_up_in_real_time():
     # A huge workload against a slow tokens/sec needs more compute-hours than
-    # exist in a month (720). The cost is still real — it's what running
-    # flat-out, 24/7, all month would cost — but the notes must say plainly
-    # that this only covers part of the workload rather than implying the
-    # full requested volume was delivered for that price.
+    # exist in a month (720). The cost is real — it's what running a fleet of
+    # machines flat-out, 24/7, all month would cost — but the notes must say
+    # plainly that this only covers part of the workload on a single machine
+    # rather than implying the full requested volume was delivered for that
+    # price.
     w = m.Workload(requests_per_day=50000, avg_input_tokens=500, avg_output_tokens=300)
     row = m.build_local_row(
         w,
@@ -188,9 +190,266 @@ def test_build_local_row_flags_when_throughput_cannot_keep_up_in_real_time():
         electricity_rate_per_kwh=0.15,
     )
     assert "covers only ~" in row.notes
-    assert "x this throughput" in row.notes
+    assert "machines" in row.notes
     assert row.feasible is False
     assert row.monthly_cost > 0
+
+
+# A workload needing more compute-hours than a month contains, reused by
+# every fleet test below so they all describe the same scenario:
+#   500 req/day * 4800 tokens/req * 30 days = 72,000,000 tokens/month
+#   at 10 tok/s that is 72e6 / (10 * 3600) = 2000 machine-hours
+#   720 hours exist in a month, so ceil(2000 / 720) = 3 machines
+# Note 3 * 720 = 2160 > 2000: the fleet has 160 hours of spare capacity, and
+# nothing may be billed for it.
+_FLEET_WORKLOAD = dict(
+    requests_per_day=500, avg_input_tokens=4000, avg_output_tokens=800
+)
+_FLEET_TOKENS = 72_000_000
+_FLEET_HOURS = 2000.0
+_FLEET_MACHINES = 3
+
+
+def test_fleet_fixture_matches_its_stated_arithmetic():
+    # The expected costs below are hand-computed from these numbers, so if
+    # the fixture drifts the other tests would silently assert the wrong
+    # thing. Pin it.
+    w = m.Workload(**_FLEET_WORKLOAD)
+    assert w.monthly_total_tokens == _FLEET_TOKENS
+    assert m.hours_needed_for_workload(w.monthly_total_tokens, 10) == pytest.approx(
+        _FLEET_HOURS
+    )
+    assert math.ceil(_FLEET_HOURS / m.HOURS_PER_MONTH) == _FLEET_MACHINES
+    assert _FLEET_MACHINES * m.HOURS_PER_MONTH > _FLEET_HOURS
+
+
+def test_build_local_row_charges_variable_cost_for_hours_needed_not_fleet_capacity():
+    # "existing" is a purely variable mode: the only cost is electricity
+    # while generating. Three machines for 667 hours each burn exactly the
+    # same power as one machine for 2000 hours, so the bill is for 2000
+    # machine-hours — NOT 3 * 720 = 2160, which would charge for 160 hours
+    # of idle spare capacity nobody uses.
+    row = m.build_local_row(
+        m.Workload(**_FLEET_WORKLOAD),
+        tokens_per_sec=10,
+        mode="existing",
+        power_watts=1000,  # 1 kW for easy math
+        electricity_rate_per_kwh=0.10,
+    )
+    assert row.feasible is False
+    # 1 kW * $0.10/kWh * 2000 hr = $200.00, not 3 * (1 * 0.10 * 720) = $216.
+    assert row.monthly_cost == pytest.approx(200.0)
+    assert row.cost_per_million_tokens == pytest.approx(200.0 / 72.0)
+    assert "3 machines" in row.notes
+
+
+def test_build_local_row_rent_charges_hours_needed_not_fleet_capacity():
+    # Renting is billed by the hour, so a fleet delivering the workload
+    # rents 2000 GPU-hours in total. Capping each machine at 720 hours and
+    # multiplying by 3 would invoice 2160 hours — inflating the rented-cloud
+    # option by 8% here, and by nearly 2x just past the 720-hour boundary.
+    row = m.build_local_row(
+        m.Workload(**_FLEET_WORKLOAD), tokens_per_sec=10, mode="rent", hourly_rate=2.0
+    )
+    assert row.feasible is False
+    assert row.monthly_cost == pytest.approx(2.0 * _FLEET_HOURS)  # $4000, not $4320
+
+
+def test_build_local_row_owned_mode_scales_hardware_amortization_by_machine_count():
+    # The fixed hardware amortization must be multiplied by the machine
+    # count — charging one card's amortization for a three-card fleet is
+    # the under-estimate issue #52 is about.
+    row = m.build_local_row(
+        m.Workload(**_FLEET_WORKLOAD),
+        tokens_per_sec=10,
+        mode="own",
+        hardware_cost=3600,  # $100/month amortized per machine
+        lifetime_years=3,
+        power_watts=0,  # isolate the fixed component
+        electricity_rate_per_kwh=0.0,
+    )
+    assert row.feasible is False
+    assert row.monthly_cost == pytest.approx(300.0)  # 3 machines * $100/month
+
+
+def test_build_local_row_owned_mode_splits_fixed_and_variable_correctly():
+    # Both components at once: fixed scales by machines, variable by hours.
+    row = m.build_local_row(
+        m.Workload(**_FLEET_WORKLOAD),
+        tokens_per_sec=10,
+        mode="own",
+        hardware_cost=3600,
+        lifetime_years=3,
+        power_watts=1000,
+        electricity_rate_per_kwh=0.10,
+    )
+    # 3 * $100 amortization + 1 kW * $0.10 * 2000 hr = $300 + $200 = $500.
+    # Scaling the whole per-machine cost instead would give 3 * (100 + 72)
+    # = $516, over-charging the electricity.
+    assert row.monthly_cost == pytest.approx(500.0)
+
+
+def test_build_local_row_always_on_scales_idle_draw_but_not_generation():
+    # A 24/7 server's idle draw is owed for all 720 hours per machine, so it
+    # triples with the fleet. The extra draw while generating is variable,
+    # so it is charged once for the 2000 machine-hours of actual work.
+    row = m.build_local_row(
+        m.Workload(**_FLEET_WORKLOAD),
+        tokens_per_sec=10,
+        mode="always_on",
+        idle_watts=100,
+        extra_watts=900,
+        electricity_rate_per_kwh=0.10,
+    )
+    idle = _FLEET_MACHINES * 0.1 * 0.10 * m.HOURS_PER_MONTH  # $21.60
+    generation = 0.9 * 0.10 * _FLEET_HOURS  # $180.00
+    assert row.monthly_cost == pytest.approx(idle + generation)  # $201.60
+
+
+@pytest.mark.parametrize(
+    "mode, kwargs",
+    [
+        ("existing", dict(power_watts=1000, electricity_rate_per_kwh=0.10)),
+        ("rent", dict(hourly_rate=2.0)),
+    ],
+)
+def test_purely_variable_modes_keep_the_same_rate_per_million(mode, kwargs):
+    # For modes with no fixed component, $/1M is a property of the hardware
+    # and the tariff, not of how big the workload is. A feasible run and an
+    # infeasible three-machine run at the same tok/s must price identically.
+    small = m.build_local_row(
+        m.Workload(requests_per_day=10, avg_input_tokens=4000, avg_output_tokens=800),
+        tokens_per_sec=10,
+        mode=mode,
+        **kwargs,
+    )
+    fleet = m.build_local_row(
+        m.Workload(**_FLEET_WORKLOAD), tokens_per_sec=10, mode=mode, **kwargs
+    )
+    assert small.feasible is True
+    assert fleet.feasible is False
+    assert fleet.cost_per_million_tokens == pytest.approx(small.cost_per_million_tokens)
+
+
+def test_owned_mode_rate_per_million_falls_as_tokens_spread_the_fixed_cost():
+    # Named for what it asserts. An earlier version of this called the
+    # effect a rise, which the assertion below contradicts and which the
+    # docstring repeated: between machine boundaries the fixed cost is
+    # spread over more tokens, so $/1M falls. The rise happens *at* a
+    # boundary, which is the next test.
+    common = dict(
+        tokens_per_sec=10,
+        mode="own",
+        hardware_cost=3600,
+        lifetime_years=3,
+        power_watts=1000,
+        electricity_rate_per_kwh=0.10,
+    )
+    # Same tokens/hour ratio, but small enough for one machine.
+    small = m.build_local_row(
+        m.Workload(requests_per_day=100, avg_input_tokens=4000, avg_output_tokens=800),
+        **common,
+    )
+    fleet = m.build_local_row(m.Workload(**_FLEET_WORKLOAD), **common)
+    assert small.feasible is True
+    assert fleet.feasible is False
+    assert fleet.cost_per_million_tokens < small.cost_per_million_tokens
+
+
+def test_owned_mode_rate_per_million_jumps_at_a_machine_boundary():
+    # The sawtooth. Two extra hours of work either side of the 720-hour
+    # line cost a whole extra card's amortization, so $/1M steps up even
+    # though the workload barely grew. This is the effect issue #52 exists
+    # to surface, and it is invisible to a small-vs-large comparison,
+    # which only shows the downward trend between boundaries.
+    common = dict(
+        tokens_per_sec=10,
+        mode="own",
+        hardware_cost=3600,  # $100/month per machine
+        lifetime_years=3,
+        power_watts=1000,
+        electricity_rate_per_kwh=0.10,
+    )
+    # 179 req/day * 4800 tokens * 30 = 25,776,000 tokens -> 716 hours.
+    just_under = m.build_local_row(
+        m.Workload(requests_per_day=179, avg_input_tokens=4000, avg_output_tokens=800),
+        **common,
+    )
+    # 181 req/day -> 26,064,000 tokens -> 724 hours, so a second machine.
+    just_over = m.build_local_row(
+        m.Workload(requests_per_day=181, avg_input_tokens=4000, avg_output_tokens=800),
+        **common,
+    )
+    assert just_under.feasible is True
+    assert just_over.feasible is False
+    # 1 * $100 + $0.10 * 716 = $171.60 over 25.776M tokens
+    assert just_under.cost_per_million_tokens == pytest.approx(171.6 / 25.776)
+    # 2 * $100 + $0.10 * 724 = $272.40 over 26.064M tokens
+    assert just_over.cost_per_million_tokens == pytest.approx(272.4 / 26.064)
+    assert just_over.cost_per_million_tokens > just_under.cost_per_million_tokens
+
+
+def test_always_on_single_machine_charges_idle_once():
+    # num_machines == 1 must leave the idle term exactly as the helper
+    # computes it — the `idle_watts * num_machines` scaling has to be a
+    # no-op below the boundary, not an off-by-one.
+    w = m.Workload(requests_per_day=100, avg_input_tokens=4000, avg_output_tokens=800)
+    hours = m.hours_needed_for_workload(w.monthly_total_tokens, 10)
+    assert hours < m.HOURS_PER_MONTH
+    row = m.build_local_row(
+        w,
+        tokens_per_sec=10,
+        mode="always_on",
+        idle_watts=100,
+        extra_watts=900,
+        electricity_rate_per_kwh=0.10,
+    )
+    expected = m.local_monthly_cost_always_on(100, 900, 0.10, hours)
+    assert row.monthly_cost == pytest.approx(expected)
+
+
+def test_build_local_row_uses_one_machine_exactly_at_the_month_boundary():
+    # 180 req/day * 4800 tokens * 30 = 25,920,000 tokens; at 10 tok/s that
+    # is exactly HOURS_PER_MONTH. ceil() must not round this up to 2 — the
+    # max(1, ...) and the <= in `feasible` both sit on this edge.
+    w = m.Workload(requests_per_day=180, avg_input_tokens=4000, avg_output_tokens=800)
+    assert m.hours_needed_for_workload(w.monthly_total_tokens, 10) == pytest.approx(
+        m.HOURS_PER_MONTH
+    )
+    row = m.build_local_row(w, tokens_per_sec=10, mode="rent", hourly_rate=2.0)
+    assert row.feasible is True
+    assert row.monthly_cost == pytest.approx(2.0 * m.HOURS_PER_MONTH)
+
+
+def test_build_local_row_costs_the_full_workload_not_just_what_one_machine_makes():
+    # $/1M is computed against the workload's full monthly total, which the
+    # fleet does deliver. Dividing by one machine's 720 hours of output
+    # would report a rate for tokens the user never asked for.
+    row = m.build_local_row(
+        m.Workload(**_FLEET_WORKLOAD),
+        tokens_per_sec=10,
+        mode="rent",
+        hourly_rate=2.0,
+    )
+    assert row.cost_per_million_tokens == pytest.approx(
+        row.monthly_cost / _FLEET_TOKENS * 1_000_000
+    )
+
+
+def test_build_local_row_rejects_a_zero_token_workload():
+    # ceil(0 / 720) is 0, so there is no max(1, ...) floor on the machine
+    # count: a zero-token workload has no hours to cost and is rejected
+    # downstream by cost_per_million_tokens. Clamping to one machine would
+    # only have produced a $0 row for a workload that does not exist.
+    with pytest.raises(
+        ValueError, match=r"monthly_total_tokens must be > 0 to cost a local option"
+    ):
+        m.build_local_row(
+            m.Workload(requests_per_day=0, avg_input_tokens=0, avg_output_tokens=0),
+            tokens_per_sec=10,
+            mode="rent",
+            hourly_rate=2.0,
+        )
 
 
 def test_build_local_row_no_warning_when_throughput_is_sufficient():
@@ -379,22 +638,38 @@ def test_build_hosted_rows_raises_config_error_on_malformed_pricing():
 
 
 @pytest.mark.parametrize(
-    "bad_value",
+    "bad_value, expected",
     [
-        None,  # missing
-        0,  # zero
-        -1.0,  # negative
-        "1.0",  # non-numeric
-        float("nan"),  # NaN
-        float("inf"),  # inf
-        True,  # bool (int subclass)
+        # Absent or not a number at all: the file itself is malformed.
+        (None, r"pricing model 'claude/opus-5' is missing a numeric input_per_million"),
+        (
+            "1.0",
+            r"pricing model 'claude/opus-5' is missing a numeric input_per_million",
+        ),
+        # bool is an int subclass, so True would otherwise read as a $1 rate.
+        (True, r"pricing model 'claude/opus-5' is missing a numeric input_per_million"),
+        # Present and numeric, but not a usable rate. Reporting these as
+        # "missing" would send the user looking for the wrong problem.
+        (0, r"input_per_million for model 'claude/opus-5' must be a positive number"),
+        (
+            -1.0,
+            r"input_per_million for model 'claude/opus-5' must be a positive number",
+        ),
+        (
+            float("nan"),
+            r"input_per_million for model 'claude/opus-5' must be a positive number",
+        ),
+        (
+            float("inf"),
+            r"input_per_million for model 'claude/opus-5' must be a positive number",
+        ),
     ],
 )
-def test_build_hosted_rows_direct_call_rejects_invalid_price(bad_value):
+def test_build_hosted_rows_direct_call_rejects_invalid_price(bad_value, expected):
     # build_hosted_rows is called directly here with a hand-constructed
     # pricing dict that bypassed load_pricing. The guard must still raise
-    # ConfigError with the established message rather than silently
-    # computing a cost from an invalid price.
+    # ConfigError, and the message must name which of the two distinct
+    # mistakes was made rather than silently computing a cost.
     pricing = {
         "providers": {
             "claude": {
@@ -409,10 +684,7 @@ def test_build_hosted_rows_direct_call_rejects_invalid_price(bad_value):
         }
     }
     w = m.Workload(1000, 500, 300)
-    with pytest.raises(
-        m.ConfigError,
-        match=r"pricing model 'claude/opus-5' is missing a numeric input_per_million",
-    ):
+    with pytest.raises(m.ConfigError, match=expected):
         m.build_hosted_rows(w, pricing)
 
 
@@ -433,7 +705,7 @@ def test_build_hosted_rows_direct_call_rejects_invalid_output_price():
     w = m.Workload(1000, 500, 300)
     with pytest.raises(
         m.ConfigError,
-        match=r"pricing model 'claude/opus-5' is missing a numeric output_per_million",
+        match=r"output_per_million for model 'claude/opus-5' must be a positive number",
     ):
         m.build_hosted_rows(w, pricing)
 
@@ -845,6 +1117,185 @@ def test_load_pricing_tolerates_extra_top_level_keys(tmp_path: Path):
     pricing = m.load_pricing(pricing_path)
     assert pricing["as_of"] == "2026-01-01"
     assert "claude" in pricing["providers"]
+
+
+@pytest.mark.parametrize("bad_value", [0, -5, 0.0, -0.01])
+def test_load_pricing_rejects_nonpositive_price(tmp_path: Path, bad_value):
+    bad_path = tmp_path / "pricing.json"
+    bad_path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "claude": {
+                        "models": {
+                            "opus-5": {
+                                "display_name": "Claude Opus 5",
+                                "input_per_million": bad_value,
+                                "output_per_million": 25.0,
+                            }
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(m.ConfigError, match="input_per_million"):
+        m.load_pricing(bad_path)
+
+
+def test_load_pricing_rejects_nonpositive_output_price(tmp_path: Path):
+    bad_path = tmp_path / "pricing.json"
+    bad_path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "claude": {
+                        "models": {
+                            "opus-5": {
+                                "display_name": "Claude Opus 5",
+                                "input_per_million": 5.0,
+                                "output_per_million": 0,
+                            }
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(m.ConfigError, match="output_per_million"):
+        m.load_pricing(bad_path)
+
+
+def test_load_pricing_rejects_non_numeric_price(tmp_path: Path):
+    bad_path = tmp_path / "pricing.json"
+    bad_path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "claude": {
+                        "models": {
+                            "opus-5": {
+                                "display_name": "Claude Opus 5",
+                                "input_per_million": "5.0",
+                                "output_per_million": 25.0,
+                            }
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(m.ConfigError, match="input_per_million"):
+        m.load_pricing(bad_path)
+
+
+def test_load_pricing_accepts_small_positive_price(tmp_path: Path):
+    # A tiny-but-positive rate (e.g. a cheap cached-input tier) must not be
+    # rejected — only zero, negative, or non-numeric values are invalid.
+    good_path = tmp_path / "pricing.json"
+    good_path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "deepseek": {
+                        "models": {
+                            "flash-cache-hit": {
+                                "display_name": "DeepSeek Flash (cached)",
+                                "input_per_million": 0.0001,
+                                "output_per_million": 0.28,
+                            }
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    pricing = m.load_pricing(good_path)
+    assert pricing["providers"]["deepseek"]["models"]["flash-cache-hit"][
+        "input_per_million"
+    ] == pytest.approx(0.0001)
+
+
+@pytest.mark.parametrize(
+    "bad_value", [None, "1.0", True, 0, -1.0, float("nan"), float("inf")]
+)
+def test_load_pricing_and_build_hosted_rows_report_the_same_error(
+    tmp_path: Path, bad_value
+):
+    # _validate_pricing_model's docstring claims load_pricing and
+    # build_hosted_rows "enforce identical semantics and raise the same
+    # ConfigError message". Before this PR that was not true of
+    # load_pricing, which validated nothing at all. Assert the claim
+    # rather than trusting it, for every rejected shape.
+    pricing = {
+        "providers": {
+            "claude": {
+                "models": {
+                    "opus-5": {
+                        "display_name": "Claude Opus 5",
+                        "input_per_million": bad_value,
+                        "output_per_million": 25.0,
+                    }
+                }
+            }
+        }
+    }
+    # NaN/inf are not JSON, but json.dumps emits them and json.load reads
+    # them back, which is exactly how such a file reaches load_pricing.
+    path = tmp_path / "pricing.json"
+    path.write_text(json.dumps(pricing), encoding="utf-8")
+
+    with pytest.raises(m.ConfigError) as from_load:
+        m.load_pricing(path)
+    with pytest.raises(m.ConfigError) as from_rows:
+        m.build_hosted_rows(m.Workload(1000, 500, 300), pricing)
+
+    assert str(from_load.value) == str(from_rows.value)
+
+
+def test_load_pricing_validates_every_model_not_just_the_first(tmp_path: Path):
+    # iter_models walks all providers and models; a bad rate buried behind
+    # good ones must still be caught, or validating at load time buys
+    # nothing for a real multi-provider file.
+    path = tmp_path / "pricing.json"
+    path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "claude": {
+                        "models": {
+                            "opus-5": {
+                                "input_per_million": 5.0,
+                                "output_per_million": 25.0,
+                            }
+                        }
+                    },
+                    "deepseek": {
+                        "models": {
+                            "chat": {
+                                "input_per_million": 0.27,
+                                "output_per_million": 1.1,
+                            },
+                            "reasoner": {
+                                "input_per_million": 0.55,
+                                "output_per_million": -2.19,
+                            },
+                        }
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        m.ConfigError,
+        match=r"output_per_million for model 'deepseek/reasoner' must be a positive",
+    ):
+        m.load_pricing(path)
 
 
 def test_load_pricing_warns_but_loads_when_as_of_missing(tmp_path: Path, capsys):
@@ -1330,6 +1781,122 @@ def test_detect_nvidia_gpu_returns_none_on_timeout():
         raise subprocess.TimeoutExpired(cmd="nvidia-smi", timeout=5)
 
     assert m.detect_nvidia_gpu(runner=fake_runner) is None
+
+
+# --------------------------------------------------------------------------
+# WMI-based GPU detection fallback (Windows, non-NVIDIA vendors)
+# --------------------------------------------------------------------------
+
+
+def test_detect_gpu_wmi_returns_none_on_non_windows(monkeypatch):
+    # Asserting only `is None` cannot fail: on Linux the wmic fallback also
+    # returns None, because there is no wmic to run. Verified by deleting
+    # the platform guard — the test still passed. What the guard actually
+    # buys is not spawning a subprocess at all, so assert that instead.
+    monkeypatch.setattr(m.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(
+        m.subprocess, "run", lambda *a, **k: pytest.fail("wmic spawned on non-Windows")
+    )
+    assert m.detect_gpu_wmi() is None
+
+
+def test_detect_gpu_wmi_uses_wmi_package_when_available(monkeypatch):
+    monkeypatch.setattr(m.platform, "system", lambda: "Windows")
+
+    class _FakeController:
+        Name = "AMD Radeon RX 7900 XTX"
+        AdapterCompatibility = "Advanced Micro Devices, Inc."
+        DriverVersion = "31.0.24033.1003"
+
+    class _FakeWmiModule:
+        @staticmethod
+        def WMI():
+            class _Conn:
+                @staticmethod
+                def Win32_VideoController():
+                    return [_FakeController()]
+
+            return _Conn()
+
+    monkeypatch.setitem(__import__("sys").modules, "wmi", _FakeWmiModule)
+    info = m.detect_gpu_wmi()
+    assert info == {
+        "name": "AMD Radeon RX 7900 XTX",
+        "vendor": "Advanced Micro Devices, Inc.",
+        "driver_version": "31.0.24033.1003",
+    }
+
+
+def test_detect_gpu_wmi_falls_back_to_wmic_when_wmi_package_missing(monkeypatch):
+    monkeypatch.setattr(m.platform, "system", lambda: "Windows")
+    # Ensure the `wmi` package import fails so we exercise the wmic path.
+    monkeypatch.setitem(__import__("sys").modules, "wmi", None)
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+        assert "wmic" in cmd[0]
+        assert "/format:list" in cmd
+        return _FakeCompletedProcess(
+            "AdapterCompatibility=Intel Corporation\r\n"
+            "DriverVersion=31.0.101.4502\r\n"
+            "Name=Intel(R) UHD Graphics 770\r\n"
+            "\r\n"
+        )
+
+    monkeypatch.setattr(m.subprocess, "run", fake_run)
+    info = m.detect_gpu_wmi()
+    assert info == {
+        "name": "Intel(R) UHD Graphics 770",
+        "vendor": "Intel Corporation",
+        "driver_version": "31.0.101.4502",
+    }
+
+
+def test_detect_gpu_wmi_returns_none_when_wmic_unavailable(monkeypatch):
+    monkeypatch.setattr(m.platform, "system", lambda: "Windows")
+    monkeypatch.setitem(__import__("sys").modules, "wmi", None)
+
+    def fake_run(*args, **kwargs):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(m.subprocess, "run", fake_run)
+    assert m.detect_gpu_wmi() is None
+
+
+def test_detect_gpu_prefers_nvidia_smi_when_available(monkeypatch):
+    def fake_runner(*args, **kwargs):
+        return _FakeCompletedProcess("NVIDIA GeForce RTX 4090, 24564, 210.5, 450\n")
+
+    # WMI must not be consulted when nvidia-smi succeeds.
+    monkeypatch.setattr(
+        m, "detect_gpu_wmi", lambda: (_ for _ in ()).throw(AssertionError())
+    )
+    info = m.detect_gpu(runner=fake_runner)
+    assert info["name"] == "NVIDIA GeForce RTX 4090"
+
+
+def test_detect_gpu_falls_back_to_wmi_when_nvidia_smi_fails(monkeypatch):
+    def fake_runner(*args, **kwargs):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(
+        m,
+        "detect_gpu_wmi",
+        lambda: {
+            "name": "AMD Radeon RX 7900 XTX",
+            "vendor": "Advanced Micro Devices, Inc.",
+            "driver_version": "31.0.24033.1003",
+        },
+    )
+    info = m.detect_gpu(runner=fake_runner)
+    assert info["name"] == "AMD Radeon RX 7900 XTX"
+
+
+def test_detect_gpu_returns_none_when_both_paths_fail(monkeypatch):
+    def fake_runner(*args, **kwargs):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(m, "detect_gpu_wmi", lambda: None)
+    assert m.detect_gpu(runner=fake_runner) is None
 
 
 def test_format_gpu_summary_with_all_fields():
@@ -3023,7 +3590,7 @@ def _stub_gpu_info(name="NVIDIA GeForce RTX 3090"):
 _LOCAL_SETUP_ANSWERS = {
     # Not skipped, so GPU detection and the benchmark question are both asked.
     "Skip benchmark": "n",
-    "auto-detect an NVIDIA GPU": "y",
+    "auto-detect your GPU": "y",
     "benchmark a running local model endpoint": "n",
     "Measured or estimated tokens/sec": "40",
     "Hardware mode": "existing",
@@ -3143,6 +3710,7 @@ def test_benchmark_openai_compatible_does_not_print(monkeypatch, capsys):
 def _benchmark_setup(monkeypatch, base_url, backend="openai"):
     """interactive_local_setup driven through the endpoint-benchmark branch."""
     monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: None)
+    monkeypatch.setattr(m, "detect_gpu_wmi", lambda: None)
     monkeypatch.setattr(m, "average_gpu_power_w", lambda *a, **k: None)
     monkeypatch.setattr(m, "measure_gpu_power_during", lambda fn: (fn(), None))
     monkeypatch.setattr(m, "benchmark_openai_compatible", lambda *a, **k: 37.0)
@@ -3153,7 +3721,7 @@ def _benchmark_setup(monkeypatch, base_url, backend="openai"):
     monkeypatch.setattr(m, "fetch_fx_rate", lambda *a, **k: pytest.fail("network call"))
     answers = {
         "Skip benchmark": "n",
-        "auto-detect an NVIDIA GPU": "n",
+        "auto-detect your GPU": "n",
         "benchmark a running local model endpoint": "y",
         "Backend": backend,
         "Base URL": base_url,
@@ -3175,6 +3743,138 @@ def _benchmark_setup(monkeypatch, base_url, backend="openai"):
 
     monkeypatch.setattr("builtins.input", fake_input)
     return m.interactive_local_setup()
+
+
+def _local_setup_with_gpu_source(monkeypatch, nvidia, wmi):
+    """interactive_local_setup with both detection paths stubbed."""
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: nvidia)
+    monkeypatch.setattr(m, "detect_gpu_wmi", lambda: wmi)
+    monkeypatch.setattr(
+        m, "average_gpu_power_w", lambda *a, **k: pytest.fail("nvidia-smi polled")
+    )
+    monkeypatch.setattr(
+        m, "fetch_octopus_agile_rate", lambda *a, **k: pytest.fail("network call")
+    )
+    monkeypatch.setattr(m, "fetch_fx_rate", lambda *a, **k: pytest.fail("network call"))
+
+    def fake_input(prompt: str = "") -> str:
+        for fragment, answer in _LOCAL_SETUP_ANSWERS.items():
+            if fragment in prompt:
+                return answer
+        pytest.fail(f"unscripted prompt: {prompt!r}")
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    return m.interactive_local_setup()
+
+
+def test_interactive_setup_uses_a_wmi_detected_card(monkeypatch, capsys):
+    # The point of issue #62. detect_gpu existed but nothing called it, so
+    # an AMD card on Windows was still invisible to the only code path a
+    # user reaches. Stub nvidia-smi as absent and WMI as present.
+    amd = {
+        "name": "AMD Radeon RX 7900 XTX",
+        "vendor": "Advanced Micro Devices, Inc.",
+        "driver_version": "31.0.24027.1012",
+    }
+    _local_setup_with_gpu_source(monkeypatch, nvidia=None, wmi=amd)
+    out = capsys.readouterr().out
+    assert "AMD Radeon RX 7900 XTX" in out
+    assert "No GPU detected" not in out
+
+
+def test_wmi_detected_card_does_not_trigger_nvidia_smi_power_polling(
+    monkeypatch, capsys
+):
+    # average_gpu_power_w shells out to nvidia-smi. A WMI card has no power
+    # telemetry to average, so polling would spawn a binary that is not
+    # there. The stub above fails the test if it is called at all.
+    _local_setup_with_gpu_source(
+        monkeypatch,
+        nvidia=None,
+        wmi={"name": "Intel Arc A770", "vendor": "Intel", "driver_version": "1.0"},
+    )
+    # Reaching here means average_gpu_power_w was never called. The card is
+    # still reported, with the fields WMI cannot supply marked unknown.
+    out = capsys.readouterr().out
+    assert "Intel Arc A770" in out
+    assert "VRAM unknown" in out
+    assert "power draw unknown" in out
+
+
+def test_no_gpu_message_names_both_detection_paths(monkeypatch, capsys):
+    _local_setup_with_gpu_source(monkeypatch, nvidia=None, wmi=None)
+    out = capsys.readouterr().out
+    assert "nvidia-smi and WMI both returned nothing" in out
+
+
+def test_detect_gpu_wmi_handles_commas_inside_wmic_fields(monkeypatch):
+    # AdapterCompatibility for an AMD card is "Advanced Micro Devices,
+    # Inc." — and wmic does not quote it. A CSV row therefore has more
+    # commas than columns, and no split recovers the fields: splitting
+    # unlimited mis-assigns them, splitting with a limit hands the leftover
+    # to the last column. /format:list sidesteps it entirely.
+    monkeypatch.setattr(m.platform, "system", lambda: "Windows")
+    monkeypatch.setitem(sys.modules, "wmi", None)
+
+    class _Result:
+        returncode = 0
+        stdout = (
+            "\r\n"
+            "AdapterCompatibility=Advanced Micro Devices, Inc.\r\n"
+            "DriverVersion=31.0.24027.1012\r\n"
+            "Name=AMD Radeon RX 7900 XTX\r\n"
+            "\r\n"
+        )
+
+    monkeypatch.setattr(m.subprocess, "run", lambda *a, **k: _Result())
+    assert m.detect_gpu_wmi() == {
+        "name": "AMD Radeon RX 7900 XTX",
+        "vendor": "Advanced Micro Devices, Inc.",
+        "driver_version": "31.0.24027.1012",
+    }
+
+
+def test_detect_gpu_wmi_returns_the_first_named_adapter(monkeypatch):
+    # A laptop typically lists the integrated chip and the discrete card.
+    monkeypatch.setattr(m.platform, "system", lambda: "Windows")
+    monkeypatch.setitem(sys.modules, "wmi", None)
+
+    class _Result:
+        returncode = 0
+        stdout = (
+            "AdapterCompatibility=Intel Corporation\r\n"
+            "DriverVersion=31.0.101\r\n"
+            "Name=Intel(R) UHD Graphics\r\n"
+            "\r\n"
+            "AdapterCompatibility=Advanced Micro Devices, Inc.\r\n"
+            "DriverVersion=31.0.24027\r\n"
+            "Name=AMD Radeon RX 7900 XTX\r\n"
+            "\r\n"
+        )
+
+    monkeypatch.setattr(m.subprocess, "run", lambda *a, **k: _Result())
+    assert m.detect_gpu_wmi()["name"] == "Intel(R) UHD Graphics"
+
+
+def test_detect_gpu_wmi_returns_none_when_wmic_names_nothing(monkeypatch):
+    monkeypatch.setattr(m.platform, "system", lambda: "Windows")
+    monkeypatch.setitem(sys.modules, "wmi", None)
+
+    class _Result:
+        returncode = 0
+        stdout = "AdapterCompatibility=Intel\r\nDriverVersion=1.0\r\n\r\n"
+
+    monkeypatch.setattr(m.subprocess, "run", lambda *a, **k: _Result())
+    assert m.detect_gpu_wmi() is None
+
+
+def test_gpu_detection_prompt_matches_what_detect_gpu_tries():
+    # The prompt said "an NVIDIA GPU via nvidia-smi" while a WMI fallback
+    # was added underneath it, which would have told Windows AMD users the
+    # question did not apply to them.
+    assert "nvidia-smi" in m.GPU_DETECTION_PROMPT
+    assert "WMI" in m.GPU_DETECTION_PROMPT
+    assert "an NVIDIA GPU" not in m.GPU_DETECTION_PROMPT
 
 
 def test_caveat_is_printed_after_the_throughput_for_a_remote_endpoint(
@@ -3283,7 +3983,7 @@ def _gbp_setup(monkeypatch, answers):
     monkeypatch.setattr(m, "fetch_fx_rate", lambda *a, **k: 1.30)
     script = {
         "Skip benchmark": "y",
-        "auto-detect an NVIDIA GPU": "y",
+        "auto-detect your GPU": "y",
         "Measured or estimated tokens/sec": "40",
         "Hardware mode": "existing",
         "Look up your current unit rate live": "n",
@@ -4449,7 +5149,7 @@ def test_interactive_setup_records_the_benchmark_target(
     monkeypatch.setattr(m, "fetch_fx_rate", lambda *a, **k: pytest.fail("network call"))
     answers = {
         "Skip benchmark": "n",
-        "auto-detect an NVIDIA GPU": "n",
+        "auto-detect your GPU": "n",
         "benchmark a running local model endpoint": "y",
         "Backend": "ollama",
         "Base URL": "http://gpu-box:11434",
@@ -4628,7 +5328,7 @@ _ACCEPT_DEFAULT = {
 # Answers shared by every interactive test: skip all hardware probing and
 # supply the electricity rate by hand so nothing touches the network.
 _OFFLINE_ANSWERS = {
-    "auto-detect an NVIDIA GPU": "n",
+    "auto-detect your GPU": "n",
     "benchmark a running local model endpoint": "n",
     "Look up your current unit rate live": "n",
     # Declining the Octopus lookup still leaves the currency as GBP, which

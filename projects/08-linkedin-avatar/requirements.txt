@@ -1,8 +1,15 @@
 openai>=1.50.0
-# app.py relies on Gradio 6-only API shapes: css moved from Blocks() to
-# launch(), and ChatInterface history is dict-based only (no more tuples) —
-# do not loosen this below 6.0, the app breaks silently on an older release.
+# app.py relies on Gradio 6-only API shapes: css is passed to
+# gr.mount_gradio_app() rather than Blocks(), and ChatInterface history is
+# dict-based only (no more tuples) — do not loosen this below 6.0, the app
+# breaks silently on an older release.
 gradio>=6.0.0
+# fastapi/uvicorn ship as transitive deps of gradio, but app.py imports and
+# calls them directly (the /health endpoint, and running the combined app) —
+# declared explicitly so a future Gradio release dropping either doesn't
+# silently break this file at import/run time.
+fastapi>=0.100.0
+uvicorn>=0.20.0
 pypdf>=4.3.0
 requests>=2.31.0
 python-dotenv>=1.0.1

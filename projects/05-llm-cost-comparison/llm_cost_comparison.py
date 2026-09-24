@@ -34,6 +34,7 @@ import csv
 import json
 import math
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -98,6 +99,19 @@ class ConfigError(ValueError):
 # --------------------------------------------------------------------------
 
 
+def _validate_pricing(pricing: dict) -> None:
+    """Reject malformed per-model prices before any cost math runs.
+
+    Delegates to ``_validate_pricing_model`` so a price loaded from a file
+    and a price in a hand-built dict passed straight to
+    ``build_hosted_rows`` are held to the same rule and report the same
+    message. Raising at load time keeps the failure next to the malformed
+    data instead of surfacing as a nonsensical cost further downstream.
+    """
+    for provider_key, model_key, model_info in iter_models(pricing):
+        _validate_pricing_model(model_info, f"{provider_key}/{model_key}")
+
+
 def load_pricing(
     path: Path = DEFAULT_PRICING_PATH, *, try_refresh: bool = False
 ) -> dict:
@@ -108,6 +122,11 @@ def load_pricing(
     explicit ``--update-pricing`` command, and only for the shipped default
     pricing path so custom/user-edited config files are never overwritten
     implicitly.
+
+    Every model's ``input_per_million``/``output_per_million`` is validated
+    to be a finite, strictly positive number before the pricing dict is
+    returned (see ``_validate_pricing``), so downstream cost math never has
+    to defend against a zero, negative, or non-numeric rate.
     """
     if try_refresh and path == DEFAULT_PRICING_PATH:
         fetch_deepseek_pricing(path)
@@ -161,6 +180,7 @@ def load_pricing(
             "there is no way to tell how stale these prices are.",
             file=sys.stderr,
         )
+    _validate_pricing(data)
     return data
 
 
@@ -843,65 +863,112 @@ def build_local_row(
     """Build a local-option row, costed for what the hardware can actually do.
 
     ``hours_needed`` is how long this workload's tokens would take to
-    generate at ``tokens_per_sec``. When that exceeds ``HOURS_PER_MONTH``
-    (a real month only has 720 hours), the hardware physically cannot
-    produce the whole workload in real time — but running it flat-out,
-    24/7, all month, *is* a real, payable scenario (the machine simply
-    isn't idle), so the cost is computed for ``effective_hours`` (capped at
-    ``HOURS_PER_MONTH``) rather than for the uncapped ``hours_needed``.
-    Capping avoids a straight-line extrapolation past hours that don't
-    exist in a month, which would otherwise read as a real bill for
-    something physically impossible (e.g. "costs more per month than the
-    hardware itself would cost to buy"). ``cost_per_million_tokens`` is
-    computed against the tokens actually produced in ``effective_hours``,
-    not the workload's full requested total, so the $/1M rate stays the
-    same real, hours-independent per-token figure either way — it's only
-    the "does this option fully replace hosted for this workload" question
-    that ``feasible`` still answers, and infeasible rows are still never
-    ranked as "cheapest" (see ``render_table``).
+    generate at ``tokens_per_sec`` on a single machine. When that exceeds
+    ``HOURS_PER_MONTH`` (a real month only has 720 hours), one machine
+    physically cannot deliver the workload within the month, so the row is
+    costed as a fleet of ``num_machines = ceil(hours_needed /
+    HOURS_PER_MONTH)`` machines sharing the load. That is what issue #52
+    asks for: a single card billed for more hours than a month contains
+    under-states what owning the hardware really costs.
+
+    The fleet's cost splits along the same fixed/variable line the
+    ``local_monthly_cost_*`` helpers already draw, and the two scale
+    differently:
+
+    * **Variable** costs — electricity while generating, per-hour GPU
+      rental — accrue per *machine-hour*, and the fleet's total is
+      ``hours_needed`` however it is divided between machines. Three
+      machines for 667 hours each costs the same electricity as one
+      machine for 2000 hours. So these are charged on the uncapped
+      ``hours_needed``, not on ``HOURS_PER_MONTH`` per machine.
+    * **Fixed** costs — hardware amortization, and a 24/7 server's idle
+      draw — are owed once per machine per month whether or not it is
+      busy, so these multiply by ``num_machines``.
+
+    Both are expressed by scaling the *fixed* input (``hardware_cost``,
+    ``idle_watts``) by ``num_machines`` and passing the fleet's total
+    machine-hours as the hours, which keeps a single implementation of each
+    cost model rather than a second one here.
+
+    Charging ``HOURS_PER_MONTH`` per machine instead would bill for the
+    fleet's spare capacity: ``ceil(2000 / 720) = 3`` machines can run 2160
+    machine-hours but only 2000 are needed, so a rented fleet would be
+    over-charged by 8% for hours nobody rents — and by nearly 2x at
+    ``hours_needed = 721``. That is the same species of misleading
+    comparison as the under-estimate, in the other direction.
+
+    ``cost_per_million_tokens`` is computed against the workload's full
+    monthly total, which the fleet does deliver. For the purely variable
+    modes (``existing``, ``rent``) it is therefore unchanged by machine
+    count. For ``own`` and ``always_on`` it is not flat, and the shape is
+    a sawtooth rather than a trend: between machine boundaries it *falls*,
+    because the same fixed cost is spread over more tokens, and it *jumps
+    up* each time another machine has to be bought. Crossing from 719 to
+    721 hours of work adds a whole second card's amortization to pay for
+    two extra hours of output. That step is the honest answer to the
+    issue — it is what makes buying hardware for a workload this size
+    look worse than the straight-line extrapolation suggested — and it is
+    the reason $/1M cannot be described as machine-count-invariant here.
+
+    ``feasible`` still answers the narrower question "can a *single*
+    machine keep up with this workload in real time", and infeasible rows
+    are still never ranked as "cheapest" (see ``render_table``).
     """
+    if workload.monthly_total_tokens <= 0:
+        # Stated here rather than left to cost_per_million_tokens further
+        # down. ceil(0 / 720) is 0 machines, and every fixed cost is
+        # multiplied by it, so a degenerate workload would otherwise
+        # produce a plausible-looking $0 row if that helper's contract
+        # ever softened. Depending on a downstream raise for correctness
+        # here is a coupling worth not having.
+        raise ValueError(
+            "monthly_total_tokens must be > 0 to cost a local option, got "
+            f"{workload.monthly_total_tokens!r}"
+        )
     hours_needed = hours_needed_for_workload(
         workload.monthly_total_tokens, tokens_per_sec
     )
     feasible = hours_needed <= HOURS_PER_MONTH
-    effective_hours = min(hours_needed, HOURS_PER_MONTH)
+    num_machines = math.ceil(hours_needed / HOURS_PER_MONTH)
     if mode == "own":
         monthly_cost = local_monthly_cost_owned(
-            hardware_cost,
+            hardware_cost * num_machines,
             lifetime_years,
             power_watts,
             electricity_rate_per_kwh,
-            effective_hours,
+            hours_needed,
         )
         name = name or "Local (buy hardware)"
     elif mode == "existing":
         monthly_cost = local_monthly_cost_existing_hardware(
-            power_watts, electricity_rate_per_kwh, effective_hours
+            power_watts, electricity_rate_per_kwh, hours_needed
         )
         name = name or "Local (already-on PC)"
     elif mode == "rent":
-        monthly_cost = local_monthly_cost_rented(hourly_rate, effective_hours)
+        monthly_cost = local_monthly_cost_rented(hourly_rate, hours_needed)
         name = name or "Local (rented cloud GPU)"
     elif mode == "always_on":
         monthly_cost = local_monthly_cost_always_on(
-            idle_watts, extra_watts, electricity_rate_per_kwh, effective_hours
+            idle_watts * num_machines,
+            extra_watts,
+            electricity_rate_per_kwh,
+            hours_needed,
         )
         name = name or "Local (24/7 server)"
     else:
         raise ValueError(f"Unknown local cost mode: {mode!r}")
-    tokens_produced = tokens_per_sec * 3600 * effective_hours
-    per_million = cost_per_million_tokens(monthly_cost, tokens_produced)
+    per_million = cost_per_million_tokens(monthly_cost, workload.monthly_total_tokens)
     if feasible:
-        notes = (
-            f"~{effective_hours:.1f} compute-hrs/month at {tokens_per_sec:.1f} tok/s"
-        )
+        notes = f"~{hours_needed:.1f} compute-hrs/month at {tokens_per_sec:.1f} tok/s"
     else:
-        coverage_pct = effective_hours / hours_needed * 100
+        coverage_pct = HOURS_PER_MONTH / hours_needed * 100
         parallel_needed = hours_needed / HOURS_PER_MONTH
+        machine_word = "machine" if num_machines == 1 else "machines"
         notes = (
-            f"running 24/7 all month at {tokens_per_sec:.1f} tok/s covers only "
-            f"~{coverage_pct:.0f}% of this workload's tokens — would need "
-            f"~{parallel_needed:.1f}x this throughput to fully replace hosted"
+            f"one machine running 24/7 all month at {tokens_per_sec:.1f} tok/s "
+            f"covers only ~{coverage_pct:.0f}% of this workload's tokens — costed "
+            f"as {num_machines} {machine_word} ({parallel_needed:.1f}x this "
+            f"throughput needed to fully replace hosted)"
         )
     return ComparisonRow(name, monthly_cost, per_million, notes, feasible=feasible)
 
@@ -916,18 +983,23 @@ def _validate_pricing_model(model_info: dict, full_key: str) -> None:
     positive — a zero or negative price would silently produce a
     nonsensical cost, and ``NaN``/``inf`` would poison every downstream
     figure.
+
+    The two failure modes get different messages because they are
+    different mistakes: a missing or non-numeric field is a malformed
+    file, whereas a present, numeric but non-positive rate is a plausible
+    value that happens to be invalid, and saying it "is missing" would
+    send the user looking for the wrong thing.
     """
     for field in ("input_per_million", "output_per_million"):
         value = model_info.get(field)
-        ok = (
-            isinstance(value, (int, float))
-            and not isinstance(value, bool)
-            and math.isfinite(value)
-            and value > 0
-        )
-        if not ok:
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
             raise ConfigError(
                 f"pricing model {full_key!r} is missing a numeric {field}"
+            )
+        if not math.isfinite(value) or value <= 0:
+            raise ConfigError(
+                f"{field} for model {full_key!r} must be a positive number, "
+                f"got {value!r}"
             )
 
 
@@ -1251,13 +1323,115 @@ NVIDIA_SMI_TIMEOUT_SECONDS = 5.0
 # anyway, so the extra samples are largely repeats of the same value.
 GPU_POLL_INTERVAL_SECONDS = 1.0
 
+# The detection question shown to the user. Named because several tests
+# match on it, and because it must stay in step with what detect_gpu
+# actually tries — it said "an NVIDIA GPU via nvidia-smi" while the WMI
+# fallback was being added underneath it.
+GPU_DETECTION_PROMPT = (
+    "Attempt to auto-detect your GPU (nvidia-smi, or WMI on Windows)?"
+)
+
+
+def detect_gpu_wmi() -> Optional[dict]:
+    """Detect any GPU on Windows via WMI (``Win32_VideoController``).
+
+    Works for AMD, Intel, and other vendors that ``nvidia-smi`` can't see.
+    Tries the ``wmi`` Python package first (if installed), then falls back
+    to the ``wmic`` command-line tool (deprecated but still present on most
+    Windows installs). Returns a dict with ``name``, ``vendor``, and
+    ``driver_version`` keys, or None if not on Windows or both methods fail.
+    """
+    if platform.system() != "Windows":
+        return None
+
+    # Preferred: the `wmi` package, if the user happens to have it installed.
+    try:
+        import wmi  # type: ignore
+
+        try:
+            conn = wmi.WMI()
+            for controller in conn.Win32_VideoController():
+                name = (controller.Name or "").strip()
+                if not name:
+                    continue
+                return {
+                    "name": name,
+                    "vendor": (controller.AdapterCompatibility or "").strip(),
+                    "driver_version": (controller.DriverVersion or "").strip(),
+                }
+        except Exception:  # noqa: BLE001 - best-effort, fall through to wmic
+            pass
+    except ImportError:
+        pass
+
+    # Fallback: `wmic` (deprecated but still shipped on most Windows boxes).
+    #
+    # /format:list, not /format:csv. wmic's CSV output does not quote fields
+    # containing commas, and AdapterCompatibility for an AMD card is
+    # literally "Advanced Micro Devices, Inc." — so a CSV row has more
+    # commas than columns and no split, in either direction, recovers the
+    # fields. The list format emits one unambiguous `Key=Value` per line.
+    try:
+        result = subprocess.run(
+            [
+                "wmic",
+                "path",
+                "win32_VideoController",
+                "get",
+                "Name,AdapterCompatibility,DriverVersion",
+                "/format:list",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    record: dict = {}
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            # Blank line ends a record. Return the first one that named a
+            # card; a machine with several adapters lists them all.
+            if record.get("Name"):
+                break
+            record = {}
+            continue
+        key, sep, value = line.partition("=")
+        if sep:
+            record[key.strip()] = value.strip()
+    if not record.get("Name"):
+        return None
+    return {
+        "name": record["Name"],
+        "vendor": record.get("AdapterCompatibility", ""),
+        "driver_version": record.get("DriverVersion", ""),
+    }
+
+
+def detect_gpu(runner: Callable = subprocess.run) -> Optional[dict]:
+    """Detect a GPU, preferring ``nvidia-smi`` and falling back to WMI.
+
+    Returns the richer ``nvidia-smi`` dict when an NVIDIA card is present,
+    otherwise a WMI-derived dict (name/vendor/driver_version) for any other
+    vendor on Windows. Returns None only when both detection paths fail, so
+    callers can still fall back to manual input.
+    """
+    nvidia = detect_nvidia_gpu(runner)
+    if nvidia is not None:
+        return nvidia
+    return detect_gpu_wmi()
+
 
 def detect_nvidia_gpu(runner: Callable = subprocess.run) -> Optional[dict]:
     """Detect an NVIDIA GPU via ``nvidia-smi`` (works on Windows and Linux).
 
     Returns a dict with name/memory/power info, or None if ``nvidia-smi``
     isn't installed, isn't on PATH, or returns no usable data. Callers must
-    treat None as "detection unavailable" and fall back to manual input.
+    treat None as "detection unavailable" and fall back to manual input
+    (or to ``detect_gpu_wmi`` via ``detect_gpu``).
     """
     try:
         result = runner(
@@ -2127,21 +2301,26 @@ def interactive_local_setup() -> tuple:
     benchmark_enabled = not skip_benchmark
 
     gpu_info = None
-    if gpu_detection_enabled and prompt_yes_no(
-        "Attempt to auto-detect an NVIDIA GPU via nvidia-smi?", default=True
-    ):
-        gpu_info = detect_nvidia_gpu()
+    if gpu_detection_enabled and prompt_yes_no(GPU_DETECTION_PROMPT, default=True):
+        gpu_info = detect_gpu()
         if gpu_info:
-            # A single power.draw sample is noisy (especially on a laptop
-            # GPU) — average a few quick readings for a steadier idle
-            # baseline instead of trusting the one snapshot from detection.
-            idle_avg = average_gpu_power_w()
-            if idle_avg is not None:
-                gpu_info["power_draw_w"] = idle_avg
+            # Only nvidia-smi reports live power. A WMI-detected card has no
+            # telemetry to average, and polling anyway would just spawn a
+            # binary that is not there — so key off whether this source
+            # reports power at all rather than assuming every GPU is NVIDIA.
+            if "power_draw_w" in gpu_info:
+                # A single power.draw sample is noisy (especially on a
+                # laptop GPU) — average a few quick readings for a steadier
+                # idle baseline instead of trusting the one snapshot from
+                # detection.
+                idle_avg = average_gpu_power_w()
+                if idle_avg is not None:
+                    gpu_info["power_draw_w"] = idle_avg
             print(f"  Detected: {format_gpu_summary(gpu_info)}")
         else:
             print(
-                "  No GPU detected (nvidia-smi not found or returned no data) — enter manually."
+                "  No GPU detected (nvidia-smi and WMI both returned nothing) "
+                "— enter manually."
             )
 
     tokens_per_sec = None
