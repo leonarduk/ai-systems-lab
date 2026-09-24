@@ -1,0 +1,14 @@
+# Repository-level configuration for the cicaid projects monorepo.
+#
+# [tool.profile-length] governs the maximum size of the LinkedIn avatar
+# profile document consumed as LLM context by the avatar MCP server.
+# Enforced by scripts/check_profile_length.py (wired into python-ci.yml).
+# Run locally with: python scripts/check_profile_length.py
+
+[tool.profile-length]
+# Maximum number of whitespace-separated words permitted in profile.md.
+max_words = 4000
+# Maximum number of UTF-8 bytes permitted in profile.md.
+max_bytes = 25000
+# Path to the profile document, relative to the repository root.
+path = "projects/08-linkedin-avatar/knowledge/profile.md"

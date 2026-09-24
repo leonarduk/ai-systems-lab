@@ -15,7 +15,11 @@ Design goals:
   * Best-effort Windows/NVIDIA GPU detection via ``nvidia-smi`` and an
     optional local-endpoint throughput benchmark (Ollama or an
     OpenAI-compatible ``/v1/chat/completions`` server). Both degrade
-    gracefully to manual input if unavailable.
+    gracefully to manual input if unavailable. The interactive flow asks a
+    single combined prompt first — ``Skip benchmark (GPU detection +
+    throughput)? [y/N]:`` (default ``False``) — where ``y`` skips both GPU
+    detection and benchmarking, while ``n`` or Enter falls through to the
+    original two prompts (GPU detection, then benchmark).
 
 Usage:
     python llm_cost_comparison.py                # interactive
@@ -52,6 +56,15 @@ try:
     VERSION = _pkg_version("llm-cost-comparison")
 except PackageNotFoundError:
     VERSION = "0.0.0+unknown"
+
+# Sent when identifying this script honestly to a public API. Derived from
+# VERSION so it cannot drift from the release: a User-Agent that misstates
+# its version is worse than none, because an operator diagnosing a client
+# looks up the wrong code. Two endpoints deliberately send "Mozilla/5.0"
+# instead (see fetch_deepseek_pricing and the Yahoo fallback in
+# fetch_fx_rate) — those scrape pages meant for browsers and are refused
+# otherwise.
+USER_AGENT = f"llm-cost-comparison/{VERSION}"
 
 DEFAULT_PRICING_PATH = Path(__file__).parent / "pricing.json"
 DEFAULT_GPU_DEFAULTS_PATH = Path(__file__).parent / "gpu_power_defaults.json"
@@ -92,13 +105,56 @@ def load_pricing(
     if try_refresh and path == DEFAULT_PRICING_PATH:
         fetch_deepseek_pricing(path)
         fetch_bedrock_pricing(path)
+        fetch_claude_pricing(path)
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
     except FileNotFoundError as exc:
         raise ConfigError(f"pricing file not found: {path}") from exc
+    except OSError as exc:
+        # A directory in place of the file, a permissions problem, a dead
+        # symlink. The file exists in some sense but cannot be read, which
+        # is a configuration mistake, not a bug to show a traceback for.
+        raise ConfigError(f"pricing file {path} could not be read: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        # Saved as UTF-16 or Latin-1. Not an OSError, and not a
+        # JSONDecodeError either — both are ValueError subclasses but
+        # neither catches the other, so without this the one malformed-file
+        # case the issue is about would still escape as a raw traceback.
+        raise ConfigError(f"pricing file {path} is not valid UTF-8: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise ConfigError(f"pricing file {path} is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError(
+            f"pricing file {path} must contain a JSON object at the top level, "
+            f"got {type(data).__name__}"
+        )
+    # `providers` is load-bearing: iter_models reads pricing["providers"],
+    # so without it every hosted row silently disappears and the user gets
+    # a "comparison" against nothing. That is worth refusing outright.
+    if "providers" not in data:
+        raise ConfigError(
+            f"pricing file {path} is missing the required top-level key " "'providers'"
+        )
+    if not isinstance(data["providers"], dict):
+        raise ConfigError(
+            f"pricing file {path} has a 'providers' that is not an object, "
+            f"got {type(data['providers']).__name__}"
+        )
+    # `as_of` is not. The summary line reads it as
+    # pricing.get("as_of", "unknown date"), a deliberate accommodation, and
+    # a date is a staleness signal rather than something the arithmetic
+    # needs. Refusing to run over a missing one would block a hand-written
+    # minimal pricing file for a metadata string — but going quiet about
+    # it would hide that the user cannot tell how old these prices are, so
+    # it warns.
+    if "as_of" not in data:
+        print(
+            f"Warning: pricing file {path} has no 'as_of' date — "
+            "there is no way to tell how stale these prices are.",
+            file=sys.stderr,
+        )
+    return data
 
 
 def iter_models(pricing: dict):
@@ -212,6 +268,153 @@ def _extract_price(text: str, pattern: str) -> Optional[float]:
         except ValueError:
             return None
     return None
+
+
+CLAUDE_PRICING_URL = "https://docs.anthropic.com/en/docs/about-claude/pricing"
+
+
+# Loosest bounds that still catch a mis-parse. Real per-million rates have
+# stayed inside this range across every provider in pricing.json.
+MIN_PLAUSIBLE_PRICE_PER_MILLION = 0.01
+MAX_PLAUSIBLE_PRICE_PER_MILLION = 1000.0
+
+
+def _plausible_price_pair(input_price: float, output_price: float) -> bool:
+    """Sanity-check a scraped (input, output) per-million-token pair.
+
+    Output has always cost strictly more than input for these models, so
+    an equal or inverted pair means the regex matched the wrong number
+    rather than that a price moved.
+    """
+    for price in (input_price, output_price):
+        if not (
+            MIN_PLAUSIBLE_PRICE_PER_MILLION <= price <= MAX_PLAUSIBLE_PRICE_PER_MILLION
+        ):
+            return False
+    return output_price > input_price
+
+
+def fetch_claude_pricing(
+    path: Path = DEFAULT_PRICING_PATH, timeout: float = 10.0
+) -> bool:
+    """Fetch Claude (Anthropic) pricing from the public docs page and update ``path``.
+
+    Anthropic doesn't publish a machine-readable pricing API, so this scrapes
+    the public pricing docs page the same way ``fetch_deepseek_pricing``
+    scrapes DeepSeek's docs. Returns ``True`` if the file was updated,
+    ``False`` on any failure (network, page structure change, no prices
+    parsed) — in which case existing Claude entries are left untouched.
+
+    Only the Claude section is touched; other providers (DeepSeek, Bedrock,
+    etc.) are preserved as-is.
+    """
+    try:
+        req = urllib.request.Request(
+            CLAUDE_PRICING_URL,
+            headers={"User-Agent": "Mozilla/5.0"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            text = resp.read().decode("utf-8")
+    except Exception:
+        return False
+
+    # The pricing page renders each model's input and output rates in the
+    # same row, so the output pattern skips the first dollar amount (input)
+    # and captures the second (output). Model names are matched loosely
+    # (case-insensitive, allowing for "Claude" prefixes and version suffixes)
+    # so a minor page reflow doesn't break the whole fetch.
+    opus_input = _extract_price(
+        text, r"claude\s*opus[^$]*?\$([\d.]+)\s*(?:/|per)?\s*(?:million|MTok|M tokens)"
+    )
+    opus_output = _extract_price(
+        text,
+        r"claude\s*opus[^$]*?\$[\d.]+\s*(?:/|per)?\s*(?:million|MTok|M tokens)"
+        r"[^$]*?\$([\d.]+)",
+    )
+    sonnet_input = _extract_price(
+        text,
+        r"claude\s*sonnet[^$]*?\$([\d.]+)\s*(?:/|per)?\s*(?:million|MTok|M tokens)",
+    )
+    sonnet_output = _extract_price(
+        text,
+        r"claude\s*sonnet[^$]*?\$[\d.]+\s*(?:/|per)?\s*(?:million|MTok|M tokens)"
+        r"[^$]*?\$([\d.]+)",
+    )
+    haiku_input = _extract_price(
+        text,
+        r"claude\s*haiku[^$]*?\$([\d.]+)\s*(?:/|per)?\s*(?:million|MTok|M tokens)",
+    )
+    haiku_output = _extract_price(
+        text,
+        r"claude\s*haiku[^$]*?\$[\d.]+\s*(?:/|per)?\s*(?:million|MTok|M tokens)"
+        r"[^$]*?\$([\d.]+)",
+    )
+
+    if None in (opus_input, opus_output, sonnet_input, sonnet_output):
+        return False
+    # A loose regex over reflowing HTML can pair the right model with the
+    # wrong number — a seat price, a discount, or the next model's input
+    # rate. Every Claude model has cost more per output token than per
+    # input token, by a wide margin, so a pair that fails that is a
+    # mis-parse rather than a price change, and writing it would poison
+    # every figure the tool prints.
+    for label, in_price, out_price in (
+        ("opus", opus_input, opus_output),
+        ("sonnet", sonnet_input, sonnet_output),
+        ("haiku", haiku_input, haiku_output),
+    ):
+        if in_price is None or out_price is None:
+            continue
+        if not _plausible_price_pair(in_price, out_price):
+            print(
+                f"Warning: implausible scraped {label} pricing "
+                f"(${in_price}/${out_price} per Mtok) — leaving "
+                f"{path} unchanged.",
+                file=sys.stderr,
+            )
+            return False
+
+    # Read existing file directly (not via load_pricing, to avoid recursion).
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            pricing = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pricing = {}
+
+    claude_models = {
+        "opus-5": {
+            "display_name": "Claude Opus 5",
+            "input_per_million": opus_input,
+            "output_per_million": opus_output,
+        },
+        "sonnet-5": {
+            "display_name": "Claude Sonnet 5",
+            "input_per_million": sonnet_input,
+            "output_per_million": sonnet_output,
+        },
+    }
+    if haiku_input is not None and haiku_output is not None:
+        claude_models["haiku-4.5"] = {
+            "display_name": "Claude Haiku 4.5",
+            "input_per_million": haiku_input,
+            "output_per_million": haiku_output,
+        }
+
+    # Merge, do not replace. Assigning a fresh "models" dict drops every
+    # model the scrape did not produce — the shipped file also carries
+    # sonnet-5-2026-09, and a user may have added their own entries. The
+    # DeepSeek fetcher gets away with replacing because its four keys are
+    # exactly what it writes; that is not true here.
+    provider = pricing.setdefault("providers", {}).setdefault("claude", {})
+    provider["display_name"] = "Anthropic Claude"
+    provider.setdefault("models", {}).update(claude_models)
+    pricing["as_of"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    pricing["source_claude"] = CLAUDE_PRICING_URL
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(pricing, f, indent=2)
+    return True
 
 
 BEDROCK_PRICING_URL = (
@@ -727,6 +930,32 @@ def _validate_pricing_model(model_info: dict, full_key: str) -> None:
             )
 
 
+def warn_unknown_model_keys(pricing: dict, selected: Optional[set]) -> list:
+    """Warn about selected keys that match no model, and return them.
+
+    A typo'd or stale ``"provider/model"`` key is simply absent from the
+    comparison, which looks identical to the model being expensive enough
+    to rank last — nothing tells the user their selection was partly
+    ignored.
+
+    Called once per run rather than from ``build_hosted_rows``, which both
+    callers invoke inside a per-scenario loop: a config naming three
+    presets would otherwise repeat the same warning three times. Keeping
+    it out of the row builder also leaves that function free of I/O.
+    """
+    if not selected:
+        return []
+    known = {f"{p}/{m}" for p, m, _info in iter_models(pricing)}
+    unknown = sorted(selected - known)
+    for key in unknown:
+        print(
+            f"Warning: unknown model key {key!r} — ignoring. "
+            f"Known keys: {', '.join(sorted(known)) or '(none)'}.",
+            file=sys.stderr,
+        )
+    return unknown
+
+
 def build_hosted_rows(
     workload: Workload, pricing: dict, selected: Optional[set] = None
 ) -> list:
@@ -1011,6 +1240,17 @@ def _safe_float(value: str) -> Optional[float]:
         return None
 
 
+# How long each nvidia-smi invocation is given before it is abandoned.
+NVIDIA_SMI_TIMEOUT_SECONDS = 5.0
+
+# Gap between power samples taken while a benchmark runs. One second, not
+# a half, because each sample spawns an nvidia-smi process: at 0.5s the
+# polling is a measurable share of the load it is trying to measure, and
+# the driver's own power.draw figure refreshes on roughly this timescale
+# anyway, so the extra samples are largely repeats of the same value.
+GPU_POLL_INTERVAL_SECONDS = 1.0
+
+
 def detect_nvidia_gpu(runner: Callable = subprocess.run) -> Optional[dict]:
     """Detect an NVIDIA GPU via ``nvidia-smi`` (works on Windows and Linux).
 
@@ -1027,7 +1267,7 @@ def detect_nvidia_gpu(runner: Callable = subprocess.run) -> Optional[dict]:
             ],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=NVIDIA_SMI_TIMEOUT_SECONDS,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return None
@@ -1069,7 +1309,9 @@ def average_gpu_power_w(
 
 
 def measure_gpu_power_during(
-    func: Callable, runner: Callable = subprocess.run, poll_interval: float = 0.5
+    func: Callable,
+    runner: Callable = subprocess.run,
+    poll_interval: float = GPU_POLL_INTERVAL_SECONDS,
 ) -> tuple:
     """Run ``func()`` while polling GPU power draw; return ``(result, avg_watts)``.
 
@@ -1081,6 +1323,11 @@ def measure_gpu_power_during(
     load — which is what a monthly electricity estimate actually needs,
     since real usage is however long generation actually runs, not one
     instantaneous spike.
+
+    The loop samples before it waits, so a benchmark shorter than
+    ``poll_interval`` still yields one reading rather than none. Widening
+    the interval therefore costs resolution on long runs, never the
+    measurement itself.
     """
     readings = []
     stop = threading.Event()
@@ -1098,7 +1345,12 @@ def measure_gpu_power_during(
         result = func()
     finally:
         stop.set()
-        thread.join(timeout=poll_interval * 4)
+        # stop.wait returns as soon as the event is set, so the only thing
+        # the join can be waiting on is an nvidia-smi call already in
+        # flight. Bound it by that timeout rather than by a multiple of
+        # poll_interval, which has nothing to do with how long a hung
+        # nvidia-smi takes to give up.
+        thread.join(timeout=NVIDIA_SMI_TIMEOUT_SECONDS + 1.0)
     avg_watts = sum(readings) / len(readings) if readings else None
     return result, avg_watts
 
@@ -1118,7 +1370,12 @@ def fetch_octopus_agile_rate(
     entry — this is a convenience lookup, not a requirement.
     """
     try:
-        with urllib.request.urlopen(OCTOPUS_PRODUCTS_URL, timeout=timeout) as resp:
+        products_req = urllib.request.Request(
+            OCTOPUS_PRODUCTS_URL,
+            headers={"User-Agent": USER_AGENT},
+            method="GET",
+        )
+        with urllib.request.urlopen(products_req, timeout=timeout) as resp:
             products = json.loads(resp.read()).get("results", [])
         agile_codes = [
             p["code"] for p in products if "AGILE" in p.get("code", "").upper()
@@ -1131,7 +1388,12 @@ def fetch_octopus_agile_rate(
             f"https://api.octopus.energy/v1/products/{product_code}/"
             f"electricity-tariffs/{tariff_code}/standard-unit-rates/"
         )
-        with urllib.request.urlopen(rates_url, timeout=timeout) as resp:
+        rates_req = urllib.request.Request(
+            rates_url,
+            headers={"User-Agent": USER_AGENT},
+            method="GET",
+        )
+        with urllib.request.urlopen(rates_req, timeout=timeout) as resp:
             rates = json.loads(resp.read()).get("results", [])
         now = datetime.now(timezone.utc)
         for rate in rates:
@@ -1576,6 +1838,35 @@ def benchmark_ollama(base_url: str, model: str, num_predict: int = 200) -> float
     return eval_count / (eval_duration_ns / 1e9)
 
 
+LOOPBACK_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
+
+
+def wall_clock_benchmark_caveat(base_url: str) -> Optional[str]:
+    """Caveat to show beside an OpenAI-compatible benchmark result, if any.
+
+    ``benchmark_openai_compatible`` times the whole round-trip, so its
+    tokens/sec is not generation speed the way ``benchmark_ollama``'s
+    ``eval_duration`` figure is. How much that matters depends entirely on
+    where the endpoint is, which is the distinction the README already
+    draws: on loopback there is no real network hop and wall-clock is a
+    fair proxy, so a warning there is noise that trains the user to ignore
+    the one that matters. Returns None in that case.
+    """
+    try:
+        hostname = urllib.parse.urlsplit(base_url).hostname
+    except ValueError:
+        hostname = None
+    # urlsplit already lower-cases the host, so no fold is needed here;
+    # test_no_wall_clock_caveat_for_a_loopback_endpoint pins that.
+    if hostname in LOOPBACK_HOSTNAMES:
+        return None
+    return (
+        "Note: this is end-to-end wall-clock time, so it includes network "
+        "latency to the endpoint — not model inference speed alone, and not "
+        "directly comparable to a local model's generation-only figure."
+    )
+
+
 def benchmark_openai_compatible(
     base_url: str, model: str, api_key: Optional[str] = None, max_tokens: int = 200
 ) -> float:
@@ -1663,6 +1954,11 @@ def prompt_float(
     values that would blow up downstream math (e.g. a tokens/sec or
     lifetime-years of 0 raises ``ValueError`` deep in the cost calculation,
     discarding every answer the user already gave).
+
+    Raises ``EOFError`` if stdin is exhausted (piped input running out,
+    closed terminal, etc.) rather than silently returning the default —
+    callers must decide how to terminate cleanly, since a default here
+    would let an enclosing ``while True`` loop spin forever.
     """
     suffix = f" [{default}]" if default is not None else ""
     while True:
@@ -1681,6 +1977,10 @@ def prompt_float(
 
 
 def prompt_choice(prompt: str, choices: list, default: Optional[str] = None) -> str:
+    """Prompt for one of ``choices``, re-asking on unrecognized input.
+
+    Raises ``EOFError`` if stdin is exhausted — see ``prompt_float``.
+    """
     choice_str = "/".join(choices)
     suffix = f" [{default}]" if default else ""
     # Normalize choices for case-insensitive comparison while preserving the
@@ -1711,6 +2011,10 @@ def prompt_choice(prompt: str, choices: list, default: Optional[str] = None) -> 
 
 
 def prompt_yes_no(prompt: str, default: bool = True) -> bool:
+    """Prompt for a yes/no answer.
+
+    Raises ``EOFError`` if stdin is exhausted — see ``prompt_float``.
+    """
     suffix = " [Y/n]" if default else " [y/N]"
     raw = input(f"{prompt}{suffix}: ").strip().lower()
     if not raw:
@@ -1781,10 +2085,26 @@ def interactive_local_setup() -> tuple:
     ``save_last_run()`` so the next run can reuse them as defaults.
     """
     print("\n== Local setup ==")
+    # There is no "skip local setup entirely" concept in this tool: comparing
+    # local vs hosted costs (this script's whole purpose) always needs local
+    # setup input, so there is nothing to opt into and no gate to check here.
+    # Traced the full call chain to confirm: interactive_local_setup() has
+    # exactly one caller, run_interactive() (called unconditionally from
+    # main() whenever --non-interactive isn't passed), which itself calls
+    # this function unconditionally as one of the three fixed steps of the
+    # interactive flow (workload, then local setup, then provider
+    # selection) — see run_interactive()'s own docstring. So the combined
+    # prompt below is meant to be the first thing every interactive user
+    # sees for local configuration, exactly matching the pre-PR #222
+    # behavior where the GPU detection prompt was also unconditional and
+    # first. If a future caller ever wants an optional "skip local setup"
+    # path, that caller must add its own gate before calling this function.
+    #
     # A single combined prompt replaces the previous two separate yes/no
     # questions (GPU detection, then throughput benchmark). Answering "y"
     # skips both steps; "n" or Enter falls through to the original
-    # two-question flow so each can still be controlled independently.
+    # two-question flow so each can still be controlled independently. The
+    # two original prompts below run only when ``skip_benchmark`` is False.
     skip_benchmark = prompt_yes_no(
         "Skip benchmark (GPU detection + throughput)?", default=False
     )
@@ -1842,6 +2162,12 @@ def interactive_local_setup() -> tuple:
                     lambda: benchmark_openai_compatible(base_url, model)
                 )
             print(f"  Measured throughput: {tokens_per_sec:.1f} tokens/sec")
+            if backend != "ollama":
+                # After the number, not before it: a caveat printed ahead of
+                # the figure it qualifies reads as unrelated preamble.
+                caveat = wall_clock_benchmark_caveat(base_url)
+                if caveat:
+                    print(f"  {caveat}")
         except (
             Exception
         ) as exc:  # noqa: BLE001 - best-effort, any failure just falls back
@@ -2229,7 +2555,17 @@ def run_interactive(use_defaults: bool = False) -> int:
             defaults = saved
         else:
             print(f"Saved settings from last run found ({saved_at}).")
-            if prompt_yes_no("Use them as defaults?", default=True):
+            try:
+                use_saved = prompt_yes_no("Use them as defaults?", default=True)
+            except EOFError:
+                # stdin exhausted — fall back to the saved settings rather
+                # than hanging or crashing, and say so plainly.
+                print(
+                    "  stdin closed before an answer was given — using saved "
+                    "settings as defaults."
+                )
+                use_saved = True
+            if use_saved:
                 defaults = saved
         print()
 
@@ -2345,11 +2681,24 @@ def run_interactive(use_defaults: bool = False) -> int:
             print("  Providers: none (local only)")
         print()
     else:
-        scenarios = interactive_workload()
-        local_row_builder, display_currency, usd_per_gbp, tokens_per_sec, settings = (
-            interactive_local_setup()
-        )
-        selected = interactive_provider_selection(pricing)
+        try:
+            scenarios = interactive_workload()
+            (
+                local_row_builder,
+                display_currency,
+                usd_per_gbp,
+                tokens_per_sec,
+                settings,
+            ) = interactive_local_setup()
+            selected = interactive_provider_selection(pricing)
+        except EOFError:
+            print(
+                "stdin closed before setup finished — cannot continue "
+                "interactively. Re-run with --non-interactive --config, or "
+                "provide input on stdin.",
+                file=sys.stderr,
+            )
+            return 1
         settings["selected_models"] = sorted(selected) if selected is not None else None
         if len(scenarios) == len(WORKLOAD_PRESETS) and [k for k, _, _ in scenarios] == [
             p.key for p in WORKLOAD_PRESETS
@@ -2367,6 +2716,7 @@ def run_interactive(use_defaults: bool = False) -> int:
                 settings["workload_preset"] = key
 
     multiple = len(scenarios) > 1
+    warn_unknown_model_keys(pricing, selected)
     scenario_labels_rows = []
     scaled_scenarios = []
     for _key, label, workload in scenarios:
@@ -2398,34 +2748,51 @@ def run_interactive(use_defaults: bool = False) -> int:
         print(f"\n== {label} ==")
         print(render_table(rows, currency=display_currency))
 
-    if prompt_yes_no("\nExport results to a file?", default=False):
-        fmt = prompt_choice("Format", ["csv", "json"], default="csv")
-        default_name = f"cost_comparison.{fmt}"
-        out_path = Path(
-            input(f"Output path [{default_name}]: ").strip() or default_name
-        )
-        if multiple:
-            if fmt == "csv":
-                export_combined_csv(
-                    scenario_labels_rows, out_path, currency=display_currency
-                )
+    try:
+        want_export = prompt_yes_no("\nExport results to a file?", default=False)
+    except EOFError:
+        print("\nstdin closed — skipping export prompt.")
+        want_export = False
+    if want_export:
+        try:
+            fmt = prompt_choice("Format", ["csv", "json"], default="csv")
+            default_name = f"cost_comparison.{fmt}"
+            out_path = Path(
+                input(f"Output path [{default_name}]: ").strip() or default_name
+            )
+        except EOFError:
+            print("stdin closed — skipping export.")
+            fmt = None
+            out_path = None
+        if fmt is not None and out_path is not None:
+            if multiple:
+                if fmt == "csv":
+                    export_combined_csv(
+                        scenario_labels_rows, out_path, currency=display_currency
+                    )
+                else:
+                    export_combined_json(
+                        scenario_labels_rows, out_path, currency=display_currency
+                    )
             else:
-                export_combined_json(
-                    scenario_labels_rows, out_path, currency=display_currency
-                )
-        else:
-            _label, rows = scenario_labels_rows[0]
-            if fmt == "csv":
-                export_csv(rows, out_path, currency=display_currency)
-            else:
-                export_json(rows, out_path, currency=display_currency)
-        print(f"Wrote {out_path}")
+                _label, rows = scenario_labels_rows[0]
+                if fmt == "csv":
+                    export_csv(rows, out_path, currency=display_currency)
+                else:
+                    export_json(rows, out_path, currency=display_currency)
+            print(f"Wrote {out_path}")
 
-    if defaults is None and prompt_yes_no(
-        "\nSave these settings as defaults for the next run?", default=False
-    ):
-        save_last_run(settings)
-        print(f"Saved {DEFAULT_LAST_RUN_PATH}")
+    if defaults is None:
+        try:
+            want_save = prompt_yes_no(
+                "\nSave these settings as defaults for the next run?", default=False
+            )
+        except EOFError:
+            print("\nstdin closed — skipping save prompt.")
+            want_save = False
+        if want_save:
+            save_last_run(settings)
+            print(f"Saved {DEFAULT_LAST_RUN_PATH}")
 
     return 0
 
@@ -2503,6 +2870,14 @@ def _resolve_workload_scenarios(config: dict) -> list:
     Returns a list of ``(key, label, Workload)`` tuples, mirroring
     ``interactive_workload``'s return shape so both paths share the same
     downstream printing/export logic.
+
+    Contract: the third element of every returned tuple is always a
+    ``Workload`` instance (never a ``dict`` or other mapping), so callers
+    may safely access ``requests_per_day`` / ``avg_input_tokens`` /
+    ``avg_output_tokens`` as attributes. Both branches below construct a
+    ``Workload`` explicitly (``Workload(**config["workload"])`` for the
+    explicit-workload shape, ``preset.to_workload()`` for presets), so this
+    holds for every code path.
     """
     provided = [
         k for k in ("workload", "workload_preset", "workload_presets") if k in config
@@ -2586,6 +2961,16 @@ def run_non_interactive(
     ``pricing_file``, if relative, is resolved against ``config_path``'s
     directory (not the process's working directory) so the example config
     works regardless of where the script is invoked from.
+
+    Optional top-level keys:
+      * ``"currency"`` — three-letter display currency code (default
+        ``"USD"``). ``"USD"`` and ``"GBP"`` print their symbol; any other
+        valid code prints verbatim (``"EUR 12.34"``).
+      * ``"static_fx_rate"`` — how many units of ``currency`` one US dollar
+        buys, so ``0.79`` shows a $100 figure as £79. Required when
+        ``currency != "USD"``; a static rate avoids a live FX call (no
+        network, no latency, no failure point). All cost math stays in USD
+        internally and rows are converted once, at display time.
     """
     try:
         with open(config_path, "r", encoding="utf-8") as f:
@@ -2613,21 +2998,49 @@ def run_non_interactive(
     pricing = load_pricing(pricing_path)
     selected = set(config["selected_models"]) if "selected_models" in config else None
 
+    display_currency = config.get("currency", "USD")
+    if (
+        not isinstance(display_currency, str)
+        or len(display_currency) != 3
+        or not display_currency.isalpha()
+    ):
+        # A three-letter ISO 4217 code, not any non-empty string. render_table
+        # prints an unknown code verbatim as its own symbol ("EUR 12.34"),
+        # which reads fine for a real code and badly for "pounds" or "£".
+        raise ConfigError(
+            "currency must be a three-letter currency code (e.g. 'USD', "
+            f"'GBP'), got {display_currency!r}"
+        )
+    display_currency = display_currency.upper()
+    static_fx_rate = config.get("static_fx_rate")
+    if display_currency != "USD":
+        if (
+            not isinstance(static_fx_rate, (int, float))
+            or isinstance(static_fx_rate, bool)
+            or static_fx_rate <= 0
+        ):
+            raise ConfigError(
+                "static_fx_rate must be a positive number when currency is not "
+                f"'USD' (got {static_fx_rate!r})"
+            )
+
     local_cfg = config["local"]
     _require_keys(local_cfg, ["mode", "tokens_per_sec"], "local")
     tokens_per_sec = local_cfg["tokens_per_sec"]
-    # Mirror the interactive prompt's `minimum=0.001` guard: a zero or
-    # negative throughput would silently propagate into the cost math
-    # (hours_needed_for_workload raises ValueError deep inside, or worse,
-    # produces nonsensical figures), so reject it here with a clear,
-    # field-named config error instead.
+    # Mirror the interactive prompt's `minimum=0.001` guard exactly: a zero,
+    # negative, or vanishingly small throughput would silently propagate into
+    # the cost math (hours_needed_for_workload raises ValueError deep inside,
+    # or worse, produces nonsensical figures), so reject it here with a clear,
+    # field-named config error instead. The threshold is deliberately the same
+    # as the interactive prompt's so switching between modes doesn't change
+    # which values are accepted.
     if (
         not isinstance(tokens_per_sec, (int, float))
         or isinstance(tokens_per_sec, bool)
-        or tokens_per_sec <= 0
+        or tokens_per_sec < 0.001
     ):
         raise ConfigError(
-            f"local.tokens_per_sec must be a positive number, got {tokens_per_sec!r}"
+            f"local.tokens_per_sec must be a number >= 0.001, got {tokens_per_sec!r}"
         )
     mode = local_cfg["mode"]
     if mode == "own":
@@ -2698,9 +3111,21 @@ def run_non_interactive(
         )
 
     multiple = len(scenarios) > 1
+    warn_unknown_model_keys(pricing, selected)
     scenario_labels_rows = []
     scaled_scenarios = []
     for key, label, workload in scenarios:
+        # Defensive check: ``_resolve_workload_scenarios`` is documented to
+        # always return ``Workload`` objects, but if a future refactor ever
+        # returned a mapping (or anything else) here, the downstream
+        # attribute access would raise an opaque ``AttributeError`` instead
+        # of a clear, user-facing ``ConfigError``. Fail loudly and clearly
+        # rather than silently misbehaving.
+        if not isinstance(workload, Workload):
+            raise ConfigError(
+                f"internal error: workload scenario {key!r} is not a Workload "
+                f"object (got {type(workload).__name__})"
+            )
         effective_workload, feasible, coverage_pct = scale_workload_to_local_capacity(
             workload, tokens_per_sec
         )
@@ -2709,6 +3134,15 @@ def run_non_interactive(
         rows = [build_local(effective_workload)] + build_hosted_rows(
             effective_workload, pricing, selected
         )
+        if display_currency != "USD":
+            # static_fx_rate is how many units of display_currency one USD
+            # buys (0.79 => $100 shows as £79), which is how anyone reading
+            # "USD->GBP rate" would write it. convert_rows_currency takes
+            # the opposite — USD per unit — because the interactive path
+            # feeds it a GBP->USD quote straight from the FX lookup. Hence
+            # the reciprocal. Passing the rate through unconverted made
+            # $300 render as £375 instead of £237.
+            rows = convert_rows_currency(rows, 1.0 / static_fx_rate)
         scenario_labels_rows.append((label, rows))
 
     if scaled_scenarios:
@@ -2724,24 +3158,28 @@ def run_non_interactive(
     if export_fmt and export_path:
         if multiple:
             if export_fmt == "csv":
-                export_combined_csv(scenario_labels_rows, export_path)
+                export_combined_csv(
+                    scenario_labels_rows, export_path, currency=display_currency
+                )
             else:
-                export_combined_json(scenario_labels_rows, export_path)
+                export_combined_json(
+                    scenario_labels_rows, export_path, currency=display_currency
+                )
         else:
             _label, rows = scenario_labels_rows[0]
             if export_fmt == "csv":
-                export_csv(rows, export_path)
+                export_csv(rows, export_path, currency=display_currency)
             else:
-                export_json(rows, export_path)
+                export_json(rows, export_path, currency=display_currency)
         print(f"Wrote {export_path}")
 
     if multiple:
         print("\n== Results (all scenarios) ==")
-        print(render_combined_table(scenario_labels_rows))
+        print(render_combined_table(scenario_labels_rows, currency=display_currency))
     else:
         label, rows = scenario_labels_rows[0]
         print(f"\n== {label} ==")
-        print(render_table(rows))
+        print(render_table(rows, currency=display_currency))
     return 0
 
 
@@ -2760,7 +3198,13 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument(
         "--config",
         type=Path,
-        help="JSON config file for --non-interactive mode (see run_non_interactive docstring).",
+        help=(
+            "JSON config file for --non-interactive mode (see run_non_interactive "
+            "docstring). Optional top-level keys: 'currency' (three-letter code, "
+            "default 'USD') and 'static_fx_rate' (units of that currency per USD, "
+            "e.g. 0.79 for GBP; required when currency != 'USD', and avoids a live "
+            "FX API call)."
+        ),
     )
     parser.add_argument(
         "--export", choices=["csv", "json"], help="Export results in this format."
@@ -2781,7 +3225,8 @@ def main(argv: Optional[list] = None) -> int:
     if args.update_pricing:
         ok_ds = fetch_deepseek_pricing()
         ok_bd = fetch_bedrock_pricing()
-        if ok_ds or ok_bd:
+        ok_cl = fetch_claude_pricing()
+        if ok_ds or ok_bd or ok_cl:
             print(f"Updated {DEFAULT_PRICING_PATH}")
             return 0
         print(
