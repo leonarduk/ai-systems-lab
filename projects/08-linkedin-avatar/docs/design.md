@@ -132,7 +132,10 @@ So: the PDF stays local and gitignored. `build_profile.py` extracts its text wit
 contact blocks by pattern (email, phone, postal address, LinkedIn URL), normalises the section
 headers, and writes `knowledge/profile.md`. That markdown file is reviewed by a human and *then*
 committed. The script also has a `--check` mode that re-runs redaction over the committed file and
-exits non-zero if anything that looks like a contact detail survived, so CI can enforce it.
+exits non-zero if anything that looks like a contact detail survived, so CI can enforce it. A
+`--dry-run` mode runs the same pipeline and prints a per-file summary of what would be redacted
+(count, types, snippets) without writing anything — useful for previewing a PDF before committing,
+and combinable with `--check` so a preview still fails the build on leaks.
 
 Redaction is deliberately conservative — if a pattern is ambiguous, redact it. A missing detail
 costs a slightly worse answer; a leaked detail costs a permanent public record.
