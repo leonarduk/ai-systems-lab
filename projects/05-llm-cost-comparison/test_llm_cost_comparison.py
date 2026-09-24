@@ -2623,11 +2623,24 @@ def test_run_non_interactive_rejects_nonpositive_workload_field(
     }
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
-    expected = "non-negative" if field == "avg_output_tokens" else "positive"
-    with pytest.raises(
-        m.ConfigError, match=rf"workload\.{field} must be a {expected} number"
-    ):
-        m.run_non_interactive(config_path, export_fmt=None, export_path=None)
+    if bad_value < 0:
+        # Negative values are rejected earlier, by the per-field type/range
+        # check in _resolve_workload_scenarios, which uses the unprefixed
+        # "{field} must be ..." wording (see
+        # test_run_non_interactive_rejects_bad_workload_field).
+        with pytest.raises(
+            m.ConfigError,
+            match=rf"^{field} must be a non-negative number, got {bad_value!r}$",
+        ):
+            m.run_non_interactive(config_path, export_fmt=None, export_path=None)
+    else:
+        # Zero passes the non-negative check above but is still rejected by
+        # _validate_workload's stricter positivity rule for these two
+        # fields, which keeps the "workload."-prefixed wording.
+        with pytest.raises(
+            m.ConfigError, match=rf"workload\.{field} must be a positive number"
+        ):
+            m.run_non_interactive(config_path, export_fmt=None, export_path=None)
 
 
 def test_all_shipped_presets_pass_validation():
