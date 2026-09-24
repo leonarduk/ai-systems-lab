@@ -63,3 +63,6 @@ linkedin.pdf
 # ...but still ignore real Python cruft that lands inside it
 projects/08-linkedin-avatar/build/__pycache__/
 projects/08-linkedin-avatar/build/**/*.py[cod]
+
+# Claude Code Remote / background-agent scratch (isolated git worktrees)
+.claude/worktrees/
