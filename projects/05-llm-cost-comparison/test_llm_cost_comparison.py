@@ -5013,7 +5013,7 @@ def test_interactive_setup_records_the_benchmark_target(
     monkeypatch.setattr(m, "fetch_fx_rate", lambda *a, **k: pytest.fail("network call"))
     answers = {
         "Skip benchmark": "n",
-        "auto-detect an NVIDIA GPU": "n",
+        "auto-detect your GPU": "n",
         "benchmark a running local model endpoint": "y",
         "Backend": "ollama",
         "Base URL": "http://gpu-box:11434",
