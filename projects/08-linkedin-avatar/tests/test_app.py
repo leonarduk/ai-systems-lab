@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import app  # noqa: E402
 import gradio as gr  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 
 
 def make_request(ip="1.2.3.4", session_hash="session-abc"):
@@ -91,3 +92,44 @@ class TestBuildDemo:
     def test_builds_without_error(self):
         demo = app.build_demo()
         assert isinstance(demo, gr.Blocks)
+
+
+class TestHealthEndpoint:
+    def test_health_returns_200_with_ok_json(self):
+        client = TestClient(app.build_health_app())
+        response = client.get("/health")
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
+
+    def test_health_has_no_side_effects(self, monkeypatch):
+        # Guard against the health endpoint accidentally calling into
+        # guardrails/llm/tools — it must be a pure liveness probe.
+        def boom(*a, **k):
+            raise AssertionError("health check must not call external code")
+
+        monkeypatch.setattr(app.guardrails, "check_request", boom)
+        monkeypatch.setattr(app.guardrails, "record_usage", boom)
+        monkeypatch.setattr(app.llm, "send_message", boom)
+
+        client = TestClient(app.build_health_app())
+        response = client.get("/health")
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
+
+    def test_health_is_still_reachable_when_mounted_with_the_chat_ui(self):
+        # The realistic failure mode: build_health_app() passes in isolation
+        # but the route silently disappears once actually combined with the
+        # Gradio demo for a real run. demo.launch(app_kwargs={"app": ...})
+        # looked plausible but silently drops the custom app entirely — this
+        # was only caught by launching it and hitting both routes for real.
+        # gr.mount_gradio_app is what actually merges the two correctly.
+        client = TestClient(app.build_app())
+        response = client.get("/health")
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
+
+    def test_chat_ui_still_serves_at_root_when_health_app_is_mounted(self):
+        client = TestClient(app.build_app())
+        response = client.get("/")
+        assert response.status_code == 200
+        assert "text/html" in response.headers["content-type"]

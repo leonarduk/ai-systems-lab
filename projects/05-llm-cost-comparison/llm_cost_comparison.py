@@ -35,6 +35,8 @@ import functools
 import json
 import math
 import os
+import platform
+import re
 import subprocess
 import sys
 import threading
@@ -57,6 +59,12 @@ try:
     VERSION = _pkg_version("llm-cost-comparison")
 except PackageNotFoundError:
     VERSION = "0.0.0+unknown"
+
+# The conventional module attribute, so `module.__version__` works for the
+# tooling that looks for it. An alias, not a second literal: a hardcoded
+# string here would go stale against pyproject.toml the first time anyone
+# released without remembering to edit both.
+__version__ = VERSION
 
 # Sent when identifying this script honestly to a public API. Derived from
 # VERSION so it cannot drift from the release: a User-Agent that misstates
@@ -196,8 +204,6 @@ def fetch_deepseek_pricing(
     or the prices were unchanged.  Only the DeepSeek section is touched;
     other providers (Claude, etc.) are preserved as-is.
     """
-    import re
-
     try:
         req = urllib.request.Request(
             DEEPSEEK_PRICING_URL,
@@ -279,8 +285,6 @@ def fetch_deepseek_pricing(
 
 def _extract_price(text: str, pattern: str) -> Optional[float]:
     """Try a regex; return the first captured float or None."""
-    import re
-
     match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
     if match:
         try:
@@ -860,65 +864,112 @@ def build_local_row(
     """Build a local-option row, costed for what the hardware can actually do.
 
     ``hours_needed`` is how long this workload's tokens would take to
-    generate at ``tokens_per_sec``. When that exceeds ``HOURS_PER_MONTH``
-    (a real month only has 720 hours), the hardware physically cannot
-    produce the whole workload in real time — but running it flat-out,
-    24/7, all month, *is* a real, payable scenario (the machine simply
-    isn't idle), so the cost is computed for ``effective_hours`` (capped at
-    ``HOURS_PER_MONTH``) rather than for the uncapped ``hours_needed``.
-    Capping avoids a straight-line extrapolation past hours that don't
-    exist in a month, which would otherwise read as a real bill for
-    something physically impossible (e.g. "costs more per month than the
-    hardware itself would cost to buy"). ``cost_per_million_tokens`` is
-    computed against the tokens actually produced in ``effective_hours``,
-    not the workload's full requested total, so the $/1M rate stays the
-    same real, hours-independent per-token figure either way — it's only
-    the "does this option fully replace hosted for this workload" question
-    that ``feasible`` still answers, and infeasible rows are still never
-    ranked as "cheapest" (see ``render_table``).
+    generate at ``tokens_per_sec`` on a single machine. When that exceeds
+    ``HOURS_PER_MONTH`` (a real month only has 720 hours), one machine
+    physically cannot deliver the workload within the month, so the row is
+    costed as a fleet of ``num_machines = ceil(hours_needed /
+    HOURS_PER_MONTH)`` machines sharing the load. That is what issue #52
+    asks for: a single card billed for more hours than a month contains
+    under-states what owning the hardware really costs.
+
+    The fleet's cost splits along the same fixed/variable line the
+    ``local_monthly_cost_*`` helpers already draw, and the two scale
+    differently:
+
+    * **Variable** costs — electricity while generating, per-hour GPU
+      rental — accrue per *machine-hour*, and the fleet's total is
+      ``hours_needed`` however it is divided between machines. Three
+      machines for 667 hours each costs the same electricity as one
+      machine for 2000 hours. So these are charged on the uncapped
+      ``hours_needed``, not on ``HOURS_PER_MONTH`` per machine.
+    * **Fixed** costs — hardware amortization, and a 24/7 server's idle
+      draw — are owed once per machine per month whether or not it is
+      busy, so these multiply by ``num_machines``.
+
+    Both are expressed by scaling the *fixed* input (``hardware_cost``,
+    ``idle_watts``) by ``num_machines`` and passing the fleet's total
+    machine-hours as the hours, which keeps a single implementation of each
+    cost model rather than a second one here.
+
+    Charging ``HOURS_PER_MONTH`` per machine instead would bill for the
+    fleet's spare capacity: ``ceil(2000 / 720) = 3`` machines can run 2160
+    machine-hours but only 2000 are needed, so a rented fleet would be
+    over-charged by 8% for hours nobody rents — and by nearly 2x at
+    ``hours_needed = 721``. That is the same species of misleading
+    comparison as the under-estimate, in the other direction.
+
+    ``cost_per_million_tokens`` is computed against the workload's full
+    monthly total, which the fleet does deliver. For the purely variable
+    modes (``existing``, ``rent``) it is therefore unchanged by machine
+    count. For ``own`` and ``always_on`` it is not flat, and the shape is
+    a sawtooth rather than a trend: between machine boundaries it *falls*,
+    because the same fixed cost is spread over more tokens, and it *jumps
+    up* each time another machine has to be bought. Crossing from 719 to
+    721 hours of work adds a whole second card's amortization to pay for
+    two extra hours of output. That step is the honest answer to the
+    issue — it is what makes buying hardware for a workload this size
+    look worse than the straight-line extrapolation suggested — and it is
+    the reason $/1M cannot be described as machine-count-invariant here.
+
+    ``feasible`` still answers the narrower question "can a *single*
+    machine keep up with this workload in real time", and infeasible rows
+    are still never ranked as "cheapest" (see ``render_table``).
     """
+    if workload.monthly_total_tokens <= 0:
+        # Stated here rather than left to cost_per_million_tokens further
+        # down. ceil(0 / 720) is 0 machines, and every fixed cost is
+        # multiplied by it, so a degenerate workload would otherwise
+        # produce a plausible-looking $0 row if that helper's contract
+        # ever softened. Depending on a downstream raise for correctness
+        # here is a coupling worth not having.
+        raise ValueError(
+            "monthly_total_tokens must be > 0 to cost a local option, got "
+            f"{workload.monthly_total_tokens!r}"
+        )
     hours_needed = hours_needed_for_workload(
         workload.monthly_total_tokens, tokens_per_sec
     )
     feasible = hours_needed <= HOURS_PER_MONTH
-    effective_hours = min(hours_needed, HOURS_PER_MONTH)
+    num_machines = math.ceil(hours_needed / HOURS_PER_MONTH)
     if mode == "own":
         monthly_cost = local_monthly_cost_owned(
-            hardware_cost,
+            hardware_cost * num_machines,
             lifetime_years,
             power_watts,
             electricity_rate_per_kwh,
-            effective_hours,
+            hours_needed,
         )
         name = name or "Local (buy hardware)"
     elif mode == "existing":
         monthly_cost = local_monthly_cost_existing_hardware(
-            power_watts, electricity_rate_per_kwh, effective_hours
+            power_watts, electricity_rate_per_kwh, hours_needed
         )
         name = name or "Local (already-on PC)"
     elif mode == "rent":
-        monthly_cost = local_monthly_cost_rented(hourly_rate, effective_hours)
+        monthly_cost = local_monthly_cost_rented(hourly_rate, hours_needed)
         name = name or "Local (rented cloud GPU)"
     elif mode == "always_on":
         monthly_cost = local_monthly_cost_always_on(
-            idle_watts, extra_watts, electricity_rate_per_kwh, effective_hours
+            idle_watts * num_machines,
+            extra_watts,
+            electricity_rate_per_kwh,
+            hours_needed,
         )
         name = name or "Local (24/7 server)"
     else:
         raise ValueError(f"Unknown local cost mode: {mode!r}")
-    tokens_produced = tokens_per_sec * 3600 * effective_hours
-    per_million = cost_per_million_tokens(monthly_cost, tokens_produced)
+    per_million = cost_per_million_tokens(monthly_cost, workload.monthly_total_tokens)
     if feasible:
-        notes = (
-            f"~{effective_hours:.1f} compute-hrs/month at {tokens_per_sec:.1f} tok/s"
-        )
+        notes = f"~{hours_needed:.1f} compute-hrs/month at {tokens_per_sec:.1f} tok/s"
     else:
-        coverage_pct = effective_hours / hours_needed * 100
+        coverage_pct = HOURS_PER_MONTH / hours_needed * 100
         parallel_needed = hours_needed / HOURS_PER_MONTH
+        machine_word = "machine" if num_machines == 1 else "machines"
         notes = (
-            f"running 24/7 all month at {tokens_per_sec:.1f} tok/s covers only "
-            f"~{coverage_pct:.0f}% of this workload's tokens — would need "
-            f"~{parallel_needed:.1f}x this throughput to fully replace hosted"
+            f"one machine running 24/7 all month at {tokens_per_sec:.1f} tok/s "
+            f"covers only ~{coverage_pct:.0f}% of this workload's tokens — costed "
+            f"as {num_machines} {machine_word} ({parallel_needed:.1f}x this "
+            f"throughput needed to fully replace hosted)"
         )
     return ComparisonRow(name, monthly_cost, per_million, notes, feasible=feasible)
 
@@ -1273,13 +1324,115 @@ NVIDIA_SMI_TIMEOUT_SECONDS = 5.0
 # anyway, so the extra samples are largely repeats of the same value.
 GPU_POLL_INTERVAL_SECONDS = 1.0
 
+# The detection question shown to the user. Named because several tests
+# match on it, and because it must stay in step with what detect_gpu
+# actually tries — it said "an NVIDIA GPU via nvidia-smi" while the WMI
+# fallback was being added underneath it.
+GPU_DETECTION_PROMPT = (
+    "Attempt to auto-detect your GPU (nvidia-smi, or WMI on Windows)?"
+)
+
+
+def detect_gpu_wmi() -> Optional[dict]:
+    """Detect any GPU on Windows via WMI (``Win32_VideoController``).
+
+    Works for AMD, Intel, and other vendors that ``nvidia-smi`` can't see.
+    Tries the ``wmi`` Python package first (if installed), then falls back
+    to the ``wmic`` command-line tool (deprecated but still present on most
+    Windows installs). Returns a dict with ``name``, ``vendor``, and
+    ``driver_version`` keys, or None if not on Windows or both methods fail.
+    """
+    if platform.system() != "Windows":
+        return None
+
+    # Preferred: the `wmi` package, if the user happens to have it installed.
+    try:
+        import wmi  # type: ignore
+
+        try:
+            conn = wmi.WMI()
+            for controller in conn.Win32_VideoController():
+                name = (controller.Name or "").strip()
+                if not name:
+                    continue
+                return {
+                    "name": name,
+                    "vendor": (controller.AdapterCompatibility or "").strip(),
+                    "driver_version": (controller.DriverVersion or "").strip(),
+                }
+        except Exception:  # noqa: BLE001 - best-effort, fall through to wmic
+            pass
+    except ImportError:
+        pass
+
+    # Fallback: `wmic` (deprecated but still shipped on most Windows boxes).
+    #
+    # /format:list, not /format:csv. wmic's CSV output does not quote fields
+    # containing commas, and AdapterCompatibility for an AMD card is
+    # literally "Advanced Micro Devices, Inc." — so a CSV row has more
+    # commas than columns and no split, in either direction, recovers the
+    # fields. The list format emits one unambiguous `Key=Value` per line.
+    try:
+        result = subprocess.run(
+            [
+                "wmic",
+                "path",
+                "win32_VideoController",
+                "get",
+                "Name,AdapterCompatibility,DriverVersion",
+                "/format:list",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    record: dict = {}
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            # Blank line ends a record. Return the first one that named a
+            # card; a machine with several adapters lists them all.
+            if record.get("Name"):
+                break
+            record = {}
+            continue
+        key, sep, value = line.partition("=")
+        if sep:
+            record[key.strip()] = value.strip()
+    if not record.get("Name"):
+        return None
+    return {
+        "name": record["Name"],
+        "vendor": record.get("AdapterCompatibility", ""),
+        "driver_version": record.get("DriverVersion", ""),
+    }
+
+
+def detect_gpu(runner: Callable = subprocess.run) -> Optional[dict]:
+    """Detect a GPU, preferring ``nvidia-smi`` and falling back to WMI.
+
+    Returns the richer ``nvidia-smi`` dict when an NVIDIA card is present,
+    otherwise a WMI-derived dict (name/vendor/driver_version) for any other
+    vendor on Windows. Returns None only when both detection paths fail, so
+    callers can still fall back to manual input.
+    """
+    nvidia = detect_nvidia_gpu(runner)
+    if nvidia is not None:
+        return nvidia
+    return detect_gpu_wmi()
+
 
 def detect_nvidia_gpu(runner: Callable = subprocess.run) -> Optional[dict]:
     """Detect an NVIDIA GPU via ``nvidia-smi`` (works on Windows and Linux).
 
     Returns a dict with name/memory/power info, or None if ``nvidia-smi``
     isn't installed, isn't on PATH, or returns no usable data. Callers must
-    treat None as "detection unavailable" and fall back to manual input.
+    treat None as "detection unavailable" and fall back to manual input
+    (or to ``detect_gpu_wmi`` via ``detect_gpu``).
     """
     try:
         result = runner(
@@ -1805,8 +1958,6 @@ def _validate_http_url(base_url: str) -> str:
 
     Returns the normalized URL so callers can use the scheme-prefixed form.
     """
-    import re
-
     url = base_url.strip()
     # urlsplit can't be used to detect the scheme here: it reads the "host" of
     # a bare "localhost:11434" as a scheme, which is exactly the input this
@@ -2135,25 +2286,33 @@ def interactive_local_setup() -> tuple:
     benchmark_enabled = not skip_benchmark
 
     gpu_info = None
-    if gpu_detection_enabled and prompt_yes_no(
-        "Attempt to auto-detect an NVIDIA GPU via nvidia-smi?", default=True
-    ):
-        gpu_info = detect_nvidia_gpu()
+    if gpu_detection_enabled and prompt_yes_no(GPU_DETECTION_PROMPT, default=True):
+        gpu_info = detect_gpu()
         if gpu_info:
-            # A single power.draw sample is noisy (especially on a laptop
-            # GPU) — average a few quick readings for a steadier idle
-            # baseline instead of trusting the one snapshot from detection.
-            idle_avg = average_gpu_power_w()
-            if idle_avg is not None:
-                gpu_info["power_draw_w"] = idle_avg
+            # Only nvidia-smi reports live power. A WMI-detected card has no
+            # telemetry to average, and polling anyway would just spawn a
+            # binary that is not there — so key off whether this source
+            # reports power at all rather than assuming every GPU is NVIDIA.
+            if "power_draw_w" in gpu_info:
+                # A single power.draw sample is noisy (especially on a
+                # laptop GPU) — average a few quick readings for a steadier
+                # idle baseline instead of trusting the one snapshot from
+                # detection.
+                idle_avg = average_gpu_power_w()
+                if idle_avg is not None:
+                    gpu_info["power_draw_w"] = idle_avg
             print(f"  Detected: {format_gpu_summary(gpu_info)}")
         else:
             print(
-                "  No GPU detected (nvidia-smi not found or returned no data) — enter manually."
+                "  No GPU detected (nvidia-smi and WMI both returned nothing) "
+                "— enter manually."
             )
 
     tokens_per_sec = None
     measured_load_power_w = None
+    # Recorded when a benchmark actually runs, so --use-defaults can repeat
+    # the same measurement later without re-asking which endpoint to hit.
+    benchmark_target = None
     if benchmark_enabled and prompt_yes_no(
         "Attempt to benchmark a running local model endpoint (Ollama or OpenAI-compatible)?",
         default=True,
@@ -2185,6 +2344,11 @@ def interactive_local_setup() -> tuple:
                     lambda: benchmark_openai_compatible(base_url, model)
                 )
             print(f"  Measured throughput: {tokens_per_sec:.1f} tokens/sec")
+            benchmark_target = {
+                "backend": backend,
+                "base_url": base_url,
+                "model": model,
+            }
             if backend != "ollama":
                 # After the number, not before it: a caveat printed ahead of
                 # the figure it qualifies reads as unrelated preamble.
@@ -2244,6 +2408,7 @@ def interactive_local_setup() -> tuple:
         settings = {
             "mode": "own",
             "tokens_per_sec": tokens_per_sec,
+            "benchmark_target": benchmark_target,
             "hardware_cost": hardware_cost,
             "lifetime_years": lifetime_years,
             "power_watts": power_watts,
@@ -2434,6 +2599,7 @@ def interactive_local_setup() -> tuple:
         settings = {
             "mode": "existing",
             "tokens_per_sec": tokens_per_sec,
+            "benchmark_target": benchmark_target,
             "power_watts_extra": power_watts_extra,
             "power_watts_total": power_watts_total,
             "electricity_rate_per_kwh": electricity_rate,
@@ -2454,6 +2620,7 @@ def interactive_local_setup() -> tuple:
         settings = {
             "mode": "rent",
             "tokens_per_sec": tokens_per_sec,
+            "benchmark_target": benchmark_target,
             "hourly_rate": hourly_rate,
         }
         return (
@@ -2550,6 +2717,77 @@ def interactive_provider_selection(pricing: dict) -> Optional[set]:
         return selected
 
 
+def _refresh_measurements_for_defaults(settings: dict) -> tuple:
+    """Re-measure what can be re-measured for ``--use-defaults``.
+
+    The saved file stores a ``tokens_per_sec`` captured on whatever day
+    the previous run happened to execute, so replaying it silently gives
+    stale cost projections — the point of ``--use-defaults`` is a *quick*
+    run, not a *stale* one.
+
+    It is also a *non-interactive* one, which is the constraint that
+    shapes this. Re-running the full benchmark flow would have to ask
+    which backend, which URL and which model, and a fast path that asks
+    four questions is not a fast path. So the endpoint is taken from
+    ``benchmark_target``, recorded by the run that saved these settings,
+    and nothing here reads from stdin.
+
+    Three cases:
+
+    * GPU detection needs no input, so it always re-runs.
+    * A saved ``benchmark_target`` means the previous run measured a real
+      endpoint; the same one is measured again.
+    * No target means the previous run had no benchmark to save — the
+      user declined it, or typed a figure by hand. A hand-entered number
+      is not a stale measurement, so it is kept as-is.
+
+    Returns ``(tokens_per_sec, gpu_info, measured_load_power_w)``, falling
+    back to the saved throughput whenever a fresh one is unavailable.
+    """
+    saved_tokens_per_sec = settings.get("tokens_per_sec")
+    gpu_info = detect_nvidia_gpu()
+    if gpu_info:
+        idle_avg = average_gpu_power_w()
+        if idle_avg is not None:
+            gpu_info["power_draw_w"] = idle_avg
+        print(f"  Detected: {format_gpu_summary(gpu_info)}")
+    else:
+        print(
+            "  No GPU detected (nvidia-smi not found or returned no data) — "
+            "using saved settings for hardware details."
+        )
+
+    target = settings.get("benchmark_target")
+    if not target:
+        print(
+            f"  No saved benchmark endpoint — keeping throughput "
+            f"{saved_tokens_per_sec} tokens/sec from the saved settings."
+        )
+        return saved_tokens_per_sec, gpu_info, None
+
+    backend = target.get("backend")
+    base_url = target.get("base_url")
+    model = target.get("model")
+    print(f"  Re-benchmarking {backend} at {base_url} ({model})...")
+    try:
+        if backend == "ollama":
+            tokens_per_sec, measured_load_power_w = measure_gpu_power_during(
+                lambda: benchmark_ollama(base_url, model)
+            )
+        else:
+            tokens_per_sec, measured_load_power_w = measure_gpu_power_during(
+                lambda: benchmark_openai_compatible(base_url, model)
+            )
+    except Exception as exc:  # noqa: BLE001 - best-effort, fall back to saved
+        print(
+            f"  Benchmark failed ({exc}) — using saved throughput "
+            f"{saved_tokens_per_sec} tokens/sec."
+        )
+        return saved_tokens_per_sec, gpu_info, None
+    print(f"  Measured throughput: {tokens_per_sec:.1f} tokens/sec")
+    return tokens_per_sec, gpu_info, measured_load_power_w
+
+
 def run_interactive(use_defaults: bool = False) -> int:
     """Compare local hardware vs hosted providers for user-selected workloads.
 
@@ -2558,9 +2796,13 @@ def run_interactive(use_defaults: bool = False) -> int:
     rendering the cost table.
 
     When ``use_defaults`` is True, saved settings from a previous run are
-    used without prompting (equivalent to passing ``--use-defaults`` on the
-    command line).  If no saved file exists the flag is a no-op and the
-    normal interactive flow runs instead.
+    used for the workload/hardware-mode/provider choices without prompting
+    (equivalent to passing ``--use-defaults`` on the command line). GPU
+    detection and the tokens-per-second benchmark are still re-run so the
+    cost projections reflect current hardware, not a stale measurement
+    captured on whatever day the previous run happened to execute. If no
+    saved file exists the flag is a no-op and the normal interactive flow
+    runs instead.
     """
     print("LLM Cost Comparison — local vs hosted APIs")
     print("=" * 60)
@@ -2593,9 +2835,17 @@ def run_interactive(use_defaults: bool = False) -> int:
         print()
 
     if defaults is not None:
-        # Fast path: replay saved settings — no prompts at all.
+        # Fast path: replay saved settings for workload/hardware-mode/provider
+        # choices, but re-run GPU detection and the throughput benchmark so
+        # the cost projections reflect current hardware rather than a stale
+        # measurement captured on whatever day the previous run happened to
+        # execute. Only fall back to the saved tokens_per_sec when a fresh
+        # measurement genuinely isn't available.
         settings = dict(defaults)
-        tokens_per_sec = settings["tokens_per_sec"]
+        tokens_per_sec, _gpu_info, _measured_load_power_w = (
+            _refresh_measurements_for_defaults(settings)
+        )
+        settings["tokens_per_sec"] = tokens_per_sec
         mode = settings["mode"]
         if any(
             k in settings for k in ("workload", "workload_preset", "workload_presets")
@@ -2924,9 +3174,21 @@ def _resolve_workload_scenarios(config: dict) -> list:
         )
         for field_name in ("requests_per_day", "avg_input_tokens", "avg_output_tokens"):
             value = config["workload"][field_name]
-            if not isinstance(value, (int, float)) or isinstance(value, bool):
+            # bool is a subclass of int, so True/False would otherwise pass
+            # the numeric type check below and be silently treated as 1/0.
+            # This case keeps the "workload."-prefixed wording since it is a
+            # type error, not an out-of-range value.
+            if isinstance(value, bool):
                 raise ConfigError(
                     f"workload.{field_name} must be a number, got {value!r}"
+                )
+            if not isinstance(value, (int, float)) or value < 0:
+                # Per-field wording (no "workload." prefix) matches the
+                # issue's example shape and is more immediately recognizable
+                # to end users reading the error; the offending value is
+                # retained to make the fix obvious.
+                raise ConfigError(
+                    f"{field_name} must be a non-negative number, got {value!r}"
                 )
         try:
             workload = Workload(**config["workload"])
@@ -2951,7 +3213,10 @@ def _resolve_workload_scenarios(config: dict) -> list:
 
 
 def run_non_interactive(
-    config_path: Path, export_fmt: Optional[str], export_path: Optional[Path]
+    config_path: Path,
+    export_fmt: Optional[str],
+    export_path: Optional[Path],
+    currency: str = "USD",
 ) -> int:
     """Run the comparison from a JSON config instead of interactive prompts.
 
@@ -2985,7 +3250,18 @@ def run_non_interactive(
     directory (not the process's working directory) so the example config
     works regardless of where the script is invoked from.
 
-    Optional top-level keys:
+    ``currency`` (the function argument, normally populated from the
+    ``--currency`` CLI flag) selects the display currency for the rendered
+    table and any export. All cost math is done in USD (hosted pricing is
+    USD-denominated); a non-USD currency is applied at display time by
+    fetching a live FX rate and converting every row once (see
+    ``convert_rows_currency``). If the rate can't be fetched, the run falls
+    back to USD with a warning rather than failing — the numbers are still
+    correct, just in the wrong unit.
+
+    Optional top-level config keys offer a network-free alternative to
+    ``--currency``, and are only used when ``--currency`` is absent (or
+    ``"USD"``):
       * ``"currency"`` — three-letter display currency code (default
         ``"USD"``). ``"USD"`` and ``"GBP"`` print their symbol; any other
         valid code prints verbatim (``"EUR 12.34"``).
@@ -3021,30 +3297,30 @@ def run_non_interactive(
     pricing = load_pricing(pricing_path)
     selected = set(config["selected_models"]) if "selected_models" in config else None
 
-    display_currency = config.get("currency", "USD")
+    config_currency = config.get("currency", "USD")
     if (
-        not isinstance(display_currency, str)
-        or len(display_currency) != 3
-        or not display_currency.isalpha()
+        not isinstance(config_currency, str)
+        or len(config_currency) != 3
+        or not config_currency.isalpha()
     ):
         # A three-letter ISO 4217 code, not any non-empty string. render_table
         # prints an unknown code verbatim as its own symbol ("EUR 12.34"),
         # which reads fine for a real code and badly for "pounds" or "£".
         raise ConfigError(
             "currency must be a three-letter currency code (e.g. 'USD', "
-            f"'GBP'), got {display_currency!r}"
+            f"'GBP'), got {config_currency!r}"
         )
-    display_currency = display_currency.upper()
-    static_fx_rate = config.get("static_fx_rate")
-    if display_currency != "USD":
+    config_currency = config_currency.upper()
+    config_static_fx_rate = config.get("static_fx_rate")
+    if config_currency != "USD":
         if (
-            not isinstance(static_fx_rate, (int, float))
-            or isinstance(static_fx_rate, bool)
-            or static_fx_rate <= 0
+            not isinstance(config_static_fx_rate, (int, float))
+            or isinstance(config_static_fx_rate, bool)
+            or config_static_fx_rate <= 0
         ):
             raise ConfigError(
                 "static_fx_rate must be a positive number when currency is not "
-                f"'USD' (got {static_fx_rate!r})"
+                f"'USD' (got {config_static_fx_rate!r})"
             )
 
     local_cfg = config["local"]
@@ -3133,6 +3409,44 @@ def run_non_interactive(
             f"local.mode must be 'own', 'existing', or 'rent', got {mode!r}"
         )
 
+    # Resolve the requested display currency once, up front: fetching the FX
+    # rate is a network call, so doing it here (rather than per-scenario)
+    # keeps a multi-scenario run to a single lookup and lets a failure fall
+    # back to USD cleanly before any rows are built.
+    #
+    # Precedence: an explicit non-USD --currency (the ``currency`` argument)
+    # wins over the config file's "currency"/"static_fx_rate" keys, since
+    # it's the more direct request. --currency fetches a live FX rate; the
+    # config keys use a caller-supplied static rate (no network, no
+    # latency, no failure point) and only take effect when --currency
+    # wasn't given (or was left at the default "USD").
+    display_currency = "USD"
+    usd_per_target = None
+    if currency and currency.upper() != "USD":
+        target = currency.upper()
+        # Ask for the rate in the direction convert_rows_currency wants:
+        # USD *per* target unit, so ~1.27 for GBP. fetch_fx_rate(a, b)
+        # returns b per a, so the target comes first — the same call the
+        # interactive path makes as fetch_fx_rate("GBP", "USD"). Asking
+        # for USD→GBP instead returns ~0.79, and dividing by that scales
+        # costs up by 1.27 rather than down: a $300 row printed as £380.
+        rate = fetch_fx_rate(target, "USD")
+        if rate is not None and rate > 0:
+            display_currency = target
+            usd_per_target = rate
+        else:
+            print(
+                f"Warning: could not fetch a {target}→USD exchange rate — "
+                "falling back to USD.",
+                file=sys.stderr,
+            )
+    elif config_currency != "USD":
+        # config_static_fx_rate is how many units of config_currency one
+        # USD buys (0.79 => $100 shows as £79). convert_rows_currency wants
+        # USD per unit, the reciprocal.
+        display_currency = config_currency
+        usd_per_target = 1.0 / config_static_fx_rate
+
     multiple = len(scenarios) > 1
     warn_unknown_model_keys(pricing, selected)
     scenario_labels_rows = []
@@ -3157,15 +3471,8 @@ def run_non_interactive(
         rows = [build_local(effective_workload)] + build_hosted_rows(
             effective_workload, pricing, selected
         )
-        if display_currency != "USD":
-            # static_fx_rate is how many units of display_currency one USD
-            # buys (0.79 => $100 shows as £79), which is how anyone reading
-            # "USD->GBP rate" would write it. convert_rows_currency takes
-            # the opposite — USD per unit — because the interactive path
-            # feeds it a GBP->USD quote straight from the FX lookup. Hence
-            # the reciprocal. Passing the rate through unconverted made
-            # $300 render as £375 instead of £237.
-            rows = convert_rows_currency(rows, 1.0 / static_fx_rate)
+        if usd_per_target is not None:
+            rows = convert_rows_currency(rows, usd_per_target)
         scenario_labels_rows.append((label, rows))
 
     if scaled_scenarios:
@@ -3236,7 +3543,22 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument(
         "--use-defaults",
         action="store_true",
-        help="Skip prompts and reuse settings saved by a previous interactive run.",
+        help=(
+            "Skip prompts and reuse settings saved by a previous interactive run. "
+            "GPU detection and the tokens-per-second benchmark are still re-run "
+            "so the cost projections use fresh measurements."
+        ),
+    )
+    parser.add_argument(
+        "--currency",
+        default="USD",
+        help=(
+            "Output currency for --non-interactive mode (e.g. USD, GBP). "
+            "Non-USD values require network access to fetch a live exchange "
+            "rate; if the lookup fails, the run falls back to USD with a "
+            "warning. Ignored in interactive mode, which asks about currency "
+            "as part of the local-setup flow."
+        ),
     )
     parser.add_argument(
         "--update-pricing",
@@ -3267,7 +3589,12 @@ def main(argv: Optional[list] = None) -> int:
         if args.export and not args.export_path:
             args.export_path = Path(f"cost_comparison.{args.export}")
         try:
-            return run_non_interactive(args.config, args.export, args.export_path)
+            return run_non_interactive(
+                args.config,
+                args.export,
+                args.export_path,
+                currency=args.currency,
+            )
         except ConfigError as exc:
             print(f"Config error: {exc}", file=sys.stderr)
             return 1
@@ -3276,6 +3603,12 @@ def main(argv: Optional[list] = None) -> int:
         print(
             "Note: --export/--export-path only apply to --non-interactive mode; "
             "interactive mode asks about exporting at the end.",
+            file=sys.stderr,
+        )
+    if args.currency and args.currency.upper() != "USD":
+        print(
+            "Note: --currency only applies to --non-interactive mode; "
+            "interactive mode asks about currency as part of the local-setup flow.",
             file=sys.stderr,
         )
 
