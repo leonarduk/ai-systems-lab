@@ -59,8 +59,10 @@ Render's free web-service tier. One-time setup:
 
 ### Health check endpoint
 
-The app exposes `GET /health` (implemented in `app.py`'s `build_health_app`, mounted onto the
-Gradio server via `app_kwargs={"app": ...}`). It returns:
+The app exposes `GET /health` (implemented in `app.py`'s `build_health_app`). The health app and
+the Gradio Blocks demo are combined with `gr.mount_gradio_app(health_app, demo, path="/", ...)` in
+`build_app()`, then served with `uvicorn.run(...)` — not via `demo.launch(app_kwargs=...)`, which
+silently drops a second FastAPI app passed that way. It returns:
 
 ```
 HTTP/1.1 200 OK

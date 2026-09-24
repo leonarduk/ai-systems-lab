@@ -102,6 +102,6 @@ if __name__ == "__main__":
 
     uvicorn.run(
         build_app(),
-        host=os.environ.get("GRADIO_SERVER_NAME", "127.0.0.1"),
+        host=os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0"),
         port=int(os.environ.get("GRADIO_SERVER_PORT", "7860")),
     )
