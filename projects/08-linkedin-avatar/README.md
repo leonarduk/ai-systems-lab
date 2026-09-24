@@ -42,12 +42,37 @@ GitHub REST API, Pushover/Telegram, Render, GitHub Pages.
 front matter, no headings. It's the only file that sets personality and sits in every request's
 cached prefix, so it's kept short and hand-edited.
 
+`build/build_profile.py` also supports a `--dry-run` flag: it runs the full extract/redact pipeline
+and prints a per-file summary of what would be redacted (count, types, snippets) without writing
+anything. Combine with `--check` to preview and still get a non-zero exit on leaks:
+
+```bash
+python build/build_profile.py --pdf linkedin.pdf --dry-run
+python build/build_profile.py --pdf linkedin.pdf --dry-run --check
+```
+
 `knowledge/projects.md` is plain Markdown: one `## repo-name` heading per repo (matching its GitHub
 name exactly), followed by 1–3 sentences of first-person framing. The snapshot builder
 (`build/build_github_snapshot.py`) parses it into per-repo notes and prefers a `projects.md` entry
 over the repo's own README excerpt wherever one exists — a repo with no heading here just falls back
 to its README. Headings are matched case-sensitively against the repo name; keep them in the same
 order as the root README where practical, but order isn't semantically meaningful to the parser.
+
+## Smoke test
+
+`scripts/smoke_test.py` verifies a deployed instance end to end: required env vars are present,
+the root URL returns 200, the chat endpoint answers a real question, and the contact-capture flow
+works. Standard library only — no extra dependencies.
+
+```bash
+# From projects/08-linkedin-avatar/
+python scripts/smoke_test.py --base-url https://ai-systems-lab-s8gy.onrender.com --dry-run
+```
+
+`--dry-run` validates the contact-capture request without sending a real Pushover notification.
+Drop the flag (with `PUSHOVER_USER`/`PUSHOVER_TOKEN` set) to verify delivery end to end. Exits
+non-zero with a clear message on the first failed check. Also runs daily via
+`.github/workflows/smoke-test.yml`.
 
 ## Evals
 
