@@ -58,6 +58,20 @@ Walks through:
    file with a `scenario` column either way, so a spreadsheet or script can
    filter or pivot across scenarios.
 
+### Reusing saved settings (`--use-defaults`)
+
+```bash
+python llm_cost_comparison.py --use-defaults
+```
+
+Skips the workload/hardware-mode/provider prompts and reuses the choices
+saved by a previous interactive run. **GPU detection and the
+tokens-per-second benchmark are still re-run** so the cost projections
+reflect current hardware rather than a stale measurement captured on
+whatever day the previous run happened to execute. If detection or the
+benchmark genuinely isn't available (no `nvidia-smi`, no local endpoint),
+the saved throughput value is used as a fallback and the script says so.
+
 ### Non-interactive (scripting / CI)
 
 ```bash
@@ -68,6 +82,52 @@ python llm_cost_comparison.py --non-interactive --config example_config.json \
 See `example_config.json` (workload presets, hardware you already own) and
 `example_config_buying_hardware.json` (explicit workload, buying new
 hardware) for the config shapes.
+
+#### Display currency (non-interactive)
+
+By default the non-interactive table and any export are in USD. There are
+two ways to display another currency instead; `--currency` takes
+precedence when both are set.
+
+**`--currency` (live FX rate).** Pass `--currency GBP` (or any other
+currency code) to have the whole table — local and hosted rows alike —
+converted at display time using a live exchange rate, matching what the
+interactive flow does when you choose GBP:
+
+```bash
+python llm_cost_comparison.py --non-interactive --config example_config.json \
+    --currency GBP --export json --export-path out.json
+```
+
+All cost math is still done internally in USD (hosted pricing is
+USD-denominated); the conversion is applied once to the final figures. If
+the FX lookup fails (no network, unknown currency code), the run falls back
+to USD with a warning on stderr rather than failing — the numbers are still
+correct, just in the wrong unit. `--currency` is ignored in interactive
+mode, which asks about currency as part of the local-setup flow.
+
+**Config keys (static rate, no network).** If `--currency` isn't given (or
+is left at the default `USD`), you can instead display another currency
+without any network access by adding two optional top-level keys to the
+config:
+
+```json
+{
+  "currency": "GBP",
+  "static_fx_rate": 0.79
+}
+```
+
+- `currency` — three-letter display currency code (default `"USD"`).
+  `"USD"` and `"GBP"` print their symbol; any other valid code prints
+  verbatim, as in `EUR 12.34`.
+- `static_fx_rate` — **how many units of `currency` one US dollar buys**.
+  At `0.79`, a $100 figure is shown as £79. Required when
+  `currency != "USD"`. A static rate avoids a live FX API call — no
+  network, no latency, no failure point — at the cost of going stale, so
+  it is yours to keep current. All cost math stays in USD internally, and
+  the whole table (local and hosted rows alike) is converted once at
+  display time and exported in the chosen currency.
 
 ### Timing notes
 
@@ -101,6 +161,9 @@ in response headers or in the final streaming chunk), which this script does
 not currently read or display. If you need that figure, capture it yourself
 from the raw response (or the provider's usage dashboard) rather than
 relying on the benchmark's wall-clock number.
+
+When the endpoint is not on loopback, the benchmark says this next to the
+number it reports, so the caveat reaches users who never read this file.
 
 ## Traffic scenarios (workload presets)
 
@@ -192,12 +255,13 @@ requests/day and token counts behind each one.
 
 ## Configuring FX rate providers
 
-Live exchange rates are fetched from a chain of free providers, tried in
-order until one succeeds. The default order is:
+Live exchange rates (used both by the interactive flow and by
+`--currency`) are fetched from a chain of free providers, tried in order
+until one succeeds. The default order is:
 
-1. `frankfurter_dev` — `https://api.frankfurter.dev/v1/latest`
-2. `frankfurter_app` — `https://api.frankfurter.app/v1/latest`
-3. `exchangerate_host` — `https://api.exchangerate.host/latest`
+1. `frankfurter.dev` — `https://api.frankfurter.dev/v1/latest`
+2. `frankfurter.app` — `https://api.frankfurter.app/v1/latest`
+3. `exchangerate.host` — `https://api.exchangerate.host/latest`
 
 If every one of those fails, the script falls back to Yahoo Finance's
 unofficial chart endpoint as a last resort.
@@ -209,10 +273,10 @@ variable to a comma-separated list of provider keys:
 
 ```bash
 # Linux/macOS
-FX_RATE_PROVIDER_ORDER=exchangerate_host,frankfurter_dev python llm_cost_comparison.py
+FX_RATE_PROVIDER_ORDER=exchangerate.host,frankfurter.dev python llm_cost_comparison.py
 
 # Windows (PowerShell)
-$env:FX_RATE_PROVIDER_ORDER = "exchangerate_host,frankfurter_dev"
+$env:FX_RATE_PROVIDER_ORDER = "exchangerate.host,frankfurter.dev"
 python llm_cost_comparison.py
 ```
 
@@ -220,6 +284,36 @@ Unknown keys are ignored; if the override yields no known providers, the
 default order is used so a typo can't silently disable FX lookups. The
 Yahoo Finance last-resort fallback is always tried after the configured
 providers, regardless of the override.
+
+## Customising GPU assumptions
+
+The GPU price/power defaults used to prefill the "buying new hardware" and
+"already-on PC" prompts live in `gpu_power_defaults.json`, next to the
+script. Its shape is:
+
+```json
+{
+  "as_of": "2026-07-28",
+  "note": "free-text caveat shown to the user",
+  "gpus": [
+    {"label": "RTX 4090", "cost_usd": 1600.0, "power_watts": 450.0}
+  ]
+}
+```
+
+`label` is matched as a case-insensitive substring against the detected
+GPU's name (via `nvidia-smi`), so list more specific labels before more
+general ones — `RTX 4080 SUPER` must come before `RTX 4080`, or the
+shorter label swallows the match. `cost_usd` and `power_watts` must both
+be positive numbers. Edit this file to add your own card, adjust prices
+for your region, or correct a power figure — no Python changes needed.
+
+If the file is simply absent, the script quietly falls back to a built-in
+copy of the shipped defaults, so it works out of the box. If the file is
+present but unusable — invalid JSON, the wrong shape, or an entry missing
+or mistyping a field — it says so on stderr and then falls back. A single
+bad entry is skipped by name and the rest of your file is still used. The
+run is never aborted: these values only prefill prompts you can override.
 
 ## Updating pricing
 

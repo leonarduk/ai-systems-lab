@@ -11,6 +11,8 @@ import os
 
 import gradio as gr
 from dotenv import load_dotenv
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
 from avatar import context, guardrails, llm, styles
 
@@ -53,6 +55,9 @@ def chat(message, history, request: gr.Request):
 
 
 def build_demo():
+    # NOTE: scripts/smoke_test.py cross-checks the env vars this module reads.
+    # Keep REQUIRED_ENV_VARS / OPTIONAL_ENV_VARS in that script in sync with
+    # any new os.environ.get(...) calls added here.
     with gr.Blocks(title=styles.TITLE) as demo:
         gr.Markdown(
             f"# {styles.TITLE}\n\n{styles.DESCRIPTION}", elem_id="avatar-header"
@@ -64,10 +69,42 @@ def build_demo():
     return demo
 
 
+def build_health_app():
+    """Minimal FastAPI app exposing GET /health for Render's health check.
+
+    Deliberately side-effect free: no logging, no external calls, no
+    dependency on DeepSeek/Pushover/Telegram. Just proves the process is up.
+    """
+    health_app = FastAPI()
+
+    @health_app.get("/health")
+    def health():
+        return JSONResponse({"status": "ok"})
+
+    return health_app
+
+
+def build_app():
+    """Combine the chat UI and the health endpoint into one FastAPI app.
+
+    demo.launch()'s app_kwargs is for keyword arguments to Gradio's own
+    FastAPI constructor (e.g. docs_url) — passing a second app instance
+    under the "app" key there is silently accepted and silently does
+    nothing; /health returns 404 (confirmed by launching it and hitting
+    both routes — see issue #194's review discussion). gr.mount_gradio_app
+    is the actual documented way to serve a custom FastAPI app's routes
+    alongside a Gradio Blocks demo.
+    """
+    return gr.mount_gradio_app(
+        build_health_app(), build_demo(), path="/", css=styles.CSS
+    )
+
+
 if __name__ == "__main__":
-    port = os.environ.get("GRADIO_SERVER_PORT")
-    build_demo().launch(
-        server_name=os.environ.get("GRADIO_SERVER_NAME"),
-        server_port=int(port) if port else None,
-        css=styles.CSS,
+    import uvicorn
+
+    uvicorn.run(
+        build_app(),
+        host=os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0"),
+        port=int(os.environ.get("GRADIO_SERVER_PORT", "7860")),
     )
