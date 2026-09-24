@@ -224,17 +224,22 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "$REVIEW_SCRIPT" ]; then
-            # Legacy script-based providers (e.g. Claude): only allow scripts
-            # checked into the repo under .github/scripts/.
+            # Legacy script-based providers: only allow scripts checked into
+            # the repo under .github/scripts/. Claude sets both this and
+            # review_module (see claude-pr-review.yml), so it always lands
+            # here today — review_script takes precedence below.
             case "$REVIEW_SCRIPT" in
               .github/scripts/*) ;;
               *) echo "ERROR: review_script must be under .github/scripts/, got '$REVIEW_SCRIPT'" >&2; exit 1 ;;
             esac
           else
             # Module-based providers (DeepSeek/GPT): only allow known
-            # cicaid-devtools review modules.
+            # cicaid-devtools review modules. Claude's module is allowlisted
+            # too, even though review_script currently keeps it out of this
+            # branch, so validation doesn't silently start failing the day
+            # review_script is removed from claude-pr-review.yml.
             case "$REVIEW_MODULE" in
-              cicaid_devtools.lib.deepseek_review|cicaid_devtools.lib.gpt_review) ;;
+              cicaid_devtools.lib.deepseek_review|cicaid_devtools.lib.gpt_review|cicaid_devtools.lib.anthropic_review) ;;
               *) echo "ERROR: review_module '$REVIEW_MODULE' not in allowlist" >&2; exit 1 ;;
             esac
           fi
