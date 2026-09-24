@@ -85,8 +85,31 @@ hardware) for the config shapes.
 
 #### Display currency (non-interactive)
 
-By default the table is shown in USD. To display it in another currency
-without any network access, add two optional top-level keys to the config:
+By default the non-interactive table and any export are in USD. There are
+two ways to display another currency instead; `--currency` takes
+precedence when both are set.
+
+**`--currency` (live FX rate).** Pass `--currency GBP` (or any other
+currency code) to have the whole table — local and hosted rows alike —
+converted at display time using a live exchange rate, matching what the
+interactive flow does when you choose GBP:
+
+```bash
+python llm_cost_comparison.py --non-interactive --config example_config.json \
+    --currency GBP --export json --export-path out.json
+```
+
+All cost math is still done internally in USD (hosted pricing is
+USD-denominated); the conversion is applied once to the final figures. If
+the FX lookup fails (no network, unknown currency code), the run falls back
+to USD with a warning on stderr rather than failing — the numbers are still
+correct, just in the wrong unit. `--currency` is ignored in interactive
+mode, which asks about currency as part of the local-setup flow.
+
+**Config keys (static rate, no network).** If `--currency` isn't given (or
+is left at the default `USD`), you can instead display another currency
+without any network access by adding two optional top-level keys to the
+config:
 
 ```json
 {

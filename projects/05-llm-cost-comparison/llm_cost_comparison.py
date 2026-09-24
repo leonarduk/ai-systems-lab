@@ -3034,7 +3034,10 @@ def _resolve_workload_scenarios(config: dict) -> list:
 
 
 def run_non_interactive(
-    config_path: Path, export_fmt: Optional[str], export_path: Optional[Path]
+    config_path: Path,
+    export_fmt: Optional[str],
+    export_path: Optional[Path],
+    currency: str = "USD",
 ) -> int:
     """Run the comparison from a JSON config instead of interactive prompts.
 
@@ -3068,7 +3071,18 @@ def run_non_interactive(
     directory (not the process's working directory) so the example config
     works regardless of where the script is invoked from.
 
-    Optional top-level keys:
+    ``currency`` (the function argument, normally populated from the
+    ``--currency`` CLI flag) selects the display currency for the rendered
+    table and any export. All cost math is done in USD (hosted pricing is
+    USD-denominated); a non-USD currency is applied at display time by
+    fetching a live FX rate and converting every row once (see
+    ``convert_rows_currency``). If the rate can't be fetched, the run falls
+    back to USD with a warning rather than failing — the numbers are still
+    correct, just in the wrong unit.
+
+    Optional top-level config keys offer a network-free alternative to
+    ``--currency``, and are only used when ``--currency`` is absent (or
+    ``"USD"``):
       * ``"currency"`` — three-letter display currency code (default
         ``"USD"``). ``"USD"`` and ``"GBP"`` print their symbol; any other
         valid code prints verbatim (``"EUR 12.34"``).
@@ -3104,30 +3118,30 @@ def run_non_interactive(
     pricing = load_pricing(pricing_path)
     selected = set(config["selected_models"]) if "selected_models" in config else None
 
-    display_currency = config.get("currency", "USD")
+    config_currency = config.get("currency", "USD")
     if (
-        not isinstance(display_currency, str)
-        or len(display_currency) != 3
-        or not display_currency.isalpha()
+        not isinstance(config_currency, str)
+        or len(config_currency) != 3
+        or not config_currency.isalpha()
     ):
         # A three-letter ISO 4217 code, not any non-empty string. render_table
         # prints an unknown code verbatim as its own symbol ("EUR 12.34"),
         # which reads fine for a real code and badly for "pounds" or "£".
         raise ConfigError(
             "currency must be a three-letter currency code (e.g. 'USD', "
-            f"'GBP'), got {display_currency!r}"
+            f"'GBP'), got {config_currency!r}"
         )
-    display_currency = display_currency.upper()
-    static_fx_rate = config.get("static_fx_rate")
-    if display_currency != "USD":
+    config_currency = config_currency.upper()
+    config_static_fx_rate = config.get("static_fx_rate")
+    if config_currency != "USD":
         if (
-            not isinstance(static_fx_rate, (int, float))
-            or isinstance(static_fx_rate, bool)
-            or static_fx_rate <= 0
+            not isinstance(config_static_fx_rate, (int, float))
+            or isinstance(config_static_fx_rate, bool)
+            or config_static_fx_rate <= 0
         ):
             raise ConfigError(
                 "static_fx_rate must be a positive number when currency is not "
-                f"'USD' (got {static_fx_rate!r})"
+                f"'USD' (got {config_static_fx_rate!r})"
             )
 
     local_cfg = config["local"]
@@ -3216,6 +3230,44 @@ def run_non_interactive(
             f"local.mode must be 'own', 'existing', or 'rent', got {mode!r}"
         )
 
+    # Resolve the requested display currency once, up front: fetching the FX
+    # rate is a network call, so doing it here (rather than per-scenario)
+    # keeps a multi-scenario run to a single lookup and lets a failure fall
+    # back to USD cleanly before any rows are built.
+    #
+    # Precedence: an explicit non-USD --currency (the ``currency`` argument)
+    # wins over the config file's "currency"/"static_fx_rate" keys, since
+    # it's the more direct request. --currency fetches a live FX rate; the
+    # config keys use a caller-supplied static rate (no network, no
+    # latency, no failure point) and only take effect when --currency
+    # wasn't given (or was left at the default "USD").
+    display_currency = "USD"
+    usd_per_target = None
+    if currency and currency.upper() != "USD":
+        target = currency.upper()
+        # Ask for the rate in the direction convert_rows_currency wants:
+        # USD *per* target unit, so ~1.27 for GBP. fetch_fx_rate(a, b)
+        # returns b per a, so the target comes first — the same call the
+        # interactive path makes as fetch_fx_rate("GBP", "USD"). Asking
+        # for USD→GBP instead returns ~0.79, and dividing by that scales
+        # costs up by 1.27 rather than down: a $300 row printed as £380.
+        rate = fetch_fx_rate(target, "USD")
+        if rate is not None and rate > 0:
+            display_currency = target
+            usd_per_target = rate
+        else:
+            print(
+                f"Warning: could not fetch a {target}→USD exchange rate — "
+                "falling back to USD.",
+                file=sys.stderr,
+            )
+    elif config_currency != "USD":
+        # config_static_fx_rate is how many units of config_currency one
+        # USD buys (0.79 => $100 shows as £79). convert_rows_currency wants
+        # USD per unit, the reciprocal.
+        display_currency = config_currency
+        usd_per_target = 1.0 / config_static_fx_rate
+
     multiple = len(scenarios) > 1
     warn_unknown_model_keys(pricing, selected)
     scenario_labels_rows = []
@@ -3240,15 +3292,8 @@ def run_non_interactive(
         rows = [build_local(effective_workload)] + build_hosted_rows(
             effective_workload, pricing, selected
         )
-        if display_currency != "USD":
-            # static_fx_rate is how many units of display_currency one USD
-            # buys (0.79 => $100 shows as £79), which is how anyone reading
-            # "USD->GBP rate" would write it. convert_rows_currency takes
-            # the opposite — USD per unit — because the interactive path
-            # feeds it a GBP->USD quote straight from the FX lookup. Hence
-            # the reciprocal. Passing the rate through unconverted made
-            # $300 render as £375 instead of £237.
-            rows = convert_rows_currency(rows, 1.0 / static_fx_rate)
+        if usd_per_target is not None:
+            rows = convert_rows_currency(rows, usd_per_target)
         scenario_labels_rows.append((label, rows))
 
     if scaled_scenarios:
@@ -3326,6 +3371,17 @@ def main(argv: Optional[list] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--currency",
+        default="USD",
+        help=(
+            "Output currency for --non-interactive mode (e.g. USD, GBP). "
+            "Non-USD values require network access to fetch a live exchange "
+            "rate; if the lookup fails, the run falls back to USD with a "
+            "warning. Ignored in interactive mode, which asks about currency "
+            "as part of the local-setup flow."
+        ),
+    )
+    parser.add_argument(
         "--update-pricing",
         action="store_true",
         help="Fetch latest DeepSeek pricing from the official API docs and exit.",
@@ -3354,7 +3410,12 @@ def main(argv: Optional[list] = None) -> int:
         if args.export and not args.export_path:
             args.export_path = Path(f"cost_comparison.{args.export}")
         try:
-            return run_non_interactive(args.config, args.export, args.export_path)
+            return run_non_interactive(
+                args.config,
+                args.export,
+                args.export_path,
+                currency=args.currency,
+            )
         except ConfigError as exc:
             print(f"Config error: {exc}", file=sys.stderr)
             return 1
@@ -3363,6 +3424,12 @@ def main(argv: Optional[list] = None) -> int:
         print(
             "Note: --export/--export-path only apply to --non-interactive mode; "
             "interactive mode asks about exporting at the end.",
+            file=sys.stderr,
+        )
+    if args.currency and args.currency.upper() != "USD":
+        print(
+            "Note: --currency only applies to --non-interactive mode; "
+            "interactive mode asks about currency as part of the local-setup flow.",
             file=sys.stderr,
         )
 
