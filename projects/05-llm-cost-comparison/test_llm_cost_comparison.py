@@ -9,6 +9,7 @@ interactive functions are thin wrappers over the tested pure functions.
 from __future__ import annotations
 
 import json
+import os
 import time
 import subprocess
 import sys
@@ -2140,6 +2141,55 @@ def test_main_non_interactive_export_without_path_defaults(
     )
     assert exit_code == 0
     assert (tmp_path / "cost_comparison.csv").exists()
+
+
+def test_version_attribute_is_an_alias_not_a_second_literal():
+    # "is a non-empty string" would pass for any hardcoded value, which is
+    # exactly what must not be here: a literal alongside pyproject.toml
+    # goes stale the first time someone releases without editing both.
+    # Identity, not equality, so the two names cannot drift apart.
+    assert m.__version__ is m.VERSION
+    assert isinstance(m.__version__, str) and m.__version__
+
+
+def test_version_comes_from_package_metadata_or_the_source_sentinel():
+    # Either the installed distribution's version, or the sentinel used
+    # when running from a checkout. Anything else means someone reinstated
+    # a literal.
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as pkg_version
+
+    try:
+        expected = pkg_version("llm-cost-comparison")
+    except PackageNotFoundError:
+        expected = "0.0.0+unknown"
+    assert m.VERSION == expected
+
+
+def test_main_version_flag_prints_version_and_exits_zero(capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        m.main(["--version"])
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    # argparse's %(prog)s prefix names the program alongside the number. A
+    # bare version string is ambiguous the moment it is pasted into a bug
+    # report, which is the use case the issue names. prog is derived from
+    # sys.argv[0], so it is pinned against that rather than hardcoded —
+    # under pytest it is the runner's name, not the script's.
+    expected_prog = os.path.basename(sys.argv[0])
+    assert out.strip() == f"{expected_prog} {m.__version__}"
+    assert out.strip() != m.__version__
+
+
+def test_main_help_flag_still_works(capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        m.main(["--help"])
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    # Existing flags must still be advertised.
+    assert "--version" in out
+    assert "--non-interactive" in out
+    assert "--update-pricing" in out
 
 
 def test_main_non_interactive_config_error_reports_and_exits_nonzero(

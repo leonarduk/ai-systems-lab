@@ -57,6 +57,12 @@ try:
 except PackageNotFoundError:
     VERSION = "0.0.0+unknown"
 
+# The conventional module attribute, so `module.__version__` works for the
+# tooling that looks for it. An alias, not a second literal: a hardcoded
+# string here would go stale against pyproject.toml the first time anyone
+# released without remembering to edit both.
+__version__ = VERSION
+
 # Sent when identifying this script honestly to a public API. Derived from
 # VERSION so it cannot drift from the release: a User-Agent that misstates
 # its version is worse than none, because an operator diagnosing a client
