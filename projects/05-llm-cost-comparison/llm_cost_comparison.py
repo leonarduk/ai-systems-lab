@@ -1627,10 +1627,17 @@ def _resolve_fx_rate_provider_order() -> tuple:
 
     Reads ``FX_RATE_PROVIDER_ORDER`` (a comma-separated list of provider keys
     such as ``"exchangerate.host,frankfurter.dev"``) and returns the matching
-    subset of ``DEFAULT_FX_RATE_PROVIDER_ORDER`` in the requested order.
-    Unknown keys are silently dropped; if the result is empty (unset env,
-    empty string, or only typos), the full default order is returned so
-    behaviour is unchanged from before this env var existed.
+    subset of ``DEFAULT_FX_RATE_PROVIDER_ORDER`` in the requested order, with
+    duplicate keys collapsed (first occurrence wins) so a repeated key isn't
+    tried twice at another provider's expense.
+
+    Whoever sets this variable is usually already fighting an FX lookup that
+    failed for some other reason — a typo here shouldn't leave them silently
+    back on the default order with no indication their override did nothing.
+    So unknown keys are dropped with a warning naming the offending keys and
+    the valid ones, and if every key is unknown (or the env var is unset or
+    empty), the full default order is used, also with a warning in the
+    unset/empty case suppressed (that's expected, not a misconfiguration).
 
     The result is cached for the lifetime of the process (``lru_cache`` with
     no arguments), so repeated ``fetch_fx_rate()`` calls don't re-read and
@@ -1640,8 +1647,26 @@ def _resolve_fx_rate_provider_order() -> tuple:
     """
     raw = os.environ.get("FX_RATE_PROVIDER_ORDER", "")
     requested = [key.strip().lower() for key in raw.split(",") if key.strip()]
-    resolved = tuple(key for key in requested if key in FX_RATE_PROVIDER_TEMPLATES)
-    return resolved or DEFAULT_FX_RATE_PROVIDER_ORDER
+    deduped = tuple(dict.fromkeys(requested))
+    valid = tuple(key for key in deduped if key in FX_RATE_PROVIDER_TEMPLATES)
+    unknown = [key for key in deduped if key not in FX_RATE_PROVIDER_TEMPLATES]
+
+    if unknown:
+        print(
+            f"Warning: ignoring unknown FX_RATE_PROVIDER_ORDER key(s) "
+            f"{unknown!r}; valid keys are "
+            f"{list(FX_RATE_PROVIDER_TEMPLATES)!r}.",
+            file=sys.stderr,
+        )
+    if requested and not valid:
+        print(
+            "Warning: FX_RATE_PROVIDER_ORDER contained no valid provider "
+            "keys; falling back to the default provider order "
+            f"{list(DEFAULT_FX_RATE_PROVIDER_ORDER)!r}.",
+            file=sys.stderr,
+        )
+
+    return valid or DEFAULT_FX_RATE_PROVIDER_ORDER
 
 
 def _fetch_yahoo_fx_rate(from_currency: str, to_currency: str, timeout: float) -> float:

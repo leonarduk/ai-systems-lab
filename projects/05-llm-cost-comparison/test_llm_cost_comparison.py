@@ -2453,6 +2453,26 @@ def test_resolve_fx_rate_provider_order_drops_unknown_keys(monkeypatch):
     assert m._resolve_fx_rate_provider_order() == ("frankfurter.app",)
 
 
+def test_resolve_fx_rate_provider_order_warns_on_unknown_keys(monkeypatch, capsys):
+    monkeypatch.setenv("FX_RATE_PROVIDER_ORDER", "not-a-real-provider,frankfurter.app")
+    m._resolve_fx_rate_provider_order.cache_clear()
+    m._resolve_fx_rate_provider_order()
+    err = capsys.readouterr().err
+    assert "not-a-real-provider" in err
+    assert "frankfurter.app" not in err.split("valid keys are")[0]
+
+
+def test_resolve_fx_rate_provider_order_dedupes_repeated_keys(monkeypatch):
+    monkeypatch.setenv(
+        "FX_RATE_PROVIDER_ORDER", "frankfurter.dev,exchangerate.host,frankfurter.dev"
+    )
+    m._resolve_fx_rate_provider_order.cache_clear()
+    assert m._resolve_fx_rate_provider_order() == (
+        "frankfurter.dev",
+        "exchangerate.host",
+    )
+
+
 def test_resolve_fx_rate_provider_order_falls_back_when_all_keys_unknown(
     monkeypatch,
 ):
@@ -2461,10 +2481,27 @@ def test_resolve_fx_rate_provider_order_falls_back_when_all_keys_unknown(
     assert m._resolve_fx_rate_provider_order() == m.DEFAULT_FX_RATE_PROVIDER_ORDER
 
 
+def test_resolve_fx_rate_provider_order_warns_when_all_keys_unknown(
+    monkeypatch, capsys
+):
+    monkeypatch.setenv("FX_RATE_PROVIDER_ORDER", "typo1,typo2")
+    m._resolve_fx_rate_provider_order.cache_clear()
+    m._resolve_fx_rate_provider_order()
+    err = capsys.readouterr().err
+    assert "falling back to the default provider order" in err
+
+
 def test_resolve_fx_rate_provider_order_falls_back_when_env_empty(monkeypatch):
     monkeypatch.setenv("FX_RATE_PROVIDER_ORDER", "")
     m._resolve_fx_rate_provider_order.cache_clear()
     assert m._resolve_fx_rate_provider_order() == m.DEFAULT_FX_RATE_PROVIDER_ORDER
+
+
+def test_resolve_fx_rate_provider_order_no_warning_when_env_unset(monkeypatch, capsys):
+    monkeypatch.delenv("FX_RATE_PROVIDER_ORDER", raising=False)
+    m._resolve_fx_rate_provider_order.cache_clear()
+    m._resolve_fx_rate_provider_order()
+    assert capsys.readouterr().err == ""
 
 
 def test_resolve_fx_rate_provider_order_is_cached(monkeypatch):
