@@ -3019,6 +3019,7 @@ def _benchmark_setup(monkeypatch, base_url, backend="openai"):
         "Look up your current unit rate live": "n",
         "Do you pay for electricity in GBP": "n",
         "Electricity rate": "0.15",
+        "Use this electricity rate?": "y",
         "Extra power draw while generating": "",
         "Total system power draw while running": "",
     }
@@ -3873,6 +3874,229 @@ def test_run_non_interactive_raises_config_error_for_mapping_shaped_workload(
 # --------------------------------------------------------------------------
 # run_non_interactive with multiple preset scenarios (per-scenario export)
 # --------------------------------------------------------------------------
+
+
+# --------------------------------------------------------------------------
+# --use-defaults fast-path re-runs GPU detection / throughput benchmark
+# --------------------------------------------------------------------------
+
+
+_SAVED_TARGET = {
+    "backend": "ollama",
+    "base_url": "http://localhost:11434",
+    "model": "llama3",
+}
+
+
+def _no_stdin(monkeypatch):
+    """Fail the test if anything reads stdin.
+
+    --use-defaults is the fast path. A refresh that asks which backend,
+    which URL and which model is four questions the flag exists to avoid,
+    so "does not prompt" is part of the contract, not an incidental.
+    """
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda prompt="": pytest.fail(f"--use-defaults prompted: {prompt!r}"),
+    )
+
+
+def test_refresh_measurements_for_defaults_uses_fresh_benchmark(monkeypatch):
+    # The saved tokens_per_sec is stale; the fresh benchmark must win.
+    _no_stdin(monkeypatch)
+    settings = {"tokens_per_sec": 5.0, "benchmark_target": dict(_SAVED_TARGET)}
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: _stub_gpu_info())
+    monkeypatch.setattr(m, "average_gpu_power_w", lambda *a, **k: 40.0)
+    monkeypatch.setattr(m, "benchmark_ollama", lambda base_url, model: 123.0)
+    monkeypatch.setattr(
+        m, "measure_gpu_power_during", lambda func, **k: (func(), 380.0)
+    )
+
+    tokens_per_sec, gpu_info, measured_load_power_w = (
+        m._refresh_measurements_for_defaults(settings)
+    )
+    assert tokens_per_sec == pytest.approx(123.0)
+    assert gpu_info is not None
+    assert measured_load_power_w == pytest.approx(380.0)
+
+
+def test_refresh_measurements_reuses_the_saved_endpoint(monkeypatch):
+    # The endpoint comes from the saved settings, not from the user. If it
+    # did not, the fast path would have to ask for it.
+    _no_stdin(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: None)
+    monkeypatch.setattr(
+        m,
+        "benchmark_openai_compatible",
+        lambda base_url, model: seen.update(url=base_url, model=model) or 50.0,
+    )
+    monkeypatch.setattr(
+        m, "benchmark_ollama", lambda *a, **k: pytest.fail("wrong backend")
+    )
+    monkeypatch.setattr(m, "measure_gpu_power_during", lambda func, **k: (func(), None))
+
+    m._refresh_measurements_for_defaults(
+        {
+            "tokens_per_sec": 5.0,
+            "benchmark_target": {
+                "backend": "openai",
+                "base_url": "http://gpu-box:8000/v1",
+                "model": "qwen",
+            },
+        }
+    )
+    assert seen == {"url": "http://gpu-box:8000/v1", "model": "qwen"}
+
+
+def test_refresh_measurements_keeps_a_hand_entered_throughput(monkeypatch, capsys):
+    # No saved endpoint means the previous run never benchmarked one — the
+    # user declined, or typed the figure in. A hand-entered number is not a
+    # stale measurement, so re-measuring is neither possible nor wanted.
+    _no_stdin(monkeypatch)
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: None)
+    monkeypatch.setattr(
+        m, "benchmark_ollama", lambda *a, **k: pytest.fail("nothing to benchmark")
+    )
+    tokens_per_sec, gpu_info, power = m._refresh_measurements_for_defaults(
+        {"tokens_per_sec": 7.5}
+    )
+    assert tokens_per_sec == pytest.approx(7.5)
+    assert gpu_info is None and power is None
+    assert "No saved benchmark endpoint" in capsys.readouterr().out
+
+
+def test_refresh_measurements_falls_back_to_saved_on_benchmark_failure(
+    monkeypatch, capsys
+):
+    # When the endpoint is saved but unreachable, the saved value is used
+    # and the script says so rather than silently replaying it.
+    _no_stdin(monkeypatch)
+    settings = {"tokens_per_sec": 7.5, "benchmark_target": dict(_SAVED_TARGET)}
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: None)
+    monkeypatch.setattr(
+        m,
+        "benchmark_ollama",
+        lambda base_url, model: (_ for _ in ()).throw(OSError("connection refused")),
+    )
+    monkeypatch.setattr(m, "measure_gpu_power_during", lambda func, **k: (func(), None))
+
+    tokens_per_sec, gpu_info, measured_load_power_w = (
+        m._refresh_measurements_for_defaults(settings)
+    )
+    assert tokens_per_sec == pytest.approx(7.5)
+    assert gpu_info is None
+    assert measured_load_power_w is None
+    out = capsys.readouterr().out
+    assert "connection refused" in out
+    assert "using saved throughput" in out.lower()
+
+
+def test_run_interactive_use_defaults_reruns_benchmark(
+    tmp_path: Path, monkeypatch, capsys
+):
+    # End-to-end: --use-defaults must not simply replay the saved
+    # tokens_per_sec — it must re-run the benchmark and use the fresh
+    # value, without asking anything.
+    saved = {
+        "mode": "rent",
+        "tokens_per_sec": 5.0,
+        "hourly_rate": 2.5,
+        "benchmark_target": dict(_SAVED_TARGET),
+        "workload_preset": "casual",
+        "selected_models": None,
+        "last_run_at": "2020-01-01T00:00:00+00:00",
+    }
+    last_run_path = tmp_path / ".last_run.json"
+    last_run_path.write_text(json.dumps(saved), encoding="utf-8")
+    # load_last_run's path default is bound at definition, so rebinding
+    # m.DEFAULT_LAST_RUN_PATH does nothing — the original test did that and
+    # therefore never entered the fast path at all, falling through to the
+    # full interactive flow and passing on its output instead.
+    monkeypatch.setattr(
+        m,
+        "load_last_run",
+        lambda *a, **k: json.loads(last_run_path.read_text(encoding="utf-8")),
+    )
+    _no_stdin(monkeypatch)
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: None)
+    monkeypatch.setattr(m, "benchmark_ollama", lambda base_url, model: 99.0)
+    monkeypatch.setattr(m, "measure_gpu_power_during", lambda func, **k: (func(), None))
+    monkeypatch.setattr(m, "prompt_yes_no", lambda prompt, default=True: False)
+
+    exit_code = m.run_interactive(use_defaults=True)
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "Measured throughput: 99.0 tokens/sec" in out
+    # The stale saved figure must not be what got used.
+    assert "5.0 tokens/sec" not in out
+
+
+@pytest.mark.parametrize(
+    "mode_answer, expected_mode, extra_answers",
+    [
+        ("rent", "rent", {"Rented GPU hourly rate": "2.5"}),
+        # The prompt offers existing/buying/rent; "buying" is stored as
+        # mode "own". Answering "own" loops the prompt forever.
+        (
+            "buying",
+            "own",
+            {
+                "Hardware cost (USD)": "3600",
+                "Expected hardware lifetime": "3",
+                "Power draw under load": "450",
+            },
+        ),
+        ("existing", "existing", {}),
+    ],
+)
+def test_interactive_setup_records_the_benchmark_target(
+    monkeypatch, capsys, mode_answer, expected_mode, extra_answers
+):
+    # --use-defaults can only re-benchmark an endpoint the previous run
+    # wrote down, and nothing persisted backend/base_url/model before.
+    # Every hardware mode builds its own settings dict, so all three have
+    # to carry it — dropping it from one would otherwise go unnoticed.
+    monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: None)
+    monkeypatch.setattr(m, "average_gpu_power_w", lambda *a, **k: None)
+    monkeypatch.setattr(m, "discover_local_models", lambda backend, url: ["llama3"])
+    monkeypatch.setattr(m, "benchmark_ollama", lambda base_url, model: 42.0)
+    monkeypatch.setattr(m, "measure_gpu_power_during", lambda func, **k: (func(), None))
+    monkeypatch.setattr(
+        m, "fetch_octopus_agile_rate", lambda *a, **k: pytest.fail("network call")
+    )
+    monkeypatch.setattr(m, "fetch_fx_rate", lambda *a, **k: pytest.fail("network call"))
+    answers = {
+        "Skip benchmark": "n",
+        "auto-detect an NVIDIA GPU": "n",
+        "benchmark a running local model endpoint": "y",
+        "Backend": "ollama",
+        "Base URL": "http://gpu-box:11434",
+        "Model name as served locally": "llama3",
+        "Hardware mode": mode_answer,
+        "Look up your current unit rate live": "n",
+        "Do you pay for electricity in GBP": "n",
+        "Electricity rate": "0.15",
+        "Use this electricity rate?": "y",
+        "Extra power draw while generating": "",
+        "Total system power draw while running": "",
+        **extra_answers,
+    }
+
+    def fake_input(prompt: str = "") -> str:
+        for fragment, answer in answers.items():
+            if fragment in prompt:
+                return answer
+        pytest.fail(f"unscripted prompt: {prompt!r}")
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    *_, settings = m.interactive_local_setup()
+    assert settings["mode"] == expected_mode
+    assert settings["benchmark_target"] == {
+        "backend": "ollama",
+        "base_url": "http://gpu-box:11434",
+        "model": "llama3",
+    }
 
 
 def test_run_non_interactive_accepts_valid_multi_scenario_config(
