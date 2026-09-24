@@ -638,22 +638,38 @@ def test_build_hosted_rows_raises_config_error_on_malformed_pricing():
 
 
 @pytest.mark.parametrize(
-    "bad_value",
+    "bad_value, expected",
     [
-        None,  # missing
-        0,  # zero
-        -1.0,  # negative
-        "1.0",  # non-numeric
-        float("nan"),  # NaN
-        float("inf"),  # inf
-        True,  # bool (int subclass)
+        # Absent or not a number at all: the file itself is malformed.
+        (None, r"pricing model 'claude/opus-5' is missing a numeric input_per_million"),
+        (
+            "1.0",
+            r"pricing model 'claude/opus-5' is missing a numeric input_per_million",
+        ),
+        # bool is an int subclass, so True would otherwise read as a $1 rate.
+        (True, r"pricing model 'claude/opus-5' is missing a numeric input_per_million"),
+        # Present and numeric, but not a usable rate. Reporting these as
+        # "missing" would send the user looking for the wrong problem.
+        (0, r"input_per_million for model 'claude/opus-5' must be a positive number"),
+        (
+            -1.0,
+            r"input_per_million for model 'claude/opus-5' must be a positive number",
+        ),
+        (
+            float("nan"),
+            r"input_per_million for model 'claude/opus-5' must be a positive number",
+        ),
+        (
+            float("inf"),
+            r"input_per_million for model 'claude/opus-5' must be a positive number",
+        ),
     ],
 )
-def test_build_hosted_rows_direct_call_rejects_invalid_price(bad_value):
+def test_build_hosted_rows_direct_call_rejects_invalid_price(bad_value, expected):
     # build_hosted_rows is called directly here with a hand-constructed
     # pricing dict that bypassed load_pricing. The guard must still raise
-    # ConfigError with the established message rather than silently
-    # computing a cost from an invalid price.
+    # ConfigError, and the message must name which of the two distinct
+    # mistakes was made rather than silently computing a cost.
     pricing = {
         "providers": {
             "claude": {
@@ -668,10 +684,7 @@ def test_build_hosted_rows_direct_call_rejects_invalid_price(bad_value):
         }
     }
     w = m.Workload(1000, 500, 300)
-    with pytest.raises(
-        m.ConfigError,
-        match=r"pricing model 'claude/opus-5' is missing a numeric input_per_million",
-    ):
+    with pytest.raises(m.ConfigError, match=expected):
         m.build_hosted_rows(w, pricing)
 
 
@@ -692,7 +705,7 @@ def test_build_hosted_rows_direct_call_rejects_invalid_output_price():
     w = m.Workload(1000, 500, 300)
     with pytest.raises(
         m.ConfigError,
-        match=r"pricing model 'claude/opus-5' is missing a numeric output_per_million",
+        match=r"output_per_million for model 'claude/opus-5' must be a positive number",
     ):
         m.build_hosted_rows(w, pricing)
 
@@ -1104,6 +1117,185 @@ def test_load_pricing_tolerates_extra_top_level_keys(tmp_path: Path):
     pricing = m.load_pricing(pricing_path)
     assert pricing["as_of"] == "2026-01-01"
     assert "claude" in pricing["providers"]
+
+
+@pytest.mark.parametrize("bad_value", [0, -5, 0.0, -0.01])
+def test_load_pricing_rejects_nonpositive_price(tmp_path: Path, bad_value):
+    bad_path = tmp_path / "pricing.json"
+    bad_path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "claude": {
+                        "models": {
+                            "opus-5": {
+                                "display_name": "Claude Opus 5",
+                                "input_per_million": bad_value,
+                                "output_per_million": 25.0,
+                            }
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(m.ConfigError, match="input_per_million"):
+        m.load_pricing(bad_path)
+
+
+def test_load_pricing_rejects_nonpositive_output_price(tmp_path: Path):
+    bad_path = tmp_path / "pricing.json"
+    bad_path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "claude": {
+                        "models": {
+                            "opus-5": {
+                                "display_name": "Claude Opus 5",
+                                "input_per_million": 5.0,
+                                "output_per_million": 0,
+                            }
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(m.ConfigError, match="output_per_million"):
+        m.load_pricing(bad_path)
+
+
+def test_load_pricing_rejects_non_numeric_price(tmp_path: Path):
+    bad_path = tmp_path / "pricing.json"
+    bad_path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "claude": {
+                        "models": {
+                            "opus-5": {
+                                "display_name": "Claude Opus 5",
+                                "input_per_million": "5.0",
+                                "output_per_million": 25.0,
+                            }
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(m.ConfigError, match="input_per_million"):
+        m.load_pricing(bad_path)
+
+
+def test_load_pricing_accepts_small_positive_price(tmp_path: Path):
+    # A tiny-but-positive rate (e.g. a cheap cached-input tier) must not be
+    # rejected — only zero, negative, or non-numeric values are invalid.
+    good_path = tmp_path / "pricing.json"
+    good_path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "deepseek": {
+                        "models": {
+                            "flash-cache-hit": {
+                                "display_name": "DeepSeek Flash (cached)",
+                                "input_per_million": 0.0001,
+                                "output_per_million": 0.28,
+                            }
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    pricing = m.load_pricing(good_path)
+    assert pricing["providers"]["deepseek"]["models"]["flash-cache-hit"][
+        "input_per_million"
+    ] == pytest.approx(0.0001)
+
+
+@pytest.mark.parametrize(
+    "bad_value", [None, "1.0", True, 0, -1.0, float("nan"), float("inf")]
+)
+def test_load_pricing_and_build_hosted_rows_report_the_same_error(
+    tmp_path: Path, bad_value
+):
+    # _validate_pricing_model's docstring claims load_pricing and
+    # build_hosted_rows "enforce identical semantics and raise the same
+    # ConfigError message". Before this PR that was not true of
+    # load_pricing, which validated nothing at all. Assert the claim
+    # rather than trusting it, for every rejected shape.
+    pricing = {
+        "providers": {
+            "claude": {
+                "models": {
+                    "opus-5": {
+                        "display_name": "Claude Opus 5",
+                        "input_per_million": bad_value,
+                        "output_per_million": 25.0,
+                    }
+                }
+            }
+        }
+    }
+    # NaN/inf are not JSON, but json.dumps emits them and json.load reads
+    # them back, which is exactly how such a file reaches load_pricing.
+    path = tmp_path / "pricing.json"
+    path.write_text(json.dumps(pricing), encoding="utf-8")
+
+    with pytest.raises(m.ConfigError) as from_load:
+        m.load_pricing(path)
+    with pytest.raises(m.ConfigError) as from_rows:
+        m.build_hosted_rows(m.Workload(1000, 500, 300), pricing)
+
+    assert str(from_load.value) == str(from_rows.value)
+
+
+def test_load_pricing_validates_every_model_not_just_the_first(tmp_path: Path):
+    # iter_models walks all providers and models; a bad rate buried behind
+    # good ones must still be caught, or validating at load time buys
+    # nothing for a real multi-provider file.
+    path = tmp_path / "pricing.json"
+    path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "claude": {
+                        "models": {
+                            "opus-5": {
+                                "input_per_million": 5.0,
+                                "output_per_million": 25.0,
+                            }
+                        }
+                    },
+                    "deepseek": {
+                        "models": {
+                            "chat": {
+                                "input_per_million": 0.27,
+                                "output_per_million": 1.1,
+                            },
+                            "reasoner": {
+                                "input_per_million": 0.55,
+                                "output_per_million": -2.19,
+                            },
+                        }
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        m.ConfigError,
+        match=r"output_per_million for model 'deepseek/reasoner' must be a positive",
+    ):
+        m.load_pricing(path)
 
 
 def test_load_pricing_warns_but_loads_when_as_of_missing(tmp_path: Path, capsys):
