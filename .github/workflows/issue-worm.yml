@@ -36,10 +36,13 @@ jobs:
     permissions:
       contents: read
     steps:
-      # @v1 floats to each newest release of the action, so fixes arrive
-      # without editing this file. It only becomes v2 for a breaking change
-      # to the action's inputs.
-      - uses: leonarduk/issue-worm@v1
+      # Pinned to the commit the v1 tag pointed to at review time, rather
+      # than the floating tag, since this step is granted a repo-scoped
+      # WORM_PAT secret: if the v1 tag were ever moved to different code,
+      # a floating reference would run that code with broad repo access.
+      # Bump the SHA (and this comment) when intentionally taking a new
+      # release of the action.
+      - uses: leonarduk/issue-worm@ae6bed88b3c167331d112e09a419307dc0411593 # v1
         with:
           issue: ${{ github.event.issue.number }}
           github-token: ${{ secrets.WORM_PAT }}
