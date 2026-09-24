@@ -2969,6 +2969,7 @@ def _benchmark_setup(monkeypatch, base_url, backend="openai"):
         "Look up your current unit rate live": "n",
         "Do you pay for electricity in GBP": "n",
         "Electricity rate": "0.15",
+        "Use this electricity rate?": "y",
         "Extra power draw while generating": "",
         "Total system power draw while running": "",
     }
@@ -4026,6 +4027,7 @@ def test_interactive_setup_records_the_benchmark_target(
         "Look up your current unit rate live": "n",
         "Do you pay for electricity in GBP": "n",
         "Electricity rate": "0.15",
+        "Use this electricity rate?": "y",
         "Extra power draw while generating": "",
         "Total system power draw while running": "",
         **extra_answers,
