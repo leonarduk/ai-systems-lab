@@ -362,9 +362,13 @@ DEFERRED_IMPORT_MARKER = "deferred-import:"
 def _function_local_imports(source: str) -> list:
     """Every import inside a function, minus the deliberately deferred ones.
 
-    Exempt if the import sits under a ``try`` whose handlers catch
-    ``ImportError`` (the optional-dependency idiom), or if its line
-    carries a ``# deferred-import: <reason>`` comment.
+    Exempt if the import sits under a ``try`` whose handlers catch exactly
+    ``ImportError`` (bare ``except ImportError:`` or a tuple such as
+    ``except (ImportError, ModuleNotFoundError):`` containing it) — the
+    optional-dependency idiom — or if its line carries a
+    ``# deferred-import: <reason>`` comment. A bare ``except:`` or a
+    handler for some other exception type (e.g. ``except ValueError:``)
+    does NOT exempt the import: only the exact ImportError idiom does.
     """
     import ast
 
@@ -376,8 +380,7 @@ def _function_local_imports(source: str) -> list:
         if not isinstance(node, ast.Try):
             continue
         catches_import_error = any(
-            (handler.type is None)
-            or (isinstance(handler.type, ast.Name) and "Error" in handler.type.id)
+            (isinstance(handler.type, ast.Name) and handler.type.id == "ImportError")
             or (
                 isinstance(handler.type, ast.Tuple)
                 and any(
@@ -447,6 +450,40 @@ def test_the_deferred_import_escape_hatches_work():
         "        tomllib = None\n"
     )
     assert _function_local_imports(optional) == []
+
+    optional_tuple = (
+        "def f():\n"
+        "    try:\n"
+        "        import tomllib\n"
+        "    except (ImportError, ModuleNotFoundError):\n"
+        "        tomllib = None\n"
+    )
+    assert _function_local_imports(optional_tuple) == []
+
+
+def test_except_other_than_import_error_does_not_exempt_deferred_import():
+    # Regression test: the guard's job is to flag unexplained deferred
+    # imports. A handler for some *other* exception type must not be
+    # mistaken for the ImportError optional-dependency idiom just because
+    # its name happens to contain the substring "Error" — and a bare
+    # `except:` must not be treated as catching ImportError either.
+    wrong_error_type = (
+        "def f():\n"
+        "    try:\n"
+        "        import json\n"
+        "    except ValueError:\n"
+        "        json = None\n"
+    )
+    assert _function_local_imports(wrong_error_type)
+
+    bare_except = (
+        "def f():\n"
+        "    try:\n"
+        "        import json\n"
+        "    except:\n"
+        "        json = None\n"
+    )
+    assert _function_local_imports(bare_except)
 
 
 def test_hoisted_modules_are_actually_used():
