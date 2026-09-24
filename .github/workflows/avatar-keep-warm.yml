@@ -43,9 +43,15 @@ jobs:
           # the body, and `-w "%{http_code}"` prints the status code. We do
           # NOT use `-f` here so curl exits 0 even on 4xx/5xx and we can read
           # the code; the caller decides success by comparing to "200".
+          # curl's -w "%{http_code}" always prints "000" itself on any
+          # failure to get a response (connection refused, DNS failure, a
+          # malformed URL, timeout) — confirmed across all of those cases.
+          # An `|| echo "000"` fallback here would double up on that,
+          # producing "000000" whenever curl's own exit code is also
+          # non-zero (which it is exactly when it already printed "000").
           HTTP_CODE=""
           attempt() {
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 "$url" || echo "000")
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 "$url")
           }
 
           attempt
@@ -53,6 +59,9 @@ jobs:
             echo "Ping succeeded (HTTP $HTTP_CODE)"
           else
             first_code="$HTTP_CODE"
+            # Render cold starts can take 30-60s; give the app a moment to
+            # finish booting before retrying so the retry is meaningful.
+            sleep 5
             attempt
             if [ "$HTTP_CODE" = "200" ]; then
               echo "Retry succeeded (HTTP $HTTP_CODE)"

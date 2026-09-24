@@ -136,6 +136,62 @@ class TestSendMessageHappyPath:
         )
         assert "error" in json.loads(tool_message["content"])
 
+    def test_dispatch_exception_does_not_crash(self, monkeypatch):
+        """A tool implementation raising an exception must be caught and
+        converted into a structured error result, not propagated to the UI."""
+
+        def boom(name, arguments):
+            raise RuntimeError("kaboom from tool internals")
+
+        monkeypatch.setattr(llm.tools, "dispatch", boom)
+
+        tool_call = make_tool_call("call_boom", "lookup_project", {"name": "x"})
+        client = FakeClient(
+            [
+                make_response(tool_calls=[tool_call]),
+                make_response(content="recovered"),
+            ]
+        )
+
+        reply, usage = llm.send_message(
+            [{"role": "user", "content": "hi"}], "system", client=client
+        )
+
+        assert reply == "recovered"
+        tool_message = next(
+            m for m in client.calls[1]["messages"] if m["role"] == "tool"
+        )
+        payload = json.loads(tool_message["content"])
+        assert "error" in payload
+        assert "lookup_project" in payload["error"]
+
+    def test_dispatch_exception_message_is_not_leaked_to_llm(self, monkeypatch):
+        """tools.py documents that tool implementations never raise; reaching
+        this handler means one broke that contract, so its exception is
+        unvetted and may embed secrets (e.g. tools._telegram_notify's own
+        comment: the Telegram API URL carries the bot token). The raw
+        exception text must never reach the tool result fed back to the LLM."""
+
+        def boom(name, arguments):
+            raise RuntimeError("secret-token-abc123 in the request URL")
+
+        monkeypatch.setattr(llm.tools, "dispatch", boom)
+
+        tool_call = make_tool_call("call_boom", "lookup_project", {"name": "x"})
+        client = FakeClient(
+            [
+                make_response(tool_calls=[tool_call]),
+                make_response(content="recovered"),
+            ]
+        )
+
+        llm.send_message([{"role": "user", "content": "hi"}], "system", client=client)
+
+        tool_message = next(
+            m for m in client.calls[1]["messages"] if m["role"] == "tool"
+        )
+        assert "secret-token-abc123" not in tool_message["content"]
+
 
 class TestUsageAccounting:
     def test_usage_accumulated_across_rounds(self):
@@ -238,6 +294,72 @@ class TestToolLoopTermination:
 
         assert reply == llm.FRIENDLY_ERROR_MESSAGE
         assert len(client.calls) == llm.MAX_TOOL_LOOP_ITERATIONS
+
+
+class TestEmptyContentWarning:
+    def test_warns_when_content_none_and_no_tool_calls(self, caplog):
+        client = FakeClient([make_response(content=None)])
+
+        with caplog.at_level("WARNING", logger="avatar.llm"):
+            reply, usage = llm.send_message(
+                [{"role": "user", "content": "hi"}], "system", client=client
+            )
+
+        assert reply == ""
+        assert any(
+            "empty content with no tool calls" in record.message
+            for record in caplog.records
+        )
+
+    def test_warns_when_content_empty_string_and_no_tool_calls(self, caplog):
+        client = FakeClient([make_response(content="")])
+
+        with caplog.at_level("WARNING", logger="avatar.llm"):
+            reply, usage = llm.send_message(
+                [{"role": "user", "content": "hi"}], "system", client=client
+            )
+
+        assert reply == ""
+        assert any(
+            "empty content with no tool calls" in record.message
+            for record in caplog.records
+        )
+
+    def test_no_warning_when_tool_calls_present(self, caplog):
+        tool_call = make_tool_call(
+            "call_1", "record_unknown_question", {"question": "q"}
+        )
+        client = FakeClient(
+            [
+                make_response(content=None, tool_calls=[tool_call]),
+                make_response(content="done"),
+            ]
+        )
+
+        with caplog.at_level("WARNING", logger="avatar.llm"):
+            reply, usage = llm.send_message(
+                [{"role": "user", "content": "hi"}], "system", client=client
+            )
+
+        assert reply == "done"
+        assert not any(
+            "empty content with no tool calls" in record.message
+            for record in caplog.records
+        )
+
+    def test_no_warning_when_content_present(self, caplog):
+        client = FakeClient([make_response(content="Hello there.")])
+
+        with caplog.at_level("WARNING", logger="avatar.llm"):
+            reply, usage = llm.send_message(
+                [{"role": "user", "content": "hi"}], "system", client=client
+            )
+
+        assert reply == "Hello there."
+        assert not any(
+            "empty content with no tool calls" in record.message
+            for record in caplog.records
+        )
 
 
 class TestBuildClient:

@@ -186,6 +186,43 @@ class TestFindContactLeaks:
 
 
 class TestOutPathIsSafe:
+    def test_accepts_path_inside_knowledge_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(build_profile, "KNOWLEDGE_DIR", tmp_path)
+        assert build_profile._out_path_is_safe(tmp_path / "profile.md") is True
+
+    def test_accepts_knowledge_dir_itself(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(build_profile, "KNOWLEDGE_DIR", tmp_path)
+        assert build_profile._out_path_is_safe(tmp_path) is True
+
+    def test_rejects_path_outside_knowledge_dir(self, tmp_path, monkeypatch):
+        knowledge = tmp_path / "knowledge"
+        knowledge.mkdir()
+        monkeypatch.setattr(build_profile, "KNOWLEDGE_DIR", knowledge)
+        assert build_profile._out_path_is_safe(tmp_path / "elsewhere.md") is False
+
+    def test_rejects_parent_traversal(self, tmp_path, monkeypatch):
+        knowledge = tmp_path / "knowledge"
+        knowledge.mkdir()
+        monkeypatch.setattr(build_profile, "KNOWLEDGE_DIR", knowledge)
+        escape = knowledge / ".." / "escape.md"
+        assert build_profile._out_path_is_safe(escape) is False
+
+    def test_rejects_symlinked_knowledge_dir(self, tmp_path, monkeypatch):
+        # knowledge/ is a symlink pointing outside the project.
+        real_target = tmp_path / "outside"
+        real_target.mkdir()
+        link = tmp_path / "knowledge"
+        try:
+            link.symlink_to(real_target, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks not supported on this platform")
+
+        monkeypatch.setattr(build_profile, "KNOWLEDGE_DIR", link)
+
+        # Even a path that *looks* like it lives under knowledge/ must be
+        # rejected, because knowledge/ itself is a symlink.
+        assert build_profile._out_path_is_safe(link / "profile.md") is False
+
     def test_parent_of_knowledge_dir_is_rejected(self, tmp_path, monkeypatch):
         knowledge = tmp_path / "knowledge"
         knowledge.mkdir()
@@ -256,6 +293,10 @@ class TestCli:
             build_profile.main([])
 
     def test_out_path_outside_knowledge_dir_is_rejected(self, monkeypatch):
+        # This test's body was truncated in the PR that added the symlink
+        # check (missing the actual main() call, so the exception it
+        # asserts on could never fire) - restored from main, where an
+        # earlier, unrelated PR already carries the complete version.
         monkeypatch.setattr(build_profile, "PdfReader", FakePdfReader)
         with pytest.raises(SystemExit):
             build_profile.main(
@@ -272,3 +313,72 @@ class TestCli:
 
         assert exit_code == 0
         assert (tmp_path / "profile.md").exists()
+
+    def test_bare_check_without_dry_run_errors(self):
+        with pytest.raises(SystemExit):
+            build_profile.main(["--check"])
+
+
+class TestDryRun:
+    def test_dry_run_clean_file_writes_nothing(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setattr(build_profile, "PdfReader", FakePdfReader)
+        monkeypatch.setattr(build_profile, "KNOWLEDGE_DIR", tmp_path)
+        out_path = tmp_path / "profile.md"
+
+        exit_code = build_profile.main(
+            ["--pdf", "fake.pdf", "--out", str(out_path), "--dry-run"]
+        )
+
+        assert exit_code == 0
+        assert not out_path.exists()
+        captured = capsys.readouterr()
+        assert "0 redaction(s)" in captured.out
+        assert "not written" in captured.out
+
+    def test_dry_run_dirty_file_reports_redactions(self, monkeypatch, tmp_path, capsys):
+        class DirtyPage:
+            def extract_text(self):
+                return "Contact jane.doe@example.com or +44 7911 123456"
+
+        class DirtyReader:
+            def __init__(self, path):
+                self.pages = [DirtyPage()]
+
+        monkeypatch.setattr(build_profile, "PdfReader", DirtyReader)
+        monkeypatch.setattr(build_profile, "KNOWLEDGE_DIR", tmp_path)
+        out_path = tmp_path / "profile.md"
+
+        exit_code = build_profile.main(
+            ["--pdf", "fake.pdf", "--out", str(out_path), "--dry-run"]
+        )
+
+        assert exit_code == 0
+        assert not out_path.exists()
+        captured = capsys.readouterr()
+        assert "email" in captured.out
+        assert "phone number" in captured.out
+        assert "jane.doe@example.com" in captured.out
+
+    def test_dry_run_with_check_exits_nonzero_on_leak(self, monkeypatch, tmp_path):
+        # redact() and find_contact_leaks() share the same regex constants, so
+        # anything the real pipeline would flag here was already scrubbed by
+        # redact() — there's no input that survives redaction but still reads
+        # as a leak. What this test actually needs to prove is the wiring:
+        # a leak reported by find_contact_leaks() must fail --dry-run --check
+        # and must never write the output file. Stub the leak check to make
+        # that provable independent of the regexes' own behaviour.
+        monkeypatch.setattr(build_profile, "PdfReader", FakePdfReader)
+        monkeypatch.setattr(build_profile, "KNOWLEDGE_DIR", tmp_path)
+        monkeypatch.setattr(
+            build_profile,
+            "find_contact_leaks",
+            lambda text: [(1, "email", "jane.doe@example.com")],
+        )
+        out_path = tmp_path / "profile.md"
+
+        exit_code = build_profile.main(
+            ["--pdf", "fake.pdf", "--out", str(out_path), "--dry-run", "--check"]
+        )
+
+        assert exit_code == 1
+        assert not out_path.exists()
