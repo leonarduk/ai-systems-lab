@@ -3066,6 +3066,7 @@ def test_benchmark_openai_compatible_does_not_print(monkeypatch, capsys):
 def _benchmark_setup(monkeypatch, base_url, backend="openai"):
     """interactive_local_setup driven through the endpoint-benchmark branch."""
     monkeypatch.setattr(m, "detect_nvidia_gpu", lambda runner=None: None)
+    monkeypatch.setattr(m, "detect_gpu_wmi", lambda: None)
     monkeypatch.setattr(m, "average_gpu_power_w", lambda *a, **k: None)
     monkeypatch.setattr(m, "measure_gpu_power_during", lambda fn: (fn(), None))
     monkeypatch.setattr(m, "benchmark_openai_compatible", lambda *a, **k: 37.0)
@@ -3076,7 +3077,7 @@ def _benchmark_setup(monkeypatch, base_url, backend="openai"):
     monkeypatch.setattr(m, "fetch_fx_rate", lambda *a, **k: pytest.fail("network call"))
     answers = {
         "Skip benchmark": "n",
-        "auto-detect an NVIDIA GPU": "n",
+        "auto-detect your GPU": "n",
         "benchmark a running local model endpoint": "y",
         "Backend": backend,
         "Base URL": base_url,
@@ -3337,7 +3338,7 @@ def _gbp_setup(monkeypatch, answers):
     monkeypatch.setattr(m, "fetch_fx_rate", lambda *a, **k: 1.30)
     script = {
         "Skip benchmark": "y",
-        "auto-detect an NVIDIA GPU": "y",
+        "auto-detect your GPU": "y",
         "Measured or estimated tokens/sec": "40",
         "Hardware mode": "existing",
         "Look up your current unit rate live": "n",
