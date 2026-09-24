@@ -7,7 +7,8 @@
 #   curl -sSL <url> | sha256sum
 cicaid-devtools @ https://github.com/leonarduk/cicaid/releases/download/v0.3.0/cicaid_devtools-0.3.0-py3-none-any.whl#sha256=5b113d70851a58a8d6a9bbd6c1160b9569aadac486262140afedc75ecf7f179c
 
-# Tools used by .github/workflows/python-ci.yml.
+# Tools used by .github/workflows/python-ci.yml and
+# .github/workflows/cicaid-checks.yml.
 bandit
 black
 flake8

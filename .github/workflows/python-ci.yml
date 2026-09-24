@@ -33,6 +33,24 @@ jobs:
     - name: Verify shared repository automation
       run: cicaid --help
 
+    - name: Exercise cicaid run-ci-checks subcommand
+      run: |
+        # Run a real cicaid subcommand (not just --help) so that a broken
+        # subcommand, missing optional dependency, or misconfigured entry
+        # point fails the build instead of only being caught manually.
+        # `run-ci-checks --list` parses this repo's own .cicaid-checks.toml
+        # and resolves it into the check list, without running any of the
+        # underlying commands or mutating the repository, so it can't
+        # duplicate or conflict with the test/lint/security jobs it lists.
+        #
+        # `local-review` was tried first and does not exist in this
+        # release of cicaid-devtools: `cicaid --help` lists sync-issues,
+        # work-on-issue, work-on-pr, run-ci-checks, publish-pr,
+        # add-issue-to-pr, update-issue, update-prs, graphify-repos, and
+        # `cicaid local-review --check` exits 1 with "Unknown command:
+        # 'local-review'". That command would have failed on every run.
+        cicaid run-ci-checks --list
+
     - name: Verify mcp<2.0.0 pin across MCP server requirements
       run: bash .github/scripts/check_mcp_pin.sh
 
