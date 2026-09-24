@@ -33,7 +33,9 @@ import argparse
 import csv
 import functools
 import json
+import math
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -182,8 +184,6 @@ def fetch_deepseek_pricing(
     or the prices were unchanged.  Only the DeepSeek section is touched;
     other providers (Claude, etc.) are preserved as-is.
     """
-    import re
-
     try:
         req = urllib.request.Request(
             DEEPSEEK_PRICING_URL,
@@ -265,8 +265,6 @@ def fetch_deepseek_pricing(
 
 def _extract_price(text: str, pattern: str) -> Optional[float]:
     """Try a regex; return the first captured float or None."""
-    import re
-
     match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
     if match:
         try:
@@ -920,8 +918,6 @@ def _validate_pricing_model(model_info: dict, full_key: str) -> None:
     nonsensical cost, and ``NaN``/``inf`` would poison every downstream
     figure.
     """
-    import math
-
     for field in ("input_per_million", "output_per_million"):
         value = model_info.get(field)
         ok = (
@@ -1788,8 +1784,6 @@ def _validate_http_url(base_url: str) -> str:
 
     Returns the normalized URL so callers can use the scheme-prefixed form.
     """
-    import re
-
     url = base_url.strip()
     # urlsplit can't be used to detect the scheme here: it reads the "host" of
     # a bare "localhost:11434" as a scheme, which is exactly the input this
