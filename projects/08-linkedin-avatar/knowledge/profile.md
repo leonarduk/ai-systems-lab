@@ -16,10 +16,10 @@ AI & LLM: MCP tool server design · LLM integration (OpenAI, Anthropic APIs) · 
 Frameworks & Data: FastAPI · Spring Boot · Kafka · Apache Spark · microservices · event-driven architecture · REST APIs · pandas · numpy · polars · SQLAlchemy · pydantic · asyncio
 Tooling & Practice: Claude Code · TDD · CI/CD (Jenkins) · Git/GitHub · Jira · SonarQube · Snyk/SCA scanning · AGENTS.md patterns · Agile/Scrum · Sybase IQ
 ## Spoken Languages
-French (Professional Working)
+French (Professional Working) — DELF B2
 Spanish (Limited Working)
 English (Native or Bilingual)
-German (Professional Working)
+German (Professional Working) — Goethe-Zertifikat B2
 ## Certifications
 AWS Certified Generative AI Developer – Professional
 AWS Certified Solutions Architect – Professional
@@ -27,8 +27,6 @@ AWS Certified Security – Specialty
 AWS Certified Data Engineer – Associate
 AWS Certified Developer – Associate
 FRM, Financial Risk Manager
-Goethe-Zertifikat B2 (upper intermediate German)
-DELF B2 (French)
 ## Training & CPD
 AI Engineer Agentic Track: The Complete Agent & MCP Course — Udemy, Ed Donner (17h, May 2026).
 Covered LangChain, LangGraph, AutoGen, MCP server design, and agentic workflow patterns.
