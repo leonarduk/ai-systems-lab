@@ -197,7 +197,7 @@ Analyst Programmer
 November 1999 - December 2000 (1 year 2 months)
 ## Education
 City University London
-MSc (Part-time), Businesss Systems Analysis & Design · (2005 - 2008)
+MSc (Part-time), Business Systems Analysis & Design · (2005 - 2008)
 
 The University of Edinburgh
 BSc, Physics · (1993 - 1997)
