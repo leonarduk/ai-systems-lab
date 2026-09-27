@@ -50,7 +50,7 @@ Management, and JPMorgan Chase across risk platforms, distributed services,
 and cloud infrastructure — Python and Java, chosen for the job rather than a
 single-language allegiance. I hold AWS Certified Generative AI Developer –
 Professional, Solutions Architect – Professional, Security – Specialty,
-Developer Associate, and Data Engineer Associate certifications alongside an
+Data Engineer Associate, and Developer Associate certifications alongside an
 FRM — a combination that gives me both engineering depth and financial-domain
 intuition. I'm looking for a senior or staff engineering role where Python
 depth, applied AI/LLM engineering, and financial-services domain expertise
